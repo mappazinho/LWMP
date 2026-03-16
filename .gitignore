@@ -1,2 +1,10 @@
-./build
-./__pycache__
+build/
+__pycache__/
+*.pyd
+*.exp
+*.lib
+*.obj
+*.pyc
+MIDI/midi_engine_cython.c
+PARSER/midi_parser_cython.cpp
+*.json

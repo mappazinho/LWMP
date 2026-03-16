@@ -16,6 +16,7 @@ BASS_DEVICE_FREQ = 1024
 BASS_STREAM_AUTOFREE = 0x40000
 BASS_STREAM_DECODE = 0x200000
 BASS_SAMPLE_FLOAT = 0x100
+BASS_ATTRIB_VOL = 2
 BASS_MIDI_DECAYEND = 0x1000
 BASS_MIDI_NOFX = 0x2000
 BASS_MIDI_DECAYSEEK = 0x4000
@@ -135,6 +136,7 @@ class BassMidiEngine:
         self.soundfont = 0
         self.buffering_enabled = buffering
         self.total_bytes_pushed = 0
+        self.volume_level = 1.0
         
         if not bass or not bassmidi:
             raise Exception("BASS libraries not loaded.")
@@ -168,6 +170,7 @@ class BassMidiEngine:
             if not self.playback_stream:
                 print(f"Playback Stream Create Failed: {bass.BASS_ErrorGetCode()}")
                 return
+            bass.BASS_ChannelSetAttribute(self.playback_stream, BASS_ATTRIB_VOL, ctypes.c_float(self.volume_level))
             
             self.midi_stream = self.playback_stream # For is_active checks
         else:
@@ -176,6 +179,7 @@ class BassMidiEngine:
             if not self.midi_stream:
                 print(f"MIDI Stream Create Failed: {bass.BASS_ErrorGetCode()}")
                 return
+            bass.BASS_ChannelSetAttribute(self.midi_stream, BASS_ATTRIB_VOL, ctypes.c_float(self.volume_level))
 
         # Load SoundFont
         target = self.decode_stream if self.buffering_enabled else self.midi_stream
@@ -236,7 +240,9 @@ class BassMidiEngine:
             val = d1 | (d2 << 7)
             bassmidi.BASS_MIDI_StreamEvent(target, chan, 14, val) # 14 = PITCH
         elif cmd == 0xB0: # CC
-            pass
+            controller = param & 0xFF
+            value = (param >> 8) & 0xFF
+            bassmidi.BASS_MIDI_StreamEvent(target, chan, controller, value)
 
     def send_all_notes_off(self):
         target = self.decode_stream if self.buffering_enabled else self.midi_stream
@@ -320,3 +326,9 @@ class BassMidiEngine:
     
     def test_piano_sweep(self):
         print("Python fallback test_piano_sweep not implemented")
+
+    def set_volume(self, volume):
+        self.volume_level = float(volume)
+        target = self.playback_stream if self.buffering_enabled else self.midi_stream
+        if target:
+            bass.BASS_ChannelSetAttribute(target, BASS_ATTRIB_VOL, ctypes.c_float(self.volume_level))

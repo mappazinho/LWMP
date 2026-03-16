@@ -291,6 +291,13 @@ class PianoRoll:
         self.color_button_rect = None  # Will be set in init_pygame_and_gl
         self.color_button_size = 32  # Button size in pixels
 
+    def _get_guide_line_y(self):
+        if self.show_keyboard and 'white_key' in self.keyboard_texture_info:
+            keyboard_height = self.keyboard_texture_info['white_key'].get('scaled_height')
+            if keyboard_height is not None:
+                return self.height - keyboard_height
+        return self.height * self.guide_line_y_ratio
+
     def _load_colors_from_xml(self, filepath=None):
         if filepath is None:
             # Build absolute path to colors.xml, assuming it's in the same dir as this script
@@ -581,7 +588,7 @@ class PianoRoll:
         glUniform1f(glGetUniformLocation(self.shader, "u_scroll_speed"), self.scroll_speed)
         glUniform1f(glGetUniformLocation(self.shader, "u_width"), float(self.width))
         glUniform1f(glGetUniformLocation(self.shader, "u_height"), float(self.height))
-        glUniform1f(glGetUniformLocation(self.shader, "u_guide_line_y"), self.height * self.guide_line_y_ratio)
+        glUniform1f(glGetUniformLocation(self.shader, "u_guide_line_y"), self._get_guide_line_y())
         glUniform2fv(self.u_pitch_layout_loc, 128, self.pitch_layout_data)
         
         if self.u_is_white_key_notes_loc != -1 and self.is_white_key_data is not None:
@@ -774,6 +781,7 @@ class PianoRoll:
             
             glUniform1f(self.u_time_loc, current_time)
             glUniform1f(self.u_scroll_speed_loc, self.scroll_speed)
+            glUniform1f(glGetUniformLocation(self.shader, "u_guide_line_y"), self._get_guide_line_y())
             glUniform1f(self.u_window_start_loc, window_start)
             glUniform1f(self.u_window_end_loc, window_end)
 
@@ -804,7 +812,7 @@ class PianoRoll:
             glMatrixMode(GL_PROJECTION);glPushMatrix();glLoadIdentity();glOrtho(0,self.width,self.height,0,-1,1)
             glMatrixMode(GL_MODELVIEW);glPushMatrix();glLoadIdentity()
             glLineWidth(2.0);glColor3f(0.8,0.0,0.0)
-            guide_y = self.height * self.guide_line_y_ratio
+            guide_y = self._get_guide_line_y()
             glBegin(GL_LINES);glVertex2f(0, guide_y);glVertex2f(self.width, guide_y);glEnd()
             glPopMatrix();glMatrixMode(GL_PROJECTION);glPopMatrix();glMatrixMode(GL_MODELVIEW)
 

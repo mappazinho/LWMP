@@ -28,7 +28,6 @@ import multiprocessing # For parallel parsing AND new piano roll
 import atexit # To clean up child processes
 import traceback # For logging thread errors
 import numpy as np
-import re # For CPU parsing
 import subprocess # For GPU detection via wmic
 import psutil
 
@@ -39,10 +38,6 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(script_dir) # Add the 'MIDI' directory itself
 parent_dir = os.path.dirname(script_dir)
 sys.path.append(os.path.join(parent_dir, 'PARSER')) # Add the 'PARSER' directory
-
-# Windows Registry access for CPU check
-if os.name == 'nt':
-    import winreg
 
 from midi_parser import GPU_NOTE_DTYPE, MidiParser
 
@@ -108,6 +103,7 @@ class StartupWizard(tk.Toplevel):
         self.result_mode = 'local' 
         self.recommended_res = (1280, 720)
         self.recommended_note_limit = 0
+        self.has_bundled_omnimidi = os.path.exists(os.path.join(script_dir, "OmniMIDI.dll"))
         
         self.title("System Check")
         # [FIX] Increased width to 550 to prevent cut-off text
@@ -148,9 +144,6 @@ class StartupWizard(tk.Toplevel):
         
         self.btn_bass = tk.Button(self.btn_frame, text="Use BASSMIDI (Buffered)", command=self.use_bassmidi, state=tk.DISABLED, width=30)
         self.btn_bass.pack(pady=2)
-        
-        self.btn_local = tk.Button(self.btn_frame, text="Load Local DLL", command=self.use_local_dll, state=tk.DISABLED, width=30)
-        self.btn_local.pack(pady=2)
 
         self.btn_recommend = tk.Button(self.btn_frame, text="Use Recommended Settings", command=self.accept_recommendation, state=tk.DISABLED, width=30)
         self.btn_recommend.pack(pady=2)
@@ -172,7 +165,6 @@ class StartupWizard(tk.Toplevel):
         
     def use_bassmidi(self):
         self.btn_bass.config(text="Initializing...", state=tk.DISABLED)
-        self.btn_local.config(state=tk.DISABLED)
         self.btn_recommend.config(state=tk.DISABLED)
         self.btn_default.config(state=tk.DISABLED)
         self.update()
@@ -180,20 +172,8 @@ class StartupWizard(tk.Toplevel):
         self.on_complete('bassmidi', self.recommended_res)
         self.destroy()
 
-    def use_local_dll(self):
-        self.btn_local.config(text="Initializing...", state=tk.DISABLED)
-        self.btn_recommend.config(state=tk.DISABLED)
-        self.btn_default.config(state=tk.DISABLED)
-        self.update()
-
-        self.on_complete('local', self.recommended_res)
-        self.destroy()
-
     def run_hardware_check(self):
-        cpu_name = "Unknown"
-        mode = 'local' 
-        reason_cpu = "Defaulting to local engine."
-        is_legacy_cpu = False
+        mode = 'local' if self.has_bundled_omnimidi else 'path'
         
         # --- 1. RAM Check ---
         try:
@@ -225,42 +205,6 @@ class StartupWizard(tk.Toplevel):
         except Exception as e:
             self.log(f"RAM Check Error: {e}")
             self.recommended_note_limit = 20_000_000
-
-        # --- 2. CPU Check ---
-        try:
-            self.log("Querying Registry for CPU...")
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0")
-            cpu_name = winreg.QueryValueEx(key, "ProcessorNameString")[0]
-            cpu_name = cpu_name.strip()
-            self.log(f"CPU: {cpu_name}")
-            
-            cpu_lower = cpu_name.lower()
-            
-            if any(x in cpu_lower for x in ['celeron', 'pentium', 'core 2']):
-                mode = 'path'
-                reason_cpu = "Legacy CPU detected."
-                is_legacy_cpu = True
-            elif 'intel' in cpu_lower and 'core' in cpu_lower:
-                match = re.search(r'i\d[- ](\d{3,5})', cpu_name)
-                if match:
-                    model_num = int(match.group(1))
-                    if model_num >= 4000:
-                        mode = 'local'
-                        reason_cpu = "Modern architecture (Haswell+)."
-                    else:
-                        mode = 'path'
-                        reason_cpu = "Older Core architecture (<4th Gen)."
-                else:
-                    mode = 'path' 
-                    reason_cpu = "Parse fail. Safety fallback."
-            else:
-                mode = 'path' 
-                reason_cpu = "Non-Intel CPU."
-
-        except Exception as e:
-            self.log(f"CPU Check Error: {str(e)}")
-            mode = 'path'
-            reason_cpu = "Detection failed."
 
         self.recommended_mode = mode
 
@@ -330,9 +274,9 @@ class StartupWizard(tk.Toplevel):
         
         # --- Build Warnings ---
         warning_lines = []
-        
-        if is_legacy_cpu:
-            warning_lines.append("WARNING: Legacy CPU detected. Expect overloaded usage with playback!")
+
+        if not self.has_bundled_omnimidi:
+            warning_lines.append("Bundled OmniMIDI DLL not found. System PATH mode is recommended.")
             
         if gpu_names and not has_dedicated_gpu:
             warning_lines.append("WARNING: Integrated GPU detected. Memory usage will be higher than expected!")
@@ -344,9 +288,6 @@ class StartupWizard(tk.Toplevel):
         
         self.btn_recommend.config(state=tk.NORMAL)
         self.btn_default.config(state=tk.NORMAL)
-        
-        if mode != 'local':
-            self.btn_local.config(state=tk.NORMAL)
             
         if BassMidiEngine:
             self.btn_bass.config(state=tk.NORMAL)
@@ -878,6 +819,10 @@ class MidiPlayerApp:
         global OmniMidiEngine
         
         load_from_path_pref = CONFIG['audio'].get('omnimidi_load_preference', 'local')
+        bundled_omnimidi_exists = os.path.exists(os.path.join(script_dir, "OmniMIDI.dll"))
+        if load_from_path_pref == 'local' and not bundled_omnimidi_exists:
+            load_from_path_pref = 'path'
+            CONFIG['audio']['omnimidi_load_preference'] = 'path'
         
         # 1. Try BASSMIDI (Buffered) - Only if selected
         if load_from_path_pref == 'bassmidi':
@@ -1367,8 +1312,9 @@ class MidiPlayerApp:
                 start_idx = count_notes * 2
                 times[start_idx:] = pb_arr['time']
                 statuses[start_idx:] = 0xE0 + pb_arr['chan']
-                # Param for BASS: value (0..16383)
-                params[start_idx:] = pb_arr['val']
+                bend_lsb = pb_arr['val'] & 0x7F
+                bend_msb = (pb_arr['val'] >> 7) & 0x7F
+                params[start_idx:] = (bend_msb << 8) | bend_lsb
 
             # Sort by time
             print("Sorting events...")
@@ -1400,6 +1346,7 @@ class MidiPlayerApp:
             self.active_midi_backend.set_current_time(start_time)
             
             has_started_playback = False
+            start_buffer_target = min(4.0, max(0.25, self.total_song_duration * 0.25))
             
             # Loop
             while self.playing:
@@ -1423,19 +1370,21 @@ class MidiPlayerApp:
                     has_started_playback = False
                 
                 # Render / Fill Buffer
-                # Target 60s buffer. fill_buffer returns current level.
-                buffer_lvl = self.active_midi_backend.fill_buffer(60.0)
+                # Always try to keep buffer topped up
+                buffer_lvl = self.active_midi_backend.get_buffer_level()
+                if buffer_lvl < 58.0:
+                    buffer_lvl = self.active_midi_backend.fill_buffer(60.0)
                 
                 # Playback Management
                 is_active = self.active_midi_backend.is_active()
                 
                 if not has_started_playback:
-                    if buffer_lvl > 4.0:
+                    if buffer_lvl > start_buffer_target:
                         self.root.after(0, lambda: self.filename_var.set("Playing..."))
                         self.active_midi_backend.play()
                         has_started_playback = True
                     else:
-                         self.root.after(0, lambda lvl=buffer_lvl: self.filename_var.set(f"Prerendering... {lvl:.1f}s / 4.0s"))
+                         self.root.after(0, lambda lvl=buffer_lvl, target=start_buffer_target: self.filename_var.set(f"Prerendering... {lvl:.1f}s / {target:.1f}s"))
                 
                 elif has_started_playback:
                     if buffer_lvl < 0.2: # Underrun
@@ -1447,11 +1396,12 @@ class MidiPlayerApp:
                          self.active_midi_backend.play()
                          self.root.after(0, lambda: self.filename_var.set("Playing..."))
 
-                # Don't hog CPU if buffer is full
-                if buffer_lvl >= 60.0:
-                    time.sleep(0.1)
+                if buffer_lvl >= 58.0:
+                    time.sleep(0.2)
+                elif buffer_lvl >= 45.0:
+                    time.sleep(0.05)
                 else:
-                    time.sleep(0.005) # Tight loop while filling
+                    time.sleep(0.005)
 
         except Exception as e:
             print(f"Buffered playback error: {e}")

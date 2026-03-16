@@ -38,11 +38,11 @@ cdef enum:
     
     BASS_MIDI_EVENTS_RAW = 0x10000
     BASS_MIDI_EVENT_NOTE = 1
-    BASS_MIDI_EVENT_PITCH = 4  # Pitch Wheel event type
     BASS_MIDI_EVENTS_ASYNC = 0x40000000
     
     # Custom Internal Flags
     BASS_UNICODE = 0x80000000
+    BASS_ATTRIB_VOL = 2
     BASS_ATTRIB_MIDI_VOICES = 0x12003
 
 # --- Types ---
@@ -136,6 +136,7 @@ cdef class BassMidiEngine:
     cdef public bint is_initialized
     cdef public bint buffering_enabled
     cdef public bint debug_mode
+    cdef public float volume_level
     
     cdef public HSTREAM midi_stream
     cdef public HSTREAM decode_stream
@@ -154,6 +155,7 @@ cdef class BassMidiEngine:
         self.is_initialized = False
         self.buffering_enabled = buffering
         self.debug_mode = debug
+        self.volume_level = 1.0
         self.midi_stream = 0
         self.decode_stream = 0
         self.playback_stream = 0
@@ -225,8 +227,6 @@ cdef class BassMidiEngine:
             if err != 14: # BASS_ERROR_ALREADY
                 raise RuntimeError(f"BASS_Init failed: {err}")
         
-        # Don't set global system volume - use channel volume instead
-        # self.f.SetVolume(0.5)
         self.is_initialized = True
         
         # 4. Create Streams
@@ -239,12 +239,14 @@ cdef class BassMidiEngine:
             
             self.playback_stream = self.f.StreamCreate(44100, 2, BASS_SAMPLE_FLOAT, <void*>STREAMPROC_PUSH, NULL)
             if not self.playback_stream: raise RuntimeError(f"Playback Stream Create Failed: {self.f.ErrorGetCode()}")
+            self.f.ChannelSetAttribute(self.playback_stream, BASS_ATTRIB_VOL, self.volume_level)
             self.midi_stream = self.playback_stream 
         else:
             flags = BASS_STREAM_AUTOFREE | BASS_SAMPLE_FLOAT | BASS_MIDI_SINCINTER | BASS_MIDI_EVENTS_ASYNC
             self.midi_stream = self.f.MIDI_StreamCreate(16, flags, 44100)
             if not self.midi_stream: raise RuntimeError(f"MIDI Stream Create Failed: {self.f.ErrorGetCode()}")
             self.f.ChannelSetAttribute(self.midi_stream, BASS_ATTRIB_MIDI_VOICES, 512.0)
+            self.f.ChannelSetAttribute(self.midi_stream, BASS_ATTRIB_VOL, self.volume_level)
 
         if soundfont_path:
             self.load_soundfont(self.decode_stream if self.buffering_enabled else self.midi_stream, soundfont_path)
@@ -276,12 +278,6 @@ cdef class BassMidiEngine:
         self.event_count = count
         self.current_event_idx = 0
         self.simulated_time = 0.0
-        self.total_bytes_pushed = 0  # Reset buffer tracking
-        # Reset stream positions for clean start
-        if self.playback_stream:
-            self.f.ChannelSetPosition(self.playback_stream, 0, BASS_POS_BYTE)
-        if self.decode_stream:
-            self.f.ChannelSetPosition(self.decode_stream, 0, BASS_POS_BYTE)
         if self.debug_mode: print(f"[Cython] Events uploaded successfully.")
 
     cpdef fill_buffer(self, double limit_seconds):
@@ -293,10 +289,11 @@ cdef class BassMidiEngine:
             return 0.0
 
         cdef double buffer_level
-        cdef double chunk_dur = 0.0005 # 0.5ms granularity (2000Hz)
+        cdef double chunk_dur = 0.25
         cdef HSTREAM decode = self.decode_stream
         cdef HSTREAM playback = self.playback_stream
         cdef MiniEvent* ev
+        cdef uint32_t cmd
         
         # 1. Check Buffer Level
         # Inline the get_buffer logic for speed
@@ -309,38 +306,16 @@ cdef class BassMidiEngine:
         if buffer_level >= limit_seconds:
             return buffer_level # Buffer healthy
 
-        # 2. Render Loop (fill up to 50ms at a time to avoid freezing UI too long)
+        # 2. Render Loop
         cdef int loops = 0
-        cdef int max_loops = 400 # 400 * 0.5ms = 200ms max blocking time
-        
-        # with nogil: ... (Disabled to prevent event corruption)
-        #    pass
-                
-        # Back in GIL (or simpler implementation):
-        # We will just loop in Python-callable space but do multiple small steps
-        
-        while loops < max_loops: # Use configured max_loops
+        cdef int max_loops = 8
+
+        while loops < max_loops:
             # Events
             while self.current_event_idx < self.event_count:
                 ev = &self.event_buffer[self.current_event_idx]
                 if ev.time <= self.simulated_time:
-                    chan = ev.status & 0x0F
-                    # We stored status as full byte (0x90+ch), but StreamEvent needs chan and event type separately
-                    # actually our stored 'status' is just the status byte.
-                    # BASS_MIDI_StreamEvent takes (handle, chan, event, param).
-                    # For NoteOn (0x90), event is MIDI_EVENT_NOTE.
-                    # For PitchBend (0xE0), event is MIDI_EVENT_PITCH (14). 
-                    # This mapping is annoying to do here.
-                    # Let's assume upload_events pre-converted status to BASS event type?
-                    # No, we passed raw MIDI bytes.
-                    
-                    cmd = ev.status & 0xF0
-                    if cmd == 0x90 or cmd == 0x80:
-                         self.f.MIDI_StreamEvent(decode, chan, BASS_MIDI_EVENT_NOTE, ev.param)
-                    elif cmd == 0xE0:
-                         self.f.MIDI_StreamEvent(decode, chan, BASS_MIDI_EVENT_PITCH, ev.param)
-                    # Skip unknown events
-                    
+                    self.send_raw_event(ev.status, ev.param)
                     self.current_event_idx += 1
                 else:
                     break
@@ -378,56 +353,26 @@ cdef class BassMidiEngine:
     # --- Standard Methods ---
 
     cpdef set_volume(self, float volume):
-        """Sets volume on the active playback channel (not system volume)."""
-        cdef HSTREAM target
+        self.volume_level = volume
         if self.buffering_enabled:
-            target = self.playback_stream
-        else:
-            target = self.midi_stream
-        if target:
-            # BASS_ATTRIB_VOL = 2
-            self.f.ChannelSetAttribute(target, 2, volume)
+            if self.playback_stream:
+                self.f.ChannelSetAttribute(self.playback_stream, BASS_ATTRIB_VOL, volume)
+        elif self.midi_stream:
+            self.f.ChannelSetAttribute(self.midi_stream, BASS_ATTRIB_VOL, volume)
 
     cpdef pause(self):
-        """Immediately pause the playback stream."""
-        cdef HSTREAM target
-        if self.buffering_enabled:
-            target = self.playback_stream
-        else:
-            target = self.midi_stream
-        if target:
-            self.f.ChannelPause(target)
-
-    cpdef resume(self):
-        """Resume playback from paused state."""
-        cdef HSTREAM target
-        if self.buffering_enabled:
-            target = self.playback_stream
-        else:
-            target = self.midi_stream
-        if target:
-            self.f.ChannelPlay(target, False)
+        if self.midi_stream: self.f.ChannelPause(self.midi_stream)
 
     cpdef play(self):
-        """Start playback (alias for resume)."""
-        self.resume()
+        if self.midi_stream: self.f.ChannelPlay(self.midi_stream, False)
+
     cpdef stop(self):
-        """Immediately stop the playback stream and send all notes off."""
-        cdef HSTREAM target
-        if self.buffering_enabled:
-            target = self.playback_stream
-        else:
-            target = self.midi_stream
-        if target:
-            self.f.ChannelStop(target)
-            self.f.ChannelSetPosition(target, 0, BASS_POS_BYTE)
-        # Reset decode stream position too
+        if self.midi_stream:
+            self.f.ChannelStop(self.midi_stream)
+            self.f.ChannelSetPosition(self.midi_stream, 0, BASS_POS_BYTE)
+            self.total_bytes_pushed = 0
         if self.buffering_enabled and self.decode_stream:
             self.f.ChannelSetPosition(self.decode_stream, 0, BASS_POS_BYTE)
-        self.total_bytes_pushed = 0
-        self.current_event_idx = 0
-        self.simulated_time = 0.0
-        self.send_all_notes_off()
 
     cpdef set_voices(self, int voices):
         cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
@@ -458,11 +403,17 @@ cdef class BassMidiEngine:
         cdef uint32_t status = event & 0xFF
         cdef uint32_t chan = status & 0x0F
         cdef uint32_t cmd = status & 0xF0
+        cdef uint32_t d1
+        cdef uint32_t d2
         
         if cmd == 0x90 or cmd == 0x80:
             self.f.MIDI_StreamEvent(target, chan, BASS_MIDI_EVENT_NOTE, param)
         elif cmd == 0xE0:
-            self.f.MIDI_StreamEvent(target, chan, 14, param)
+            d1 = param & 0xFF
+            d2 = (param >> 8) & 0xFF
+            self.f.MIDI_StreamEvent(target, chan, 14, d1 | (d2 << 7))
+        elif cmd == 0xB0:
+            self.f.MIDI_StreamEvent(target, chan, param & 0xFF, (param >> 8) & 0xFF)
 
     cpdef send_all_notes_off(self):
         cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
@@ -480,6 +431,7 @@ cdef class BassMidiEngine:
         font_struct.preset = -1
         font_struct.bank = 0
         self.f.MIDI_StreamSetFonts(sweep_stream, &font_struct, 1)
+        self.f.ChannelSetAttribute(sweep_stream, BASS_ATTRIB_VOL, self.volume_level)
         self.f.ChannelPlay(sweep_stream, False)
         cdef int note
         for note in range(60, 73):
@@ -512,27 +464,29 @@ cdef class BassMidiEngine:
         cdef int retries = 0
         
         try:
-            with nogil:
-                while remaining > 0:
-                    to_read = chunk_size
-                    if remaining < chunk_size: to_read = <DWORD>remaining
-                    
-                    read_bytes = self.f.ChannelGetData(decode, buf, to_read)
-                    if read_bytes == err_val or read_bytes == 0: break
-                    
-                    chunk_written = 0
-                    retries = 0
-                    while chunk_written < read_bytes:
-                        written_bytes = self.f.StreamPutData(playback, buf + chunk_written, read_bytes - chunk_written)
-                        if written_bytes == err_val: break
-                        if written_bytes == 0: 
-                             retries += 1
-                             if retries > 50: break 
-                             break 
-                        chunk_written += written_bytes
-                    
-                    total_written += chunk_written
-                    remaining -= read_bytes 
+            while remaining > 0:
+                to_read = chunk_size
+                if remaining < chunk_size: to_read = <DWORD>remaining
+                
+                read_bytes = self.f.ChannelGetData(decode, buf, to_read)
+                if read_bytes == err_val or read_bytes == 0: break
+                
+                chunk_written = 0
+                retries = 0
+                while chunk_written < read_bytes:
+                    written_bytes = self.f.StreamPutData(playback, buf + chunk_written, read_bytes - chunk_written)
+                    if written_bytes == err_val:
+                        break
+                    if written_bytes == 0:
+                        retries += 1
+                        if retries > 50:
+                            break
+                        sleep(0.001)
+                        continue
+                    chunk_written += written_bytes
+                
+                total_written += chunk_written
+                remaining -= read_bytes 
             
             self.total_bytes_pushed += total_written
             return self.f.ChannelBytes2Seconds(playback, total_written)
@@ -554,21 +508,8 @@ cdef class BassMidiEngine:
         return self.f.ChannelBytes2Seconds(self.playback_stream, b)
 
     cpdef bint is_active(self):
-        cdef HSTREAM target
-        if self.buffering_enabled:
-            target = self.playback_stream
-        else:
-            target = self.midi_stream
-        if not target: return False
-        return self.f.ChannelIsActive(target) == 1  # BASS_ACTIVE_PLAYING
-
-    cpdef reset_position(self):
-        """Reset stream position to beginning."""
-        if self.midi_stream: 
-            self.f.ChannelSetPosition(self.midi_stream, 0, BASS_POS_BYTE)
-            self.total_bytes_pushed = 0
-        if self.buffering_enabled and self.decode_stream:
-            self.f.ChannelSetPosition(self.decode_stream, 0, BASS_POS_BYTE)
+        if not self.midi_stream: return False
+        return self.f.ChannelIsActive(self.midi_stream) == 1
 
     cpdef shutdown(self):
         if self.event_buffer != NULL:
