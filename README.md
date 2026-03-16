@@ -14,7 +14,7 @@ Just launch build.bat, and all dependencies and compilation happens automaticall
 
 ### For Linux (not tested as of now):
 1. Download and install all dependencies:  
-`pip install --no-warn-script-location numpy cython setuptools pyopengl pyopengl_accelerate pygame`
+`pip install --no-warn-script-location numpy cython setuptools pyopengl pyopengl_accelerate pygame dearpygui`
 
 2. Compile required Cython files:  
 `python setup.py build_ext --inplace`
