@@ -1,5 +1,3 @@
-# pianoroll.py - OPTIMIZED VERSION
-
 import pygame
 from pygame.locals import DOUBLEBUF, OPENGL
 from OpenGL.GL import *
@@ -14,13 +12,10 @@ import xml.etree.ElementTree as ET
 import os
 from midi_parser import GPU_NOTE_DTYPE
 
-# --- Constants ---
-# Downgraded to GLSL 1.20 for maximum compatibility
-# Removed layout qualifiers, switched in/out to attribute/varying
 VERT_SHADER = """#version 120
 attribute vec2 pos;
 attribute vec2 note_times;
-attribute vec3 note_info; // Passed as float vec3, will be cast to int
+attribute vec3 note_info;
 
 uniform mat4 u_projection;
 uniform float u_time;
@@ -43,14 +38,11 @@ void main() {
     float on_time = note_times.x;
     float off_time = note_times.y;
     
-    // Early exit: cull notes outside time window
     if (off_time < u_window_start || on_time > u_window_end) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
     }
     
-    // Cast float attributes to int with a small bias to prevent precision errors
-    // e.g., 1.0 might become 0.9999, casting to int makes it 0. Adding 0.5 makes it 1.49 -> 1.
     int pitch = int(note_info.x + 0.5);
     int track = int(note_info.z + 0.5);
     
@@ -58,47 +50,21 @@ void main() {
     float note_h = max(2.0, note_duration * u_scroll_speed);
     float note_y = u_guide_line_y + (u_time - on_time) * u_scroll_speed;
     
-    // Use pitch layout directly
     vec2 layout = u_pitch_layout[pitch];
     vec2 instance_scale = vec2(layout.y, note_h);
     vec2 instance_offset = vec2(layout.x, note_y - note_h);
     vec2 final_pos = pos * instance_scale + instance_offset;
     
-    // Depth for layering:
-    // --- Z-Depth Layering Logic ---
-    // The final Z position of a vertex is `gl_Position.z = -z_depth` because
-    // of the projection matrix. With `glDepthFunc(GL_LESS)`, this means that
-    // the vertex with the LARGER `z_depth` value will be rendered ON TOP.
-    // This section calculates `z_depth` to control note layering.
-
-    // The layering priority is designed to mimic the keyboard's highlight logic,
-    // which follows a "Last Note On" (LNO) rule.
-    // Priority Order:
-    // 1. Key Color: Black keys are always on top of white keys.
-    // 2. Start Time: The most recently started note on a key is on top.
-
-    // 1. Base layer by key color.
-    // White keys occupy the z_depth range ~[0.0, 0.4].
-    // Black keys occupy the z_depth range ~[0.5, 0.9].
-    // This large gap ensures a black key is always drawn over any white key.
     float base_z = u_is_white_key[pitch] == 1 ? 0.0 : 0.5;
-
-    // 2. Add offset based on the note's start time (`on_time`).
-    // A larger `on_time` (a note that starts later) results in a larger `time_offset`.
-    // This gives it a larger `z_depth`, causing it to be rendered on top.
-    // `mod` prevents the value from growing infinitely during a long song, resetting every 1000 seconds.
-    // The scaling factor maps this to the [0.0, 0.4] range, fitting within our `base_z` layers.
     float time_offset = mod(on_time, 1000.0) * 0.0004;
 
     float z_depth = base_z + time_offset;
     
     gl_Position = u_projection * vec4(final_pos, z_depth, 1.0);
     
-    // Pass through
     v_pos = pos;
     v_note_h = note_h;
     
-    // Manual modulo for older GLSL versions if % operator is not supported for ints
     int color_idx = int(mod(float(track), 128.0));
     v_fragColor = u_colors[color_idx] * 1.2;
 }
@@ -113,7 +79,6 @@ uniform sampler2D u_note_texture;
 uniform sampler2D u_note_edge_texture;
 
 void main() {
-    // fwidth is supported in GLSL 1.20 (GL 2.1+)
     vec2 fw = fwidth(v_pos);
     float texture_border_y = 1.5 * fw.y;
     float side_border_width = 0.5 * fw.x;
@@ -206,14 +171,12 @@ class PianoRoll:
         self.config = config
         self.screen = None
         
-        # Note rendering resources
         self.shader = 0
         self.vao = 0
         self.vbo_vertices = 0
         self.vbo_stream_data = 0
         self.note_texture = 0
         self.note_edge_texture = 0
-        # Initialize locations to -1
         self.u_note_texture_loc = -1
         self.u_note_edge_texture_loc = -1
         self.u_is_white_key_notes_loc = -1
@@ -242,9 +205,6 @@ class PianoRoll:
         self.slider_min = 0.2
         self.slider_max = 5.0
         
-        # Unify window size logic. The slider controls a single `window_seconds` value.
-        # We'll use seconds_before_cursor as the authoritative value from config,
-        # and apply it to all related variables for consistent behavior.
         self.window_seconds = float(vis_cfg.get('seconds_before_cursor', 3.0))
         self.seconds_before_cursor = self.window_seconds
         self.seconds_after_cursor = self.window_seconds
@@ -260,7 +220,6 @@ class PianoRoll:
         self.use_gpu_cull = True
         self.data_update_interval = float(vis_cfg.get('data_update_interval', 0.01))
 
-        # Keyboard Visualization
         self.show_keyboard = bool(vis_cfg.get('show_keyboard', True))
         self.keyboard_layout = None
         self.keyboard_textures = {}
@@ -287,9 +246,8 @@ class PianoRoll:
         self.pending_midi_data = None
         self.midi_data_lock = threading.Lock()
         
-        # Randomize Colors Button (top-right corner)
-        self.color_button_rect = None  # Will be set in init_pygame_and_gl
-        self.color_button_size = 32  # Button size in pixels
+        self.color_button_rect = None
+        self.color_button_size = 32
 
     def _get_guide_line_y(self):
         if self.show_keyboard and 'white_key' in self.keyboard_texture_info:
@@ -300,7 +258,6 @@ class PianoRoll:
 
     def _load_colors_from_xml(self, filepath=None):
         if filepath is None:
-            # Build absolute path to colors.xml, assuming it's in the same dir as this script
             script_dir = os.path.dirname(os.path.abspath(__file__))
             filepath = os.path.join(script_dir, "colors.xml")
 
@@ -326,7 +283,6 @@ class PianoRoll:
 
         except (ET.ParseError, FileNotFoundError, ValueError) as e:
             print(f"Error loading colors from {filepath}: {e}. Using default rainbow palette.")
-            # Fallback rainbow palette (16 distinctive colors)
             rainbow = [
                 [1.0, 0.0, 0.0], [1.0, 0.5, 0.0], [1.0, 1.0, 0.0], [0.5, 1.0, 0.0],
                 [0.0, 1.0, 0.0], [0.0, 1.0, 0.5], [0.0, 1.0, 1.0], [0.0, 0.5, 1.0],
@@ -455,9 +411,6 @@ class PianoRoll:
         pygame.init()
         pygame.font.init()
         
-        # REMOVED: gl_set_attribute calls that cause "Unknown OpenGL attribute" errors on older systems
-        # Default context is usually compatibility profile, which is what we want for legacy GLSL support.
-        
         self.screen = pygame.display.set_mode((self.width, self.height), DOUBLEBUF | OPENGL | pygame.HWSURFACE)
         pygame.display.set_caption("Piano Roll")
         self._init_slider_geometry()
@@ -498,7 +451,6 @@ class PianoRoll:
             except Exception as err:
                 print("Keyboard shader compilation failed:\n", err); self.show_keyboard = False
 
-        # Set up VAO/VBOs for Notes
         self.vao = glGenVertexArrays(1)
         glBindVertexArray(self.vao)
 
@@ -521,8 +473,6 @@ class PianoRoll:
         
         glEnableVertexAttribArray(note_times_loc); glVertexAttribPointer(note_times_loc, 2, GL_FLOAT, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(0)); glVertexAttribDivisor(note_times_loc, 1)
         
-        # Downgrade: Use float pointer for integer data since legacy GLSL 1.20 doesn't support integer attributes well
-        # We manually add +0.5 in shader to fix precision
         glEnableVertexAttribArray(note_info_loc)
         glVertexAttribPointer(note_info_loc, 3, GL_UNSIGNED_BYTE, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(8))
         glVertexAttribDivisor(note_info_loc, 1)
@@ -618,7 +568,6 @@ class PianoRoll:
         self.data_thread = threading.Thread(target=self._data_streamer_thread, daemon=True)
         self.data_thread.start()
         
-        # Initialize color button rect (top-right corner with margin)
         margin = 10
         self.color_button_rect = pygame.Rect(
             self.width - self.color_button_size - margin,
@@ -628,23 +577,14 @@ class PianoRoll:
         )
 
     def load_midi(self, all_notes_gpu, get_current_time_func):
-        """Thread-safe: Prepares data for GPU upload and optimizes structures."""
+        """Prepare note data for the render thread."""
         self.get_current_time = get_current_time_func
-        
-        # --- 2. RENDER OPTIMIZATION DATA (Logic from yapper) ---
-        # For fast slicing, we need the main rendering array to be strictly sorted by on_time.
-        # This allows O(1) slicing instead of complex intersections.
         render_sort_idx = np.argsort(all_notes_gpu['on_time'], kind='stable')
-        # Create a contiguous copy for fast upload
         render_notes_array = np.ascontiguousarray(all_notes_gpu[render_sort_idx])
         render_on_times = render_notes_array['on_time']
-        
-        # Calculate max note duration for smarter culling
         durations = render_notes_array['off_time'] - render_notes_array['on_time']
         if len(durations) > 0:
             self.max_note_duration = float(np.max(durations))
-        
-        # Store prepared data
         with self.midi_data_lock:
             self.pending_midi_data = {
                 'all_notes_gpu': all_notes_gpu,
@@ -655,7 +595,7 @@ class PianoRoll:
         print(f"MIDI data prepared: {len(all_notes_gpu)} notes. Max Duration: {self.max_note_duration:.2f}s")
     
     def _upload_pending_midi_data(self):
-        """Called from render thread to flip pointers to new data."""
+        """Swap in note data prepared by the worker thread."""
         with self.midi_data_lock:
             if self.pending_midi_data is None:
                 return
@@ -663,19 +603,17 @@ class PianoRoll:
             data = self.pending_midi_data
             self.pending_midi_data = None
         
-        # Update Main Structures
         self.all_notes_gpu = data['all_notes_gpu']
         self.render_notes_array = data['render_notes_array']
         self.render_on_times = data['render_on_times']
         
         self.notes_to_draw = len(self.render_notes_array)
         
-        # Trigger immediate data update
         self.force_data_update.set()
         print("MIDI data active on GPU thread.")
     
     def _data_streamer_thread(self):
-        """OPTIMIZED: Background thread for slicing visible notes (logic from yapper)."""
+        """Background thread for slicing visible notes."""
         last_update_time = -1.0
         
         while self.app_running.is_set():
@@ -693,27 +631,14 @@ class PianoRoll:
                 self.force_data_update.clear()
                 last_update_time = now
                 
-                # OPTIMIZATION: Compute visible time window
-                # The visual window where notes should actually be rendered
                 view_start = now - self.seconds_before_cursor
                 view_end = now + self.seconds_after_cursor
-                
-                # To catch long notes that started way before the window but are still playing,
-                # we must search back by max_note_duration.
                 search_start = view_start - self.max_note_duration
-                
-                # Binary search (fast O(log N)) on sorted start times
                 start_idx = np.searchsorted(self.render_on_times, search_start, side='left')
                 end_idx = np.searchsorted(self.render_on_times, view_end, side='right')
-                
-                # Candidate slice (contains all potential notes)
                 candidates = self.render_notes_array[start_idx:end_idx]
                 
                 if len(candidates) > 0:
-                    # FILTER: Discard notes that finished before the view started.
-                    # This dramatically reduces the vertex count by culling notes that 
-                    # were included only because of the wide search window.
-                    # 'off_time' is the end time of the note.
                     mask = candidates['off_time'] > view_start
                     visible_slice = candidates[mask]
                     visible_count = len(visible_slice)
@@ -721,17 +646,14 @@ class PianoRoll:
                     visible_slice = candidates
                     visible_count = 0
                 
-                # Safety Cap
                 if visible_count > self.streaming_vbo_capacity:
                     visible_slice = visible_slice[:self.streaming_vbo_capacity]
                     visible_count = self.streaming_vbo_capacity
                 
                 if visible_count > 0:
-                    # Make contiguous just in case, though it should be already
                     visible_slice_contiguous = np.ascontiguousarray(visible_slice)
                     
                     try:
-                        # Use a timeout to avoid deadlocking if the main thread is stuck
                         self.data_queue.put((visible_slice_contiguous, visible_count), block=True, timeout=0.1)
                     except queue.Full:
                         print("Piano roll queue is full, frame skipped. This may indicate rendering lag.")
@@ -739,39 +661,26 @@ class PianoRoll:
             time.sleep(0.005) # Yield
 
     def draw(self, current_time):
-        """OPTIMIZED: Draws the buffer provided by the data thread."""
+        """Draw the latest buffer provided by the data thread."""
         self._upload_pending_midi_data()
         
         glClearColor(0.05, 0.05, 0.08, 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         
-        # --- GPU BUFFER UPDATE (Logic from yapper) ---
         try:
-            # Poll queue for new note data
             queue_data = self.data_queue.get_nowait()
             visible_notes, count = queue_data
-            
-            # Save for keyboard lookup (Zero-cost optimization)
             self.last_visible_notes = visible_notes
             
             glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-            
-            # CRITICAL OPTIMIZATION: Buffer Orphaning
-            # Calling glBufferData with NULL (None) tells the driver to allocate new memory,
-            # allowing the GPU to continue processing the old buffer while we fill the new one.
-            # This prevents CPU-GPU synchronization stalls.
             glBufferData(GL_ARRAY_BUFFER, self.streaming_vbo_capacity * self.note_size_bytes, None, GL_DYNAMIC_DRAW)
-            
-            # Upload new data
             glBufferSubData(GL_ARRAY_BUFFER, 0, visible_notes.nbytes, visible_notes)
             
             self.notes_to_draw = count
             
         except queue.Empty:
-            # No new data this frame, redraw previous frame (or do nothing if nothing uploaded yet)
             pass
 
-        # --- RENDER NOTES ---
         if self.notes_to_draw > 0 and self.render_notes_array is not None:
             window_start = current_time - self.seconds_before_cursor
             window_end = current_time + self.seconds_after_cursor
@@ -791,21 +700,16 @@ class PianoRoll:
             glBindTexture(GL_TEXTURE_2D, self.note_edge_texture)
 
             glBindVertexArray(self.vao)
-            # Bind the buffer again just to be safe
             glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-            
-            # Draw only the count we uploaded
             glDrawArraysInstanced(GL_TRIANGLES, 0, 6, self.notes_to_draw)
             
             glBindVertexArray(0)
             glUseProgram(0)
             glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-        # Draw keyboard overlay
         if self.show_keyboard and self.keyboard_layout:
             self._draw_keyboard_opengl(current_time)
 
-        # Draw guide line
         if self.show_guide_line:
             glDisable(GL_DEPTH_TEST)
             glUseProgram(0)
@@ -821,8 +725,7 @@ class PianoRoll:
         pygame.display.flip()
 
     def _draw_keyboard_opengl(self, current_time):
-        """OPTIMIZED: Use the already-calculated visible notes for 0-cost lookup."""
-        # Safe guard: If keyboard shader isn't ready or location not found (-1), don't crash
+        """Draw the keyboard overlay using the latest visible-note slice."""
         if self.keyboard_shader == 0:
             return
 
@@ -833,27 +736,14 @@ class PianoRoll:
         keyboard_y = self.height - keyboard_height
         glUniform1f(glGetUniformLocation(self.keyboard_shader, "u_keyboard_y"), keyboard_y)
 
-        # OPTIMIZATION: Filter active notes from the visible batch
-        # This replaces the complex and buggy incremental search with a simple filter
-        # on the small subset of notes already resident in CPU memory.
         current_active_pitches = set()
         
         if self.last_visible_notes is not None and len(self.last_visible_notes) > 0:
-            # We iterate the visible batch. This is fast (typically < 500 items).
-            # Note: We can iterate directly or use numpy masking. Iteration is fine for this size.
-            # We filter for notes that started before now and haven't ended yet.
             active_mask = (self.last_visible_notes['on_time'] <= current_time) & (self.last_visible_notes['off_time'] > current_time)
             active_notes = self.last_visible_notes[active_mask]
-            
-            # Since active_notes is sorted by on_time (inherited from render_notes_array),
-            # iterating through it ensures that later notes overwrite earlier notes.
             for note in active_notes:
                 pitch = note['pitch']
                 current_active_pitches.add(pitch)
-                
-                # FIXED: Always update the key state and color for active notes.
-                # Previously, we skipped this if the pitch was already active, which prevented
-                # the color from updating when one note took over another on the same key.
                 track = note['track']
                 color = self.channel_colors[track % 128]
                 
@@ -866,7 +756,6 @@ class PianoRoll:
                     self.black_key_instance_data[idx]['is_pressed'] = 1.0
                     self.black_key_instance_data[idx]['color'] = color
         
-        # OPTIMIZATION: Only reset keys that were just released
         released_keys = self.active_pitches_last_frame - current_active_pitches
         for pitch in released_keys:
             if pitch in self.white_key_pitch_map:
@@ -880,8 +769,6 @@ class PianoRoll:
         
         self.active_pitches_last_frame = current_active_pitches
 
-        # Draw white keys
-        # self.u_is_white_key_loc being -1 is handled by GL (ignored), safe if not initialized
         glUniform1i(self.u_is_white_key_loc, 1)
         
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, self.keyboard_textures['white_key'])
@@ -891,7 +778,6 @@ class PianoRoll:
         glBufferSubData(GL_ARRAY_BUFFER, 0, self.white_key_instance_data.nbytes, self.white_key_instance_data)
         glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, len(self.white_key_instance_data))
 
-        # Draw black keys
         if len(self.black_key_instance_data) > 0:
             glUniform1i(self.u_is_white_key_loc, 0)
             glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, self.keyboard_textures['black_key'])
@@ -904,18 +790,15 @@ class PianoRoll:
         glBindVertexArray(0)
         glUseProgram(0)
 
-    # --- UI Helpers ---
     def _init_slider_geometry(self):
         padding = 16
         bar_width = max(140, self.width // 5)
         bar_height = 6
         x = padding
         y = padding
-        # Window slider
         self.slider_rect = pygame.Rect(x, y, bar_width, self.slider_area_height)
         self.slider_bar = (x, y + (self.slider_area_height - bar_height) // 2, bar_width, bar_height)
         self._recalc_slider_handle()
-        # Scroll speed slider
         scroll_y = y + self.slider_area_height + 8
         self.scroll_slider_rect = pygame.Rect(x, scroll_y, bar_width, self.slider_area_height)
         self.scroll_slider_bar = (x, scroll_y + (self.slider_area_height - bar_height) // 2, bar_width, bar_height)
@@ -935,10 +818,9 @@ class PianoRoll:
 
     def handle_slider_event(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            # Check color button first
             if self.color_button_rect and self.color_button_rect.collidepoint(event.pos):
                 self.randomize_colors()
-                return  # Don't check other controls
+                return
             if self.slider_rect and self.slider_rect.collidepoint(event.pos):
                 self.slider_dragging = True
                 self._update_slider_from_pos(event.pos[0])
@@ -955,14 +837,9 @@ class PianoRoll:
     
     def randomize_colors(self):
         """Shuffle the track colors randomly and update the shader."""
-        # Generate a random permutation
         indices = list(range(128))
         random.shuffle(indices)
-        
-        # Reorder colors based on shuffled indices
         self.channel_colors = self.channel_colors[indices]
-        
-        # Upload new colors to shader
         glUseProgram(self.shader)
         glUniform3fv(self.u_colors_loc, 128, self.channel_colors)
         glUseProgram(0)
@@ -992,7 +869,6 @@ class PianoRoll:
         glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); glOrtho(0, self.width, self.height, 0, -1, 1)
         glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
         handle_half = 6
-        # Window slider
         x, y, w, h = self.slider_bar
         glColor3f(0.2, 0.2, 0.25)
         glBegin(GL_QUADS); glVertex2f(x, y); glVertex2f(x + w, y); glVertex2f(x + w, y + h); glVertex2f(x, y + h); glEnd()
@@ -1004,7 +880,6 @@ class PianoRoll:
         glColor3f(0.9, 0.9, 0.95)
         glBegin(GL_QUADS); glVertex2f(hx - handle_half, hy - handle_half); glVertex2f(hx + handle_half, hy - handle_half); glVertex2f(hx + handle_half, hy + handle_half); glVertex2f(hx - handle_half, hy + handle_half); glEnd()
 
-        # Scroll slider
         if self.scroll_slider_bar:
             x2, y2, w2, h2 = self.scroll_slider_bar
             glColor3f(0.22, 0.22, 0.28)
@@ -1017,24 +892,18 @@ class PianoRoll:
             glColor3f(0.95, 0.95, 0.95)
             glBegin(GL_QUADS); glVertex2f(hx2 - handle_half, hy2 - handle_half); glVertex2f(hx2 + handle_half, hy2 - handle_half); glVertex2f(hx2 + handle_half, hy2 + handle_half); glVertex2f(hx2 - handle_half, hy2 + handle_half); glEnd()
         
-        # Draw Color Randomize Button (top-right with RGB bars icon)
         if self.color_button_rect:
             bx, by = self.color_button_rect.x, self.color_button_rect.y
             bs = self.color_button_size
-            
-            # Button background (semi-transparent dark)
             glColor4f(0.15, 0.15, 0.2, 0.7)
             glBegin(GL_QUADS)
             glVertex2f(bx, by); glVertex2f(bx + bs, by)
             glVertex2f(bx + bs, by + bs); glVertex2f(bx, by + bs)
             glEnd()
             
-            # RGB bars icon (3 horizontal bars: Red, Green, Blue)
             bar_margin = 6
             bar_height = (bs - 4 * bar_margin) / 3
             bar_width = bs - 2 * bar_margin
-            
-            # Red bar (top)
             glColor4f(1.0, 0.3, 0.3, 0.9)
             ry = by + bar_margin
             glBegin(GL_QUADS)
@@ -1044,7 +913,6 @@ class PianoRoll:
             glVertex2f(bx + bar_margin, ry + bar_height)
             glEnd()
             
-            # Green bar (middle)
             glColor4f(0.3, 1.0, 0.3, 0.9)
             gy = by + bar_margin * 2 + bar_height
             glBegin(GL_QUADS)
@@ -1054,7 +922,6 @@ class PianoRoll:
             glVertex2f(bx + bar_margin, gy + bar_height)
             glEnd()
             
-            # Blue bar (bottom)
             glColor4f(0.3, 0.3, 1.0, 0.9)
             bby = by + bar_margin * 3 + bar_height * 2
             glBegin(GL_QUADS)
@@ -1064,7 +931,6 @@ class PianoRoll:
             glVertex2f(bx + bar_margin, bby + bar_height)
             glEnd()
             
-            # Button border
             glColor4f(0.5, 0.5, 0.55, 0.8)
             glLineWidth(1.0)
             glBegin(GL_LINE_LOOP)

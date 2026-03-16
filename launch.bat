@@ -1,4 +1,4 @@
 echo off
 cls
 echo Launching LWMP...
-python MIDI/midiplayer.py
+python MIDI/midiplayer_dpg.py

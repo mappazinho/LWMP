@@ -1,8 +1,3 @@
-# filename: midi_parser_cython.pyx
-#
-# Cython-optimized version of the MIDI parser.
-# Uses C++ vectors, maps, and queues to avoid Python object overhead.
-
 # cython: language_level=3
 # cython: boundscheck=False
 # cython: wraparound=False
@@ -11,27 +6,21 @@
 import struct
 import numpy as np
 cimport numpy as np
-import time # For parse timer
+import time
 import cython
 
 from libc.string cimport memcpy
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, uint64_t
 from libcpp.algorithm cimport sort as std_sort
 
-# --- C++ Imports ---
 from libcpp.vector cimport vector
 from libcpp.map cimport map
 from libcpp.queue cimport queue
 from libcpp.pair cimport pair
 from libcpp.vector cimport vector
 
-# --- Import C struct definitions ---
-# from midi_parser_cython cimport GpuNote, PlaybackEvent (Redundant)
-
-# Initialize numpy
 np.import_array()
 
-# --- Public NumPy DType Definitions ---
 GPU_NOTE_DTYPE = np.dtype([
     ('on_time', 'f4'),
     ('off_time', 'f4'),
@@ -39,18 +28,17 @@ GPU_NOTE_DTYPE = np.dtype([
     ('velocity', 'u1'),
     ('track', 'u1'),
     ('padding', 'u1')
-], align=True) # <-- [CHANGED] align=True for safety
+], align=True)
 
 PLAYBACK_EVENT_DTYPE = np.dtype([
-    ('on_time', 'f8'),      # double
-    ('off_time', 'f8'),     # double
+    ('on_time', 'f8'),
+    ('off_time', 'f8'),
     ('pitch', 'u1'),
     ('velocity', 'u1'),
     ('channel', 'u1'),
-    ('track_num', 'u2')     # uint16_t
-], align=True) # <-- [FIX] align=True is critical to match C++ struct padding
+    ('track_num', 'u2')
+], align=True)
 
-# --- C-level struct for the note-on map ---
 cdef struct NoteOnInfo:
     double on_time_sec
     uint8_t velocity
@@ -72,7 +60,6 @@ cdef struct TrackState:
     int last_status
     int track_index
 
-# --- C++ Sort Comparators ---
 cdef bint compareGpuNote(const GpuNote& a, const GpuNote& b) nogil:
     return a.on_time < b.on_time
 
@@ -103,7 +90,6 @@ cdef inline bint next_raw_event(TrackState* ts, RawEvent* ev) nogil:
     if p >= end:
         return False
 
-    # delta time
     varlen = read_varlen(p, end, &next_p)
     p = next_p
     ts.current_tick += varlen
@@ -115,7 +101,7 @@ cdef inline bint next_raw_event(TrackState* ts, RawEvent* ev) nogil:
     if status < 0x80:
         if ts.last_status == -1:
             ts.ptr = p + 1
-            return next_raw_event(ts, ev)  # skip invalid running status
+            return next_raw_event(ts, ev)
         status = <uint8_t>ts.last_status
         p -= 1
     else:
@@ -145,7 +131,7 @@ cdef inline bint next_raw_event(TrackState* ts, RawEvent* ev) nogil:
         ev.data2 = 0
         ts.ptr = p + 1
         return True
-    elif status == 0xFF:  # meta
+    elif status == 0xFF:
         if p >= end:
             ts.ptr = end
             return False
@@ -163,7 +149,7 @@ cdef inline bint next_raw_event(TrackState* ts, RawEvent* ev) nogil:
             ev.meta_val = (p[0] << 16) | (p[1] << 8) | p[2]
         ts.ptr = p + varlen
         return True
-    elif status == 0xF0 or status == 0xF7:  # SysEx skip
+    elif status == 0xF0 or status == 0xF7:
         varlen = read_varlen(p, end, &next_p)
         ts.ptr = next_p + varlen
         return next_raw_event(ts, ev)
@@ -209,14 +195,10 @@ cdef inline uint64_t heap_pop(vector[uint64_t]& h) noexcept nogil:
 
 
 cdef class MidiParser:
-    """
-    A highly optimized Cython MIDI file parser.
-    """
     def __init__(self, str filename):
         self.filename = filename
         self.ticks_per_beat = 480
         
-        # Public attributes
         self.note_data_for_gpu = np.empty((0,), dtype=GPU_NOTE_DTYPE)
         self.note_events_for_playback = np.empty((0,), dtype=PLAYBACK_EVENT_DTYPE)
         self.program_change_events = []
@@ -235,7 +217,7 @@ cdef class MidiParser:
         total_event_count = 0
         with open(self.filename, 'rb') as f:
             if f.read(4) != b'MThd':
-                return 0 # Not a valid MIDI
+                return 0
             header_length = struct.unpack('>I', f.read(4))[0]
             header_data = f.read(header_length)
             file_format, num_tracks, _ = struct.unpack('>HHH', header_data)
@@ -254,24 +236,20 @@ cdef class MidiParser:
                     ts.end = ts.ptr + len(data_bytes)
                     ts.current_tick = 0
                     ts.last_status = -1
-                    ts.track_index = 0 # Not important for counting
+                    ts.track_index = 0
 
 
                     while next_raw_event(&ts, &raw_ev):
                         total_event_count += 1
-                        
-                        # Safety break for infinite loops
                         if total_event_count > 50000000:
                             print("[ERROR] Event count limit exceeded! Possible infinite loop.")
                             break
                 else:
-                    # Skip unknown chunk
                     f.seek(track_length, 1)
         
         return total_event_count
 
     def parse(self, progress_queue=None, total_events=0):
-        # Helper to route messages
         def _log(message):
             if progress_queue:
                 if isinstance(message, dict):
@@ -281,7 +259,6 @@ cdef class MidiParser:
             else:
                 print(message)
 
-        # Reset all data attributes
         self.note_data_for_gpu = np.empty((0,), dtype=GPU_NOTE_DTYPE)
         self.note_events_for_playback = np.empty((0,), dtype=PLAYBACK_EVENT_DTYPE)
         self.program_change_events = []
@@ -325,7 +302,6 @@ cdef class MidiParser:
                 else:
                     _log(f"Skipping unknown chunk: {track_chunk_id.decode('ascii', 'ignore')}")
 
-        # --- C++ Data Structures ---
         cdef vector[GpuNote] temp_gpu_notes_vec
         cdef vector[PlaybackEvent] temp_playback_events_vec
         cdef vector[PlaybackEvent] temp_pitch_bend_vec
@@ -356,7 +332,7 @@ cdef class MidiParser:
                 current_events.push_back(raw_ev)
 
         cdef double current_time_sec = 0.0
-        cdef uint32_t current_tempo_usec = 500000 # MIDI default
+        cdef uint32_t current_tempo_usec = 500000
         cdef uint32_t last_event_tick = 0
         cdef double max_off_time = 0.0 
         cdef long total_event_count = 0
@@ -390,7 +366,7 @@ cdef class MidiParser:
                 if do_log and (total_event_count - last_log_event_count) >= 5000:
                     with gil:
                         now = time.monotonic()
-                        if (now - last_log_time) >= 0.1: # Update 10 times a sec
+                        if (now - last_log_time) >= 0.1:
                             last_log_event_count = total_event_count
                             last_log_time = now
                             
@@ -419,13 +395,13 @@ cdef class MidiParser:
                 data1 = raw_ev.data1
                 data2 = raw_ev.data2
 
-                if event_type == 0x90 and data2 > 0:  # Note On
+                if event_type == 0x90 and data2 > 0:
                     on_info.on_time_sec = current_time_sec
                     on_info.velocity = data2
                     on_info.track_num = track_num
                     note_on_stack[data1][channel].push_back(on_info)
 
-                elif event_type == 0x80 or (event_type == 0x90 and data2 == 0):  # Note Off
+                elif event_type == 0x80 or (event_type == 0x90 and data2 == 0):
                     if note_on_stack[data1][channel].size() > 0:
                         on_info = note_on_stack[data1][channel].back()
                         note_on_stack[data1][channel].pop_back()
@@ -454,10 +430,10 @@ cdef class MidiParser:
                         playback_event.track_num = on_track_num
                         temp_playback_events_vec.push_back(playback_event)
 
-                elif event_type == 0xFF and raw_ev.meta_type == 0x51:  # Set Tempo
+                elif event_type == 0xFF and raw_ev.meta_type == 0x51:
                     current_tempo_usec = raw_ev.meta_val
                 
-                elif event_type == 0xE0: # Pitch Bend
+                elif event_type == 0xE0:
                     pitch_bend_value = (data2 << 7) | data1
                     playback_event.on_time = current_time_sec
                     playback_event.off_time = current_time_sec
@@ -467,7 +443,6 @@ cdef class MidiParser:
                     playback_event.track_num = pitch_bend_value
                     temp_pitch_bend_vec.push_back(playback_event)
 
-                # Fetch next event for this track
                 ts = track_states[track_num]
                 if next_raw_event(&ts, &raw_ev):
                     track_states[track_num] = ts
@@ -475,7 +450,6 @@ cdef class MidiParser:
                     heap_val = (((<uint64_t>raw_ev.abs_tick) << 32) | <uint64_t>track_num)
                     heap_push(event_heap, heap_val)
 
-        # --- Finalization (C++ std::sort) ---
         _log("Note matching complete. Finalizing...")
         
         cdef size_t n_gpu_notes = temp_gpu_notes_vec.size()
@@ -499,7 +473,6 @@ cdef class MidiParser:
                    &temp_playback_events_vec[0],
                    n_playback_events * sizeof(PlaybackEvent))
             
-        # Pitch bend events stored in temp_pitch_bend_vec (unordered); convert to Python list of tuples
         if temp_pitch_bend_vec.size() > 0:
             self.pitch_bend_events = [(temp_pitch_bend_vec[i].on_time,
                                        temp_pitch_bend_vec[i].channel,
@@ -507,7 +480,6 @@ cdef class MidiParser:
                                       for i in range(temp_pitch_bend_vec.size())]
         self.total_duration_sec = max_off_time
 
-        # Free large temporaries
         track_buffers = []
         event_heap = vector[uint64_t]()
         track_states = vector[TrackState]()

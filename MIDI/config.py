@@ -20,7 +20,8 @@ DEFAULT_CONFIG = {
     },
     "audio": {
         "midi_backend": "omnimidi",
-        "omnimidi_load_preference": "unset"
+        "omnimidi_load_preference": "unset",
+        "soundfont_path": None
     }
 }
 

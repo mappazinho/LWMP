@@ -1,6 +1,6 @@
 # cython: language_level=3
 from libc.stdlib cimport malloc, free, qsort
-from libc.string cimport memcpy
+from libc.string cimport memcpy, memset
 from libc.stdint cimport uint8_t, uint32_t, uint64_t, int64_t
 import ctypes
 import os
@@ -8,7 +8,6 @@ import sys
 from time import sleep 
 from libc.math cimport sin, M_PI, sqrt
 
-# --- Win32 API for loading DLLs ---
 cdef extern from "windows.h":
     ctypedef void* HMODULE
     ctypedef void* FARPROC
@@ -17,7 +16,6 @@ cdef extern from "windows.h":
     FARPROC GetProcAddress(HMODULE hModule, LPCSTR lpProcName)
     int FreeLibrary(HMODULE hLibModule)
 
-# --- BASS Constants ---
 cdef enum:
     BASS_OK = 0
     BASS_ERROR_ENDED = 27
@@ -40,12 +38,10 @@ cdef enum:
     BASS_MIDI_EVENT_NOTE = 1
     BASS_MIDI_EVENTS_ASYNC = 0x40000000
     
-    # Custom Internal Flags
     BASS_UNICODE = 0x80000000
     BASS_ATTRIB_VOL = 2
     BASS_ATTRIB_MIDI_VOICES = 0x12003
 
-# --- Types ---
 ctypedef uint32_t DWORD
 ctypedef int BOOL
 ctypedef uint64_t QWORD
@@ -54,7 +50,6 @@ ctypedef uint32_t HSOUNDFONT
 ctypedef void* HMUSIC 
 ctypedef void* HSAMPLE 
 
-# --- Function Pointers Types ---
 ctypedef BOOL (*t_BASS_Init)(int device, DWORD freq, DWORD flags, void* win, void* dsguid)
 ctypedef BOOL (*t_BASS_Free)()
 ctypedef BOOL (*t_BASS_SetConfig)(DWORD option, DWORD value)
@@ -118,13 +113,11 @@ cdef struct BASS_MIDI_FONT:
     int preset
     int bank
 
-# Internal Event Structure
 cdef struct MiniEvent:
     double time
     uint32_t status
     uint32_t param
 
-# --- Helper to load functions ---
 cdef void* get_func(HMODULE h, const char* name):
     return <void*>GetProcAddress(h, name)
 
@@ -145,7 +138,6 @@ cdef class BassMidiEngine:
     
     cdef uint64_t total_bytes_pushed
     
-    # High Performance Event Storage
     cdef MiniEvent* event_buffer
     cdef size_t event_count
     cdef size_t current_event_idx
@@ -168,7 +160,6 @@ cdef class BassMidiEngine:
         self.hBass = NULL
         self.hBassMidi = NULL
 
-        # 1. Load DLLs
         cdef bytes script_dir = os.path.dirname(os.path.abspath(__file__)).encode('mbcs')
         cdef bytes bass_path = os.path.join(script_dir.decode('mbcs'), "bassmidi", "bass.dll").encode('mbcs')
         cdef bytes bassmidi_path = os.path.join(script_dir.decode('mbcs'), "bassmidi", "bassmidi.dll").encode('mbcs')
@@ -188,7 +179,6 @@ cdef class BassMidiEngine:
             FreeLibrary(self.hBass)
             raise ImportError("Could not load bassmidi.dll")
 
-        # 2. Bind Functions
         self.f.Init = <t_BASS_Init>get_func(self.hBass, "BASS_Init")
         self.f.Free = <t_BASS_Free>get_func(self.hBass, "BASS_Free")
         self.f.SetConfig = <t_BASS_SetConfig>get_func(self.hBass, "BASS_SetConfig")
@@ -217,10 +207,9 @@ cdef class BassMidiEngine:
         self.f.MIDI_FontFree = <t_BASS_MIDI_FontFree>get_func(self.hBassMidi, "BASS_MIDI_FontFree")
         self.f.MIDI_StreamSetFonts = <t_BASS_MIDI_StreamSetFonts>get_func(self.hBassMidi, "BASS_MIDI_StreamSetFonts")
 
-        # 3. Initialize BASS
         self.f.SetConfig(BASS_CONFIG_FLOATDSP, 1)
         self.f.SetConfig(BASS_CONFIG_UPDATEPERIOD, 1)
-        self.f.SetConfig(BASS_CONFIG_BUFFER, 60000) # 60s buffer
+        self.f.SetConfig(BASS_CONFIG_BUFFER, 60000)
         
         if not self.f.Init(-1, 44100, 0, NULL, NULL):
             err = self.f.ErrorGetCode()
@@ -229,7 +218,6 @@ cdef class BassMidiEngine:
         
         self.is_initialized = True
         
-        # 4. Create Streams
         cdef DWORD flags
         if self.buffering_enabled:
             flags = BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT | BASS_MIDI_SINCINTER
@@ -250,8 +238,6 @@ cdef class BassMidiEngine:
 
         if soundfont_path:
             self.load_soundfont(self.decode_stream if self.buffering_enabled else self.midi_stream, soundfont_path)
-
-    # --- New Optimized Methods ---
 
     cpdef upload_events(self, double[:] times, uint32_t[:] statuses, uint32_t[:] params):
         """Loads sorted event arrays into internal C memory."""
@@ -278,6 +264,11 @@ cdef class BassMidiEngine:
         self.event_count = count
         self.current_event_idx = 0
         self.simulated_time = 0.0
+        self.total_bytes_pushed = 0
+        if self.playback_stream:
+            self.f.ChannelSetPosition(self.playback_stream, 0, BASS_POS_BYTE)
+        if self.decode_stream:
+            self.f.ChannelSetPosition(self.decode_stream, 0, BASS_POS_BYTE)
         if self.debug_mode: print(f"[Cython] Events uploaded successfully.")
 
     cpdef fill_buffer(self, double limit_seconds):
@@ -289,29 +280,26 @@ cdef class BassMidiEngine:
             return 0.0
 
         cdef double buffer_level
-        cdef double chunk_dur = 0.25
+        cdef double chunk_dur = 0.0005
         cdef HSTREAM decode = self.decode_stream
         cdef HSTREAM playback = self.playback_stream
         cdef MiniEvent* ev
-        cdef uint32_t cmd
         
-        # 1. Check Buffer Level
-        # Inline the get_buffer logic for speed
         cdef QWORD pos_bytes = self.f.ChannelGetPosition(playback, BASS_POS_BYTE)
-        if pos_bytes == <QWORD>-1: pos_bytes = 0
+        if pos_bytes == <QWORD>-1:
+            pos_bytes = 0
         cdef int64_t diff = <int64_t>self.total_bytes_pushed - <int64_t>pos_bytes
-        if diff < 0: diff = 0
+        if diff < 0:
+            diff = 0
         buffer_level = self.f.ChannelBytes2Seconds(playback, diff)
         
         if buffer_level >= limit_seconds:
             return buffer_level # Buffer healthy
 
-        # 2. Render Loop
         cdef int loops = 0
-        cdef int max_loops = 8
+        cdef int max_loops = 400
 
         while loops < max_loops:
-            # Events
             while self.current_event_idx < self.event_count:
                 ev = &self.event_buffer[self.current_event_idx]
                 if ev.time <= self.simulated_time:
@@ -319,15 +307,17 @@ cdef class BassMidiEngine:
                     self.current_event_idx += 1
                 else:
                     break
-            
+
             self.render_forward(chunk_dur)
             self.simulated_time += chunk_dur
             loops += 1
             
-            # Recalculate buffer quickly
             pos_bytes = self.f.ChannelGetPosition(playback, BASS_POS_BYTE)
+            if pos_bytes == <QWORD>-1:
+                pos_bytes = 0
             diff = <int64_t>self.total_bytes_pushed - <int64_t>pos_bytes
-            if diff < 0: diff = 0
+            if diff < 0:
+                diff = 0
             if self.f.ChannelBytes2Seconds(playback, diff) >= limit_seconds:
                 break
 
@@ -335,8 +325,6 @@ cdef class BassMidiEngine:
 
     cpdef set_current_time(self, double seconds):
         self.simulated_time = seconds
-        # Binary search to find new event index
-        # Linear scan is okay if not seeking often, but binary search is better
         cdef size_t L = 0
         cdef size_t R = self.event_count
         cdef size_t M
@@ -349,8 +337,6 @@ cdef class BassMidiEngine:
                 R = M
         self.current_event_idx = L
         if self.debug_mode: print(f"[Cython] Seek to {seconds}s -> Index {L}")
-
-    # --- Standard Methods ---
 
     cpdef set_volume(self, float volume):
         self.volume_level = volume
@@ -370,9 +356,12 @@ cdef class BassMidiEngine:
         if self.midi_stream:
             self.f.ChannelStop(self.midi_stream)
             self.f.ChannelSetPosition(self.midi_stream, 0, BASS_POS_BYTE)
-            self.total_bytes_pushed = 0
+        self.total_bytes_pushed = 0
         if self.buffering_enabled and self.decode_stream:
             self.f.ChannelSetPosition(self.decode_stream, 0, BASS_POS_BYTE)
+        self.current_event_idx = 0
+        self.simulated_time = 0.0
+        self.send_all_notes_off()
 
     cpdef set_voices(self, int voices):
         cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
@@ -389,13 +378,17 @@ cdef class BassMidiEngine:
         cdef const char* c_path = b_path_bytes
             
         self.soundfont = self.f.MIDI_FontInit(<const void*>c_path, 0)
+        if self.debug_mode:
+            print(f"[Cython] MIDI_FontInit handle={self.soundfont} err={self.f.ErrorGetCode()}")
         if not self.soundfont: return
         
         cdef BASS_MIDI_FONT font_struct
         font_struct.font = self.soundfont
         font_struct.preset = -1
         font_struct.bank = 0
-        self.f.MIDI_StreamSetFonts(stream, &font_struct, 1)
+        cdef BOOL ok = self.f.MIDI_StreamSetFonts(stream, &font_struct, 1)
+        if self.debug_mode:
+            print(f"[Cython] MIDI_StreamSetFonts ok={ok} err={self.f.ErrorGetCode()} stream={stream}")
 
     cpdef send_raw_event(self, uint32_t event, uint32_t param):
         cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
@@ -405,15 +398,18 @@ cdef class BassMidiEngine:
         cdef uint32_t cmd = status & 0xF0
         cdef uint32_t d1
         cdef uint32_t d2
+        cdef BOOL ok = 0
         
         if cmd == 0x90 or cmd == 0x80:
-            self.f.MIDI_StreamEvent(target, chan, BASS_MIDI_EVENT_NOTE, param)
+            ok = self.f.MIDI_StreamEvent(target, chan, BASS_MIDI_EVENT_NOTE, param)
         elif cmd == 0xE0:
             d1 = param & 0xFF
             d2 = (param >> 8) & 0xFF
-            self.f.MIDI_StreamEvent(target, chan, 14, d1 | (d2 << 7))
+            ok = self.f.MIDI_StreamEvent(target, chan, 14, d1 | (d2 << 7))
         elif cmd == 0xB0:
-            self.f.MIDI_StreamEvent(target, chan, param & 0xFF, (param >> 8) & 0xFF)
+            ok = self.f.MIDI_StreamEvent(target, chan, param & 0xFF, (param >> 8) & 0xFF)
+        if self.debug_mode and not ok:
+            print(f"[Cython] MIDI_StreamEvent failed: status=0x{status:02X} chan={chan} param={param} err={self.f.ErrorGetCode()}")
 
     cpdef send_all_notes_off(self):
         cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
@@ -461,32 +457,35 @@ cdef class BassMidiEngine:
         cdef DWORD written_bytes
         cdef DWORD chunk_written
         cdef DWORD err_val = 0xFFFFFFFF 
+        cdef DWORD to_read
         cdef int retries = 0
         
         try:
-            while remaining > 0:
-                to_read = chunk_size
-                if remaining < chunk_size: to_read = <DWORD>remaining
-                
-                read_bytes = self.f.ChannelGetData(decode, buf, to_read)
-                if read_bytes == err_val or read_bytes == 0: break
-                
-                chunk_written = 0
-                retries = 0
-                while chunk_written < read_bytes:
-                    written_bytes = self.f.StreamPutData(playback, buf + chunk_written, read_bytes - chunk_written)
-                    if written_bytes == err_val:
+            with nogil:
+                while remaining > 0:
+                    to_read = chunk_size
+                    if remaining < chunk_size:
+                        to_read = <DWORD>remaining
+                    
+                    read_bytes = self.f.ChannelGetData(decode, buf, to_read)
+                    if read_bytes == err_val or read_bytes == 0:
                         break
-                    if written_bytes == 0:
-                        retries += 1
-                        if retries > 50:
+                    
+                    chunk_written = 0
+                    retries = 0
+                    while chunk_written < read_bytes:
+                        written_bytes = self.f.StreamPutData(playback, buf + chunk_written, read_bytes - chunk_written)
+                        if written_bytes == err_val:
                             break
-                        sleep(0.001)
-                        continue
-                    chunk_written += written_bytes
-                
-                total_written += chunk_written
-                remaining -= read_bytes 
+                        if written_bytes == 0:
+                            retries += 1
+                            if retries > 50:
+                                break
+                            break
+                        chunk_written += written_bytes
+                    
+                    total_written += chunk_written
+                    remaining -= read_bytes
             
             self.total_bytes_pushed += total_written
             return self.f.ChannelBytes2Seconds(playback, total_written)

@@ -1,15 +1,6 @@
-# filename: midi_parser.py
-#
-# This file is now a 'shim' that imports the optimized Cython version.
-# Your main application (midiplayer.py) can keep importing 'MidiParser'
-# from this file without any changes.
-
 try:
-    # --- [CHANGED] ---
-    # Attempt to import the fast Cython module
     from midi_parser_cython import MidiParser, GPU_NOTE_DTYPE, PLAYBACK_EVENT_DTYPE
     print("Loaded optimized Cython MIDI parser.")
-    # --- [END CHANGED] ---
 
 except ImportError:
     print("="*50)
@@ -18,27 +9,25 @@ except ImportError:
     print("Please run 'build.bat' to compile the Cython version.")
     print("="*50)
     
-    # --- This is your original Python code as a fallback ---
     import struct
     import heapq
     import numpy as np
-    import time # For parse timer
+    import time
     from tqdm import tqdm
 
     GPU_NOTE_DTYPE = np.dtype([
-        ('on_time', 'f4'),      # vec2 note_times
-        ('off_time', 'f4'),     #
-        ('pitch', 'u1'),        # uvec3 note_info (byte 0) -> this is data1
-        ('velocity', 'u1'),     # uvec3 note_info (byte 1) -> this is data2
-        ('track', 'u1'),        # uvec3 note_info (byte 2) -> this is the channel
-        ('padding', 'u1')       # Padding to align to 4 bytes (total 12 bytes)
-    ], align=True) # <-- [CHANGED] align=True for safety
+        ('on_time', 'f4'),
+        ('off_time', 'f4'),
+        ('pitch', 'u1'),
+        ('velocity', 'u1'),
+        ('track', 'u1'),
+        ('padding', 'u1')
+    ], align=True)
     
-    # [NEW] Add the playback DType for compatibility
     PLAYBACK_EVENT_DTYPE = np.dtype([
         ('on_time', 'f8'), ('off_time', 'f8'), ('pitch', 'u1'),
         ('velocity', 'u1'), ('channel', 'u1'), ('track_num', 'u2')
-    ], align=True) # <-- [FIX] align=True is critical
+    ], align=True)
     
 
     class MidiParser:
@@ -51,28 +40,23 @@ except ImportError:
             self.filename = filename
             self.ticks_per_beat = 480
             
-            # Public attributes after parsing
             self.note_data_for_gpu = None
-            self.note_events_for_playback_list = [] # <-- Changed name
-            self.note_events_for_playback = None # <-- Final np array
+            self.note_events_for_playback_list = []
+            self.note_events_for_playback = None
             self.program_change_events = []
             self.pitch_bend_events = []
-            self.total_duration_sec = 0.0 # Will be set at end of parse()
+            self.total_duration_sec = 0.0
 
         def count_total_events(self):
-            # Pure python fallback doesn't need a progress bar,
-            # as it's not meant for huge files.
             return 0
 
         def parse(self, progress_queue=None, total_events=0):
             def _log(message):
                 if progress_queue:
-                    # Fallback parser doesn't send dicts, just strings
                     progress_queue.put(('progress', str(message)))
                 else:
                     print(message)
 
-            # Reset all data attributes
             self.note_data_for_gpu = None
             self.note_events_for_playback_list = []
             self.note_events_for_playback = None
@@ -117,19 +101,18 @@ except ImportError:
                     else:
                         _log(f"Skipping unknown chunk: {track_chunk_id.decode('ascii', 'ignore')}")
 
-            # Main processing loop
             event_heap = []
             for i, stream in enumerate(track_event_streams):
                 try:
                     first_tick, first_event = next(stream)
                     heapq.heappush(event_heap, (first_tick, i, first_event))
                 except StopIteration:
-                    continue # Ignore empty tracks
+                    continue
 
             current_time_sec = 0.0
-            current_tempo_usec = 500000 # MIDI default (120 BPM)
+            current_tempo_usec = 500000
             last_event_tick = 0
-            note_on_dict = {}  # Key: (note, channel), Value: list of (on_time_sec, velocity, track_num)
+            note_on_dict = {}
             
             max_off_time = 0.0 
 
@@ -162,11 +145,11 @@ except ImportError:
 
                 event_type, channel, data1, data2 = event
 
-                if event_type == 0x90 and data2 > 0:  # Note On
+                if event_type == 0x90 and data2 > 0:
                     key = (data1, channel)
                     note_on_dict.setdefault(key, []).append((current_time_sec, data2, track_num))
 
-                elif event_type == 0x80 or (event_type == 0x90 and data2 == 0):  # Note Off
+                elif event_type == 0x80 or (event_type == 0x90 and data2 == 0):
                     key = (data1, channel)
                     if key in note_on_dict and note_on_dict[key]:
                         on_time, vel, on_track_num = note_on_dict[key].pop(0)
@@ -181,10 +164,10 @@ except ImportError:
                         if not note_on_dict[key]:
                             del note_on_dict[key]
 
-                elif event_type == 0xFF and data1 == 0x51:  # Set Tempo
+                elif event_type == 0xFF and data1 == 0x51:
                     current_tempo_usec = data2
                 
-                elif event_type == 0xE0: # Pitch Bend
+                elif event_type == 0xE0:
                     pitch_bend_value = (data2 << 7) | data1
                     self.pitch_bend_events.append((current_time_sec, channel, pitch_bend_value))
 
@@ -192,15 +175,14 @@ except ImportError:
                     next_tick, next_event = next(track_event_streams[track_num])
                     heapq.heappush(event_heap, (next_tick, track_num, next_event))
                 except StopIteration:
-                    continue # This track is finished
+                    continue
 
-            # Finalization
             _log("Note matching complete. Finalizing...")
             
             if temp_gpu_notes:
                 _log(f"Sorting {len(temp_gpu_notes)} notes...")
                 self.note_data_for_gpu = np.array(temp_gpu_notes, dtype=GPU_NOTE_DTYPE)
-                self.note_data_for_gpu.sort(order='on_time') # Sort after creation
+                self.note_data_for_gpu.sort(order='on_time')
             else:
                 self.note_data_for_gpu = np.empty((0,), dtype=GPU_NOTE_DTYPE)
                 
