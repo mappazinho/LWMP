@@ -3,7 +3,7 @@ cls
 title Compiler
 echo LWMP Builder
 echo Checking dependencies
-pip install --no-warn-script-location numpy Cython setuptools
+pip install --no-warn-script-location numpy cython setuptools pyopengl pyopengl_accelerate pygame
 
 echo Dependencies cleared, move on?
 pause
