@@ -1,0 +1,585 @@
+# cython: language_level=3
+from libc.stdlib cimport malloc, free, qsort
+from libc.string cimport memcpy
+from libc.stdint cimport uint8_t, uint32_t, uint64_t, int64_t
+import ctypes
+import os
+import sys
+from time import sleep 
+from libc.math cimport sin, M_PI, sqrt
+
+# --- Win32 API for loading DLLs ---
+cdef extern from "windows.h":
+    ctypedef void* HMODULE
+    ctypedef void* FARPROC
+    ctypedef const char* LPCSTR
+    HMODULE LoadLibraryA(LPCSTR lpLibFileName)
+    FARPROC GetProcAddress(HMODULE hModule, LPCSTR lpProcName)
+    int FreeLibrary(HMODULE hLibModule)
+
+# --- BASS Constants ---
+cdef enum:
+    BASS_OK = 0
+    BASS_ERROR_ENDED = 27
+    BASS_CONFIG_BUFFER = 0
+    BASS_CONFIG_UPDATEPERIOD = 1
+    BASS_CONFIG_FLOATDSP = 6
+    
+    BASS_STREAM_AUTOFREE = 0x40000
+    BASS_STREAM_DECODE = 0x200000
+    BASS_SAMPLE_FLOAT = 0x100
+    BASS_MIDI_DECAYEND = 0x1000
+    BASS_MIDI_NOFX = 0x2000
+    BASS_MIDI_DECAYSEEK = 0x4000
+    BASS_MIDI_SINCINTER = 0x800000
+    
+    BASS_POS_BYTE = 0
+    STREAMPROC_PUSH = -1
+    
+    BASS_MIDI_EVENTS_RAW = 0x10000
+    BASS_MIDI_EVENT_NOTE = 1
+    BASS_MIDI_EVENT_PITCH = 4  # Pitch Wheel event type
+    BASS_MIDI_EVENTS_ASYNC = 0x40000000
+    
+    # Custom Internal Flags
+    BASS_UNICODE = 0x80000000
+    BASS_ATTRIB_MIDI_VOICES = 0x12003
+
+# --- Types ---
+ctypedef uint32_t DWORD
+ctypedef int BOOL
+ctypedef uint64_t QWORD
+ctypedef uint32_t HSTREAM
+ctypedef uint32_t HSOUNDFONT
+ctypedef void* HMUSIC 
+ctypedef void* HSAMPLE 
+
+# --- Function Pointers Types ---
+ctypedef BOOL (*t_BASS_Init)(int device, DWORD freq, DWORD flags, void* win, void* dsguid)
+ctypedef BOOL (*t_BASS_Free)()
+ctypedef BOOL (*t_BASS_SetConfig)(DWORD option, DWORD value)
+ctypedef DWORD (*t_BASS_GetConfig)(DWORD option)
+ctypedef int (*t_BASS_ErrorGetCode)() nogil
+ctypedef HSTREAM (*t_BASS_StreamCreate)(DWORD freq, DWORD chans, DWORD flags, void* proc, void* user)
+ctypedef BOOL (*t_BASS_StreamFree)(HSTREAM handle)
+ctypedef DWORD (*t_BASS_StreamPutData)(HSTREAM handle, const void* buffer, DWORD length) nogil
+ctypedef QWORD (*t_BASS_StreamGetFilePosition)(HSTREAM handle, DWORD mode)
+ctypedef BOOL (*t_BASS_ChannelPlay)(HSTREAM handle, BOOL restart)
+ctypedef BOOL (*t_BASS_ChannelPause)(HSTREAM handle)
+ctypedef BOOL (*t_BASS_ChannelStop)(HSTREAM handle)
+ctypedef DWORD (*t_BASS_ChannelIsActive)(HSTREAM handle)
+ctypedef BOOL (*t_BASS_ChannelSetPosition)(HSTREAM handle, QWORD pos, DWORD mode)
+ctypedef QWORD (*t_BASS_ChannelGetPosition)(HSTREAM handle, DWORD mode)
+ctypedef DWORD (*t_BASS_ChannelGetData)(HSTREAM handle, void* buffer, DWORD length) nogil
+ctypedef QWORD (*t_BASS_ChannelSeconds2Bytes)(HSTREAM handle, double pos) nogil
+ctypedef double (*t_BASS_ChannelBytes2Seconds)(HSTREAM handle, QWORD pos) nogil
+ctypedef BOOL (*t_BASS_SetVolume)(float volume)
+ctypedef BOOL (*t_BASS_ChannelSetAttribute)(HSTREAM handle, DWORD attrib, float value)
+
+ctypedef HSTREAM (*t_BASS_MIDI_StreamCreate)(DWORD channels, DWORD flags, DWORD freq)
+ctypedef DWORD (*t_BASS_MIDI_StreamEvents)(HSTREAM handle, DWORD mode, const void* events, DWORD length) nogil
+ctypedef BOOL (*t_BASS_MIDI_StreamEvent)(HSTREAM handle, DWORD chan, DWORD event, DWORD param) nogil
+ctypedef HSOUNDFONT (*t_BASS_MIDI_FontInit)(const void* file, DWORD flags)
+ctypedef HSOUNDFONT (*t_BASS_MIDI_FontLoad)(const void* file, DWORD flags)
+ctypedef BOOL (*t_BASS_MIDI_FontFree)(HSOUNDFONT handle)
+ctypedef BOOL (*t_BASS_MIDI_StreamSetFonts)(HSTREAM handle, void* fonts, DWORD count)
+
+cdef struct BassFuncs:
+    t_BASS_Init Init
+    t_BASS_Free Free
+    t_BASS_SetConfig SetConfig
+    t_BASS_GetConfig GetConfig
+    t_BASS_ErrorGetCode ErrorGetCode
+    t_BASS_StreamCreate StreamCreate
+    t_BASS_StreamFree StreamFree
+    t_BASS_StreamPutData StreamPutData
+    t_BASS_ChannelPlay ChannelPlay
+    t_BASS_ChannelPause ChannelPause
+    t_BASS_ChannelStop ChannelStop
+    t_BASS_ChannelIsActive ChannelIsActive
+    t_BASS_ChannelSetPosition ChannelSetPosition
+    t_BASS_ChannelGetPosition ChannelGetPosition
+    t_BASS_ChannelGetData ChannelGetData
+    t_BASS_ChannelSeconds2Bytes ChannelSeconds2Bytes
+    t_BASS_ChannelBytes2Seconds ChannelBytes2Seconds
+    t_BASS_SetVolume SetVolume
+    t_BASS_ChannelSetAttribute ChannelSetAttribute
+    
+    t_BASS_MIDI_StreamCreate MIDI_StreamCreate
+    t_BASS_MIDI_StreamEvents MIDI_StreamEvents
+    t_BASS_MIDI_StreamEvent MIDI_StreamEvent
+    t_BASS_MIDI_FontInit MIDI_FontInit
+    t_BASS_MIDI_FontLoad MIDI_FontLoad
+    t_BASS_MIDI_FontFree MIDI_FontFree
+    t_BASS_MIDI_StreamSetFonts MIDI_StreamSetFonts
+
+cdef struct BASS_MIDI_FONT:
+    HSOUNDFONT font
+    int preset
+    int bank
+
+# Internal Event Structure
+cdef struct MiniEvent:
+    double time
+    uint32_t status
+    uint32_t param
+
+# --- Helper to load functions ---
+cdef void* get_func(HMODULE h, const char* name):
+    return <void*>GetProcAddress(h, name)
+
+cdef class BassMidiEngine:
+    cdef HMODULE hBass
+    cdef HMODULE hBassMidi
+    cdef BassFuncs f
+    
+    cdef public bint is_initialized
+    cdef public bint buffering_enabled
+    cdef public bint debug_mode
+    
+    cdef public HSTREAM midi_stream
+    cdef public HSTREAM decode_stream
+    cdef public HSTREAM playback_stream
+    cdef HSOUNDFONT soundfont
+    
+    cdef uint64_t total_bytes_pushed
+    
+    # High Performance Event Storage
+    cdef MiniEvent* event_buffer
+    cdef size_t event_count
+    cdef size_t current_event_idx
+    cdef double simulated_time
+    
+    def __cinit__(self, dict audio_cfg, str soundfont_path=None, bint buffering=False, bint debug=False):
+        self.is_initialized = False
+        self.buffering_enabled = buffering
+        self.debug_mode = debug
+        self.midi_stream = 0
+        self.decode_stream = 0
+        self.playback_stream = 0
+        self.soundfont = 0
+        self.total_bytes_pushed = 0
+        self.event_buffer = NULL
+        self.event_count = 0
+        self.current_event_idx = 0
+        self.simulated_time = 0.0
+        self.hBass = NULL
+        self.hBassMidi = NULL
+
+        # 1. Load DLLs
+        cdef bytes script_dir = os.path.dirname(os.path.abspath(__file__)).encode('mbcs')
+        cdef bytes bass_path = os.path.join(script_dir.decode('mbcs'), "bassmidi", "bass.dll").encode('mbcs')
+        cdef bytes bassmidi_path = os.path.join(script_dir.decode('mbcs'), "bassmidi", "bassmidi.dll").encode('mbcs')
+        
+        if not os.path.exists(bass_path.decode('mbcs')):
+             bass_path = os.path.join(script_dir.decode('mbcs'), "bass.dll").encode('mbcs')
+             bassmidi_path = os.path.join(script_dir.decode('mbcs'), "bassmidi.dll").encode('mbcs')
+
+        if self.debug_mode: print(f"Loading BASS from: {bass_path.decode('mbcs')}")
+        
+        self.hBass = LoadLibraryA(bass_path)
+        if not self.hBass:
+            raise ImportError("Could not load bass.dll")
+            
+        self.hBassMidi = LoadLibraryA(bassmidi_path)
+        if not self.hBassMidi:
+            FreeLibrary(self.hBass)
+            raise ImportError("Could not load bassmidi.dll")
+
+        # 2. Bind Functions
+        self.f.Init = <t_BASS_Init>get_func(self.hBass, "BASS_Init")
+        self.f.Free = <t_BASS_Free>get_func(self.hBass, "BASS_Free")
+        self.f.SetConfig = <t_BASS_SetConfig>get_func(self.hBass, "BASS_SetConfig")
+        self.f.GetConfig = <t_BASS_GetConfig>get_func(self.hBass, "BASS_GetConfig")
+        self.f.ErrorGetCode = <t_BASS_ErrorGetCode>get_func(self.hBass, "BASS_ErrorGetCode")
+        self.f.StreamCreate = <t_BASS_StreamCreate>get_func(self.hBass, "BASS_StreamCreate")
+        self.f.StreamFree = <t_BASS_StreamFree>get_func(self.hBass, "BASS_StreamFree")
+        self.f.StreamPutData = <t_BASS_StreamPutData>get_func(self.hBass, "BASS_StreamPutData")
+        self.f.ChannelPlay = <t_BASS_ChannelPlay>get_func(self.hBass, "BASS_ChannelPlay")
+        self.f.ChannelPause = <t_BASS_ChannelPause>get_func(self.hBass, "BASS_ChannelPause")
+        self.f.ChannelStop = <t_BASS_ChannelStop>get_func(self.hBass, "BASS_ChannelStop")
+        self.f.ChannelIsActive = <t_BASS_ChannelIsActive>get_func(self.hBass, "BASS_ChannelIsActive")
+        self.f.ChannelSetPosition = <t_BASS_ChannelSetPosition>get_func(self.hBass, "BASS_ChannelSetPosition")
+        self.f.ChannelGetPosition = <t_BASS_ChannelGetPosition>get_func(self.hBass, "BASS_ChannelGetPosition")
+        self.f.ChannelGetData = <t_BASS_ChannelGetData>get_func(self.hBass, "BASS_ChannelGetData")
+        self.f.ChannelSeconds2Bytes = <t_BASS_ChannelSeconds2Bytes>get_func(self.hBass, "BASS_ChannelSeconds2Bytes")
+        self.f.ChannelBytes2Seconds = <t_BASS_ChannelBytes2Seconds>get_func(self.hBass, "BASS_ChannelBytes2Seconds")
+        self.f.SetVolume = <t_BASS_SetVolume>get_func(self.hBass, "BASS_SetVolume")
+        self.f.ChannelSetAttribute = <t_BASS_ChannelSetAttribute>get_func(self.hBass, "BASS_ChannelSetAttribute")
+
+        self.f.MIDI_StreamCreate = <t_BASS_MIDI_StreamCreate>get_func(self.hBassMidi, "BASS_MIDI_StreamCreate")
+        self.f.MIDI_StreamEvents = <t_BASS_MIDI_StreamEvents>get_func(self.hBassMidi, "BASS_MIDI_StreamEvents")
+        self.f.MIDI_StreamEvent = <t_BASS_MIDI_StreamEvent>get_func(self.hBassMidi, "BASS_MIDI_StreamEvent")
+        self.f.MIDI_FontInit = <t_BASS_MIDI_FontInit>get_func(self.hBassMidi, "BASS_MIDI_FontInit")
+        self.f.MIDI_FontLoad = <t_BASS_MIDI_FontLoad>get_func(self.hBassMidi, "BASS_MIDI_FontLoad")
+        self.f.MIDI_FontFree = <t_BASS_MIDI_FontFree>get_func(self.hBassMidi, "BASS_MIDI_FontFree")
+        self.f.MIDI_StreamSetFonts = <t_BASS_MIDI_StreamSetFonts>get_func(self.hBassMidi, "BASS_MIDI_StreamSetFonts")
+
+        # 3. Initialize BASS
+        self.f.SetConfig(BASS_CONFIG_FLOATDSP, 1)
+        self.f.SetConfig(BASS_CONFIG_UPDATEPERIOD, 1)
+        self.f.SetConfig(BASS_CONFIG_BUFFER, 60000) # 60s buffer
+        
+        if not self.f.Init(-1, 44100, 0, NULL, NULL):
+            err = self.f.ErrorGetCode()
+            if err != 14: # BASS_ERROR_ALREADY
+                raise RuntimeError(f"BASS_Init failed: {err}")
+        
+        # Don't set global system volume - use channel volume instead
+        # self.f.SetVolume(0.5)
+        self.is_initialized = True
+        
+        # 4. Create Streams
+        cdef DWORD flags
+        if self.buffering_enabled:
+            flags = BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT | BASS_MIDI_SINCINTER
+            self.decode_stream = self.f.MIDI_StreamCreate(16, flags, 44100)
+            if not self.decode_stream: raise RuntimeError(f"Decode Stream Create Failed: {self.f.ErrorGetCode()}")
+            self.f.ChannelSetAttribute(self.decode_stream, BASS_ATTRIB_MIDI_VOICES, 512.0)
+            
+            self.playback_stream = self.f.StreamCreate(44100, 2, BASS_SAMPLE_FLOAT, <void*>STREAMPROC_PUSH, NULL)
+            if not self.playback_stream: raise RuntimeError(f"Playback Stream Create Failed: {self.f.ErrorGetCode()}")
+            self.midi_stream = self.playback_stream 
+        else:
+            flags = BASS_STREAM_AUTOFREE | BASS_SAMPLE_FLOAT | BASS_MIDI_SINCINTER | BASS_MIDI_EVENTS_ASYNC
+            self.midi_stream = self.f.MIDI_StreamCreate(16, flags, 44100)
+            if not self.midi_stream: raise RuntimeError(f"MIDI Stream Create Failed: {self.f.ErrorGetCode()}")
+            self.f.ChannelSetAttribute(self.midi_stream, BASS_ATTRIB_MIDI_VOICES, 512.0)
+
+        if soundfont_path:
+            self.load_soundfont(self.decode_stream if self.buffering_enabled else self.midi_stream, soundfont_path)
+
+    # --- New Optimized Methods ---
+
+    cpdef upload_events(self, double[:] times, uint32_t[:] statuses, uint32_t[:] params):
+        """Loads sorted event arrays into internal C memory."""
+        if self.event_buffer != NULL:
+            free(self.event_buffer)
+            self.event_buffer = NULL
+            self.event_count = 0
+        
+        cdef size_t count = times.shape[0]
+        if count == 0: return
+
+        if self.debug_mode: print(f"[Cython] Uploading {count} events...")
+        
+        self.event_buffer = <MiniEvent*>malloc(count * sizeof(MiniEvent))
+        if self.event_buffer == NULL:
+            raise MemoryError("Failed to allocate event buffer")
+        
+        cdef size_t i
+        for i in range(count):
+            self.event_buffer[i].time = times[i]
+            self.event_buffer[i].status = statuses[i]
+            self.event_buffer[i].param = params[i]
+            
+        self.event_count = count
+        self.current_event_idx = 0
+        self.simulated_time = 0.0
+        self.total_bytes_pushed = 0  # Reset buffer tracking
+        # Reset stream positions for clean start
+        if self.playback_stream:
+            self.f.ChannelSetPosition(self.playback_stream, 0, BASS_POS_BYTE)
+        if self.decode_stream:
+            self.f.ChannelSetPosition(self.decode_stream, 0, BASS_POS_BYTE)
+        if self.debug_mode: print(f"[Cython] Events uploaded successfully.")
+
+    cpdef fill_buffer(self, double limit_seconds):
+        """
+        Main tight loop. Checks buffer level and renders if needed.
+        Returns True if more rendering is needed (buffer not full), False if buffer full or done.
+        """
+        if not self.buffering_enabled or self.event_buffer == NULL:
+            return 0.0
+
+        cdef double buffer_level
+        cdef double chunk_dur = 0.0005 # 0.5ms granularity (2000Hz)
+        cdef HSTREAM decode = self.decode_stream
+        cdef HSTREAM playback = self.playback_stream
+        cdef MiniEvent* ev
+        
+        # 1. Check Buffer Level
+        # Inline the get_buffer logic for speed
+        cdef QWORD pos_bytes = self.f.ChannelGetPosition(playback, BASS_POS_BYTE)
+        if pos_bytes == <QWORD>-1: pos_bytes = 0
+        cdef int64_t diff = <int64_t>self.total_bytes_pushed - <int64_t>pos_bytes
+        if diff < 0: diff = 0
+        buffer_level = self.f.ChannelBytes2Seconds(playback, diff)
+        
+        if buffer_level >= limit_seconds:
+            return buffer_level # Buffer healthy
+
+        # 2. Render Loop (fill up to 50ms at a time to avoid freezing UI too long)
+        cdef int loops = 0
+        cdef int max_loops = 400 # 400 * 0.5ms = 200ms max blocking time
+        
+        # with nogil: ... (Disabled to prevent event corruption)
+        #    pass
+                
+        # Back in GIL (or simpler implementation):
+        # We will just loop in Python-callable space but do multiple small steps
+        
+        while loops < max_loops: # Use configured max_loops
+            # Events
+            while self.current_event_idx < self.event_count:
+                ev = &self.event_buffer[self.current_event_idx]
+                if ev.time <= self.simulated_time:
+                    chan = ev.status & 0x0F
+                    # We stored status as full byte (0x90+ch), but StreamEvent needs chan and event type separately
+                    # actually our stored 'status' is just the status byte.
+                    # BASS_MIDI_StreamEvent takes (handle, chan, event, param).
+                    # For NoteOn (0x90), event is MIDI_EVENT_NOTE.
+                    # For PitchBend (0xE0), event is MIDI_EVENT_PITCH (14). 
+                    # This mapping is annoying to do here.
+                    # Let's assume upload_events pre-converted status to BASS event type?
+                    # No, we passed raw MIDI bytes.
+                    
+                    cmd = ev.status & 0xF0
+                    if cmd == 0x90 or cmd == 0x80:
+                         self.f.MIDI_StreamEvent(decode, chan, BASS_MIDI_EVENT_NOTE, ev.param)
+                    elif cmd == 0xE0:
+                         self.f.MIDI_StreamEvent(decode, chan, BASS_MIDI_EVENT_PITCH, ev.param)
+                    # Skip unknown events
+                    
+                    self.current_event_idx += 1
+                else:
+                    break
+            
+            self.render_forward(chunk_dur)
+            self.simulated_time += chunk_dur
+            loops += 1
+            
+            # Recalculate buffer quickly
+            pos_bytes = self.f.ChannelGetPosition(playback, BASS_POS_BYTE)
+            diff = <int64_t>self.total_bytes_pushed - <int64_t>pos_bytes
+            if diff < 0: diff = 0
+            if self.f.ChannelBytes2Seconds(playback, diff) >= limit_seconds:
+                break
+
+        return self.get_buffer_level()
+
+    cpdef set_current_time(self, double seconds):
+        self.simulated_time = seconds
+        # Binary search to find new event index
+        # Linear scan is okay if not seeking often, but binary search is better
+        cdef size_t L = 0
+        cdef size_t R = self.event_count
+        cdef size_t M
+        
+        while L < R:
+            M = (L + R) // 2
+            if self.event_buffer[M].time < seconds:
+                L = M + 1
+            else:
+                R = M
+        self.current_event_idx = L
+        if self.debug_mode: print(f"[Cython] Seek to {seconds}s -> Index {L}")
+
+    # --- Standard Methods ---
+
+    cpdef set_volume(self, float volume):
+        """Sets volume on the active playback channel (not system volume)."""
+        cdef HSTREAM target
+        if self.buffering_enabled:
+            target = self.playback_stream
+        else:
+            target = self.midi_stream
+        if target:
+            # BASS_ATTRIB_VOL = 2
+            self.f.ChannelSetAttribute(target, 2, volume)
+
+    cpdef pause(self):
+        """Immediately pause the playback stream."""
+        cdef HSTREAM target
+        if self.buffering_enabled:
+            target = self.playback_stream
+        else:
+            target = self.midi_stream
+        if target:
+            self.f.ChannelPause(target)
+
+    cpdef resume(self):
+        """Resume playback from paused state."""
+        cdef HSTREAM target
+        if self.buffering_enabled:
+            target = self.playback_stream
+        else:
+            target = self.midi_stream
+        if target:
+            self.f.ChannelPlay(target, False)
+
+    cpdef play(self):
+        """Start playback (alias for resume)."""
+        self.resume()
+    cpdef stop(self):
+        """Immediately stop the playback stream and send all notes off."""
+        cdef HSTREAM target
+        if self.buffering_enabled:
+            target = self.playback_stream
+        else:
+            target = self.midi_stream
+        if target:
+            self.f.ChannelStop(target)
+            self.f.ChannelSetPosition(target, 0, BASS_POS_BYTE)
+        # Reset decode stream position too
+        if self.buffering_enabled and self.decode_stream:
+            self.f.ChannelSetPosition(self.decode_stream, 0, BASS_POS_BYTE)
+        self.total_bytes_pushed = 0
+        self.current_event_idx = 0
+        self.simulated_time = 0.0
+        self.send_all_notes_off()
+
+    cpdef set_voices(self, int voices):
+        cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
+        if target:
+             self.f.ChannelSetAttribute(target, BASS_ATTRIB_MIDI_VOICES, <float>voices)
+
+    cpdef load_soundfont(self, HSTREAM stream, str path):
+        if self.debug_mode: print(f"[Cython] load_soundfont called for path: {path}")
+        if not path or not os.path.exists(path): return
+
+        cdef bytes b_path_bytes
+        try: b_path_bytes = path.encode('mbcs')
+        except: b_path_bytes = path.encode('utf-8')
+        cdef const char* c_path = b_path_bytes
+            
+        self.soundfont = self.f.MIDI_FontInit(<const void*>c_path, 0)
+        if not self.soundfont: return
+        
+        cdef BASS_MIDI_FONT font_struct
+        font_struct.font = self.soundfont
+        font_struct.preset = -1
+        font_struct.bank = 0
+        self.f.MIDI_StreamSetFonts(stream, &font_struct, 1)
+
+    cpdef send_raw_event(self, uint32_t event, uint32_t param):
+        cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
+        if not target: return
+        cdef uint32_t status = event & 0xFF
+        cdef uint32_t chan = status & 0x0F
+        cdef uint32_t cmd = status & 0xF0
+        
+        if cmd == 0x90 or cmd == 0x80:
+            self.f.MIDI_StreamEvent(target, chan, BASS_MIDI_EVENT_NOTE, param)
+        elif cmd == 0xE0:
+            self.f.MIDI_StreamEvent(target, chan, 14, param)
+
+    cpdef send_all_notes_off(self):
+        cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
+        if not target: return
+        cdef int c
+        for c in range(16):
+            self.f.MIDI_StreamEvent(target, c, 21, 0)
+    
+    cpdef test_piano_sweep(self):
+        if not self.soundfont: return
+        cdef HSTREAM sweep_stream = self.f.MIDI_StreamCreate(16, BASS_SAMPLE_FLOAT | BASS_STREAM_AUTOFREE, 44100)
+        if not sweep_stream: return
+        cdef BASS_MIDI_FONT font_struct
+        font_struct.font = self.soundfont
+        font_struct.preset = -1
+        font_struct.bank = 0
+        self.f.MIDI_StreamSetFonts(sweep_stream, &font_struct, 1)
+        self.f.ChannelPlay(sweep_stream, False)
+        cdef int note
+        for note in range(60, 73):
+            self.f.MIDI_StreamEvent(sweep_stream, 0, BASS_MIDI_EVENT_NOTE, note | (100 << 8))
+            sleep(0.1)
+            self.f.MIDI_StreamEvent(sweep_stream, 0, BASS_MIDI_EVENT_NOTE, note)
+        self.f.StreamFree(sweep_stream)
+
+    cpdef double render_forward(self, double seconds):
+        if not self.buffering_enabled: return 0.0
+        
+        cdef HSTREAM decode = self.decode_stream
+        cdef HSTREAM playback = self.playback_stream
+        
+        if not decode or not playback: return 0.0
+        
+        cdef QWORD bytes_needed = self.f.ChannelSeconds2Bytes(decode, seconds)
+        if bytes_needed == 0 or bytes_needed == <QWORD>-1: return 0.0
+        
+        cdef DWORD chunk_size = 65536 
+        cdef char* buf = <char*>malloc(chunk_size)
+        if not buf: return 0.0
+        
+        cdef DWORD total_written = 0
+        cdef QWORD remaining = bytes_needed
+        cdef DWORD read_bytes
+        cdef DWORD written_bytes
+        cdef DWORD chunk_written
+        cdef DWORD err_val = 0xFFFFFFFF 
+        cdef int retries = 0
+        
+        try:
+            with nogil:
+                while remaining > 0:
+                    to_read = chunk_size
+                    if remaining < chunk_size: to_read = <DWORD>remaining
+                    
+                    read_bytes = self.f.ChannelGetData(decode, buf, to_read)
+                    if read_bytes == err_val or read_bytes == 0: break
+                    
+                    chunk_written = 0
+                    retries = 0
+                    while chunk_written < read_bytes:
+                        written_bytes = self.f.StreamPutData(playback, buf + chunk_written, read_bytes - chunk_written)
+                        if written_bytes == err_val: break
+                        if written_bytes == 0: 
+                             retries += 1
+                             if retries > 50: break 
+                             break 
+                        chunk_written += written_bytes
+                    
+                    total_written += chunk_written
+                    remaining -= read_bytes 
+            
+            self.total_bytes_pushed += total_written
+            return self.f.ChannelBytes2Seconds(playback, total_written)
+        finally:
+            free(buf)
+
+    cpdef double get_buffer_level(self):
+        if not self.buffering_enabled or not self.playback_stream: return 0.0
+        cdef QWORD current_pos_bytes = self.f.ChannelGetPosition(self.playback_stream, BASS_POS_BYTE)
+        if current_pos_bytes == <QWORD>-1: return 0.0
+        cdef int64_t diff = <int64_t>self.total_bytes_pushed - <int64_t>current_pos_bytes
+        if diff < 0: diff = 0
+        return self.f.ChannelBytes2Seconds(self.playback_stream, diff)
+
+    cpdef double get_position_seconds(self):
+        if not self.playback_stream: return 0.0
+        cdef QWORD b = self.f.ChannelGetPosition(self.playback_stream, BASS_POS_BYTE)
+        if b == <QWORD>-1: return 0.0
+        return self.f.ChannelBytes2Seconds(self.playback_stream, b)
+
+    cpdef bint is_active(self):
+        cdef HSTREAM target
+        if self.buffering_enabled:
+            target = self.playback_stream
+        else:
+            target = self.midi_stream
+        if not target: return False
+        return self.f.ChannelIsActive(target) == 1  # BASS_ACTIVE_PLAYING
+
+    cpdef reset_position(self):
+        """Reset stream position to beginning."""
+        if self.midi_stream: 
+            self.f.ChannelSetPosition(self.midi_stream, 0, BASS_POS_BYTE)
+            self.total_bytes_pushed = 0
+        if self.buffering_enabled and self.decode_stream:
+            self.f.ChannelSetPosition(self.decode_stream, 0, BASS_POS_BYTE)
+
+    cpdef shutdown(self):
+        if self.event_buffer != NULL:
+            free(self.event_buffer)
+            self.event_buffer = NULL
+        if self.midi_stream: self.f.StreamFree(self.midi_stream)
+        if self.decode_stream: self.f.StreamFree(self.decode_stream)
+        if self.soundfont: self.f.MIDI_FontFree(self.soundfont)
+        if self.is_initialized: self.f.Free()
+        if self.hBassMidi: FreeLibrary(self.hBassMidi)
+        if self.hBass: FreeLibrary(self.hBass)
+
+    def __dealloc__(self):
+        self.shutdown()

@@ -1,0 +1,18 @@
+<Colors>
+    <Color R="255" G="0" B="0" />        <!-- Red -->
+    <Color R="255" G="64" B="0" />
+    <Color R="255" G="128" B="0" />
+    <Color R="255" G="191" B="0" />      <!-- Orange-Yellow -->
+    <Color R="255" G="255" B="0" />      <!-- Yellow -->
+    <Color R="128" G="255" B="0" />
+    <Color R="0" G="255" B="0" />        <!-- Green -->
+    <Color R="0" G="255" B="128" />
+    <Color R="0" G="255" B="255" />      <!-- Cyan -->
+    <Color R="0" G="128" B="255" />
+    <Color R="0" G="0" B="255" />        <!-- Blue -->
+    <Color R="128" G="0" B="255" />
+    <Color R="255" G="0" B="255" />      <!-- Magenta -->
+    <Color R="255" G="0" B="128" />
+    <Color R="255" G="0" B="64" />
+    <Color R="255" G="0" B="0" />        <!-- Back to Red -->
+</Colors>
