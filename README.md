@@ -23,3 +23,5 @@ Just launch build.bat, and all dependencies and compilation happens automaticall
 `python MIDI/midiplayer.py`
 
 Requires Python 3.13+ for building!
+
+### ⚠️ Still in beta stage, lots of bugs still needs fixing and features are somewhat incomplete.
