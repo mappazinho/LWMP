@@ -8,6 +8,7 @@ Lightweight MIDI Player for heavy MIDI files/Black MIDI, made with Python and Cy
 • Simple GUI for noobies who just want to load and enjoy  
 • Graphs for CPU usage and NPS (Notes Per Second)  
 • Realtime note counter
+• Support for custom bundled OmniMIDI dlls
 
 # Build instructions (for Windows)
 Just launch build.bat, and all dependencies and compilation happens automatically.  
