@@ -1,6 +1,6 @@
 try:
     from midi_parser_cython import MidiParser, GPU_NOTE_DTYPE, PLAYBACK_EVENT_DTYPE
-    print("Loaded optimized Cython MIDI parser.")
+    print("Loaded Cython MIDI parser.")
 
 except ImportError:
     print("="*50)

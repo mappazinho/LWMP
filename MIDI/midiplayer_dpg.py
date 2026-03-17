@@ -140,6 +140,47 @@ class DpgMidiPlayerApp:
         self._prepare_startup_screen()
         atexit.register(self.cleanup)
 
+    def _gui_cfg(self):
+        return CONFIG["gui"]
+
+    def _color_tuple(self, key):
+        color = self._gui_cfg()[key]
+        return int(color[0]), int(color[1]), int(color[2])
+
+    def _mix_color(self, base, target, amount):
+        amount = max(0.0, min(float(amount), 1.0))
+        return [
+            int(round((base[i] * (1.0 - amount)) + (target[i] * amount)))
+            for i in range(3)
+        ]
+
+    def _derive_palette_from_seed(self, seed):
+        seed = [int(max(0, min(255, c))) for c in seed[:3]]
+        dark = [16, 18, 22]
+        panel = [26, 28, 34]
+        frame = [34, 38, 46]
+        light = [232, 235, 240]
+        muted = [150, 156, 166]
+
+        return {
+            "theme_seed": seed,
+            "window_bg": self._mix_color(dark, seed, 0.08),
+            "child_bg": self._mix_color(panel, seed, 0.12),
+            "frame_bg": self._mix_color(frame, seed, 0.15),
+            "frame_bg_hovered": self._mix_color(frame, seed, 0.28),
+            "frame_bg_active": self._mix_color(frame, seed, 0.42),
+            "button": self._mix_color(seed, light, 0.08),
+            "button_hovered": self._mix_color(seed, light, 0.2),
+            "button_active": self._mix_color(seed, dark, 0.15),
+            "accent_text": self._mix_color(seed, light, 0.42),
+            "muted_text": self._mix_color(muted, seed, 0.16),
+            "body_text": self._mix_color(light, seed, 0.08),
+        }
+
+    def _set_item_visibility(self, item_tag, visible):
+        if dpg.does_item_exist(item_tag):
+            dpg.configure_item(item_tag, show=bool(visible))
+
     def _get_screen_size(self):
         try:
             user32 = ctypes.windll.user32
@@ -269,6 +310,84 @@ class DpgMidiPlayerApp:
             lines.append("Choose a startup mode to initialize audio.")
         return "\n".join(lines)
 
+    def _apply_gui_customization(self):
+        gui_cfg = self._gui_cfg()
+        self._set_item_visibility("subtitle_text", gui_cfg["show_subtitle"])
+        self._set_item_visibility("audio_panel", gui_cfg["show_audio_panel"])
+        self._set_item_visibility("status_row", gui_cfg["show_status_line"])
+        self._set_item_visibility("backend_hint_text", gui_cfg["show_backend_hint"])
+        self._set_item_visibility("performance_section", gui_cfg["show_performance_panel"])
+        self._set_item_visibility("nps_graph_cell", gui_cfg["show_nps_graph"])
+        self._set_item_visibility("cpu_graph_cell", gui_cfg["show_cpu_graph"])
+        self._bind_theme()
+
+    def show_customize_window(self):
+        gui_cfg = self._gui_cfg()
+        dpg.set_value("custom_show_subtitle", gui_cfg["show_subtitle"])
+        dpg.set_value("custom_show_audio_panel", gui_cfg["show_audio_panel"])
+        dpg.set_value("custom_show_performance_panel", gui_cfg["show_performance_panel"])
+        dpg.set_value("custom_show_status_line", gui_cfg["show_status_line"])
+        dpg.set_value("custom_show_backend_hint", gui_cfg["show_backend_hint"])
+        dpg.set_value("custom_show_nps_graph", gui_cfg["show_nps_graph"])
+        dpg.set_value("custom_show_cpu_graph", gui_cfg["show_cpu_graph"])
+        dpg.set_value("custom_theme_seed", gui_cfg["theme_seed"])
+
+        for key in (
+            "window_bg",
+            "child_bg",
+            "frame_bg",
+            "frame_bg_hovered",
+            "frame_bg_active",
+            "button",
+            "button_hovered",
+            "button_active",
+            "accent_text",
+            "muted_text",
+            "body_text",
+        ):
+            dpg.set_value(f"custom_{key}", gui_cfg[key])
+
+        dpg.configure_item("customize_window", show=True)
+
+    def apply_theme_seed(self):
+        gui_cfg = self._gui_cfg()
+        palette = self._derive_palette_from_seed(dpg.get_value("custom_theme_seed"))
+        for key, value in palette.items():
+            gui_cfg[key] = value
+            if dpg.does_item_exist(f"custom_{key}"):
+                dpg.set_value(f"custom_{key}", value)
+        self._bind_theme()
+
+    def save_customize_settings(self):
+        gui_cfg = self._gui_cfg()
+        gui_cfg["show_subtitle"] = bool(dpg.get_value("custom_show_subtitle"))
+        gui_cfg["show_audio_panel"] = bool(dpg.get_value("custom_show_audio_panel"))
+        gui_cfg["show_performance_panel"] = bool(dpg.get_value("custom_show_performance_panel"))
+        gui_cfg["show_status_line"] = bool(dpg.get_value("custom_show_status_line"))
+        gui_cfg["show_backend_hint"] = bool(dpg.get_value("custom_show_backend_hint"))
+        gui_cfg["show_nps_graph"] = bool(dpg.get_value("custom_show_nps_graph"))
+        gui_cfg["show_cpu_graph"] = bool(dpg.get_value("custom_show_cpu_graph"))
+        gui_cfg["theme_seed"] = [int(v) for v in dpg.get_value("custom_theme_seed")[:3]]
+
+        for key in (
+            "window_bg",
+            "child_bg",
+            "frame_bg",
+            "frame_bg_hovered",
+            "frame_bg_active",
+            "button",
+            "button_hovered",
+            "button_active",
+            "accent_text",
+            "muted_text",
+            "body_text",
+        ):
+            gui_cfg[key] = [int(v) for v in dpg.get_value(f"custom_{key}")[:3]]
+
+        save_config(CONFIG)
+        self._apply_gui_customization()
+        dpg.configure_item("customize_window", show=False)
+
     def _build_ui(self):
         dpg.create_context()
         dpg.create_viewport(title="Lightweight MIDI Player (DearPyGUI)", width=1040, height=720)
@@ -279,14 +398,14 @@ class DpgMidiPlayerApp:
         with dpg.window(tag="main_window", label="LWMP", no_title_bar=True, no_scrollbar=True, no_scroll_with_mouse=True):
             with dpg.group(tag="app_shell"):
                 with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp, borders_innerV=False):
-                    dpg.add_table_column(init_width_or_weight=1.2)
-                    dpg.add_table_column(init_width_or_weight=1.4)
+                    dpg.add_table_column(init_width_or_weight=1.15)
+                    dpg.add_table_column(init_width_or_weight=1.0)
                     with dpg.table_row():
                         with dpg.table_cell():
-                            dpg.add_text("Lightweight MIDI Player", color=(229, 206, 160))
+                            dpg.add_text("Lightweight MIDI Player", tag="title_text")
                             dpg.add_text(
                                 "DearPyGUI shell for playback, parsing, and piano roll control.",
-                                color=(160, 166, 178),
+                                tag="subtitle_text",
                             )
                         with dpg.table_cell():
                             with dpg.group(horizontal=True):
@@ -334,7 +453,7 @@ class DpgMidiPlayerApp:
                                 dpg.add_item_deactivated_after_edit_handler(callback=self.on_seek_end)
                             dpg.bind_item_handler_registry("seek_slider", "seek_handler")
 
-                            with dpg.group(horizontal=True):
+                            with dpg.group(horizontal=True, tag="status_row"):
                                 dpg.add_text("Status", color=(160, 166, 178))
                                 dpg.add_text(
                                     "Choose a startup mode to initialize audio.",
@@ -343,7 +462,7 @@ class DpgMidiPlayerApp:
                                     color=(196, 198, 204),
                                 )
 
-                        with dpg.table_cell():
+                        with dpg.table_cell(tag="audio_panel"):
                             dpg.add_text("Audio", color=(223, 177, 103))
                             dpg.add_text("", tag="backend_hint_text", wrap=470, color=(160, 166, 178))
                             dpg.add_text("Playback Mode", color=(160, 166, 178))
@@ -375,92 +494,102 @@ class DpgMidiPlayerApp:
                             )
 
                 dpg.add_separator()
-                dpg.add_text("Performance", color=(223, 177, 103))
-                with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp, borders_innerV=True):
-                    dpg.add_table_column(init_width_or_weight=1.0)
-                    dpg.add_table_column(init_width_or_weight=1.0)
-                    dpg.add_table_column(init_width_or_weight=0.9)
-                    dpg.add_table_column(init_width_or_weight=1.2)
-                    with dpg.table_row():
-                        with dpg.table_cell():
-                            with dpg.group(horizontal=True):
-                                dpg.add_text("NPS", color=(160, 166, 178))
-                                dpg.add_text("0", tag="nps_text")
-                        with dpg.table_cell():
-                            dpg.add_text("Max: 0", tag="nps_max_text", color=(196, 198, 204))
-                        with dpg.table_cell():
-                            with dpg.group(horizontal=True):
-                                dpg.add_text("CPU", color=(160, 166, 178))
-                                dpg.add_text("0.0%", tag="cpu_text")
-                        with dpg.table_cell():
-                            with dpg.group(horizontal=True):
-                                dpg.add_text("Runtime", color=(160, 166, 178))
-                                dpg.add_text("Slowdown: 0.0%", tag="slowdown_text")
+                with dpg.group(tag="performance_section"):
+                    dpg.add_text("Performance", color=(223, 177, 103))
+                    with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp, borders_innerV=True):
+                        dpg.add_table_column(init_width_or_weight=1.0)
+                        dpg.add_table_column(init_width_or_weight=1.0)
+                        dpg.add_table_column(init_width_or_weight=0.9)
+                        dpg.add_table_column(init_width_or_weight=1.2)
+                        with dpg.table_row():
+                            with dpg.table_cell():
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text("NPS", color=(160, 166, 178))
+                                    dpg.add_text("0", tag="nps_text")
+                            with dpg.table_cell():
+                                dpg.add_text("Max: 0", tag="nps_max_text", color=(196, 198, 204))
+                            with dpg.table_cell():
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text("CPU", color=(160, 166, 178))
+                                    dpg.add_text("0.0%", tag="cpu_text")
+                            with dpg.table_cell():
+                                with dpg.group(horizontal=True):
+                                    dpg.add_text("Runtime", color=(160, 166, 178))
+                                    dpg.add_text("Slowdown: 0.0%", tag="slowdown_text")
 
-                plot_x = list(range(100))
-                with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp, borders_innerV=True):
-                    dpg.add_table_column(init_width_or_weight=1.0)
-                    dpg.add_table_column(init_width_or_weight=1.0)
-                    with dpg.table_row():
-                        with dpg.table_cell():
-                            with dpg.plot(
-                                label="NPS Graph",
-                                height=150,
-                                width=-1,
-                                anti_aliased=True,
-                                no_menus=True,
-                                no_box_select=True,
-                                no_mouse_pos=True,
-                            ):
-                                dpg.add_plot_axis(
-                                    dpg.mvXAxis,
-                                    tag="nps_x_axis",
-                                    no_tick_labels=True,
-                                    no_tick_marks=True,
-                                    no_initial_fit=True,
+                    plot_x = list(range(100))
+                    with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp, borders_innerV=True):
+                        dpg.add_table_column(init_width_or_weight=1.0)
+                        dpg.add_table_column(init_width_or_weight=1.0)
+                        with dpg.table_row():
+                            with dpg.table_cell(tag="nps_graph_cell"):
+                                with dpg.plot(
+                                    label="NPS Graph",
+                                    height=150,
+                                    width=-1,
+                                    anti_aliased=True,
                                     no_menus=True,
-                                    lock_min=True,
-                                    lock_max=True,
-                                )
-                                with dpg.plot_axis(
-                                    dpg.mvYAxis,
-                                    tag="nps_y_axis",
-                                    no_initial_fit=True,
-                                    no_menus=True,
-                                    lock_min=True,
-                                    lock_max=True,
+                                    no_box_select=True,
+                                    no_mouse_pos=True,
                                 ):
-                                    dpg.add_line_series(plot_x, list(self.nps_history), tag="nps_series")
+                                    dpg.add_plot_axis(
+                                        dpg.mvXAxis,
+                                        tag="nps_x_axis",
+                                        no_tick_labels=True,
+                                        no_tick_marks=True,
+                                        no_initial_fit=True,
+                                        no_menus=True,
+                                        lock_min=True,
+                                        lock_max=True,
+                                    )
+                                    with dpg.plot_axis(
+                                        dpg.mvYAxis,
+                                        tag="nps_y_axis",
+                                        no_initial_fit=True,
+                                        no_menus=True,
+                                        lock_min=True,
+                                        lock_max=True,
+                                    ):
+                                        dpg.add_line_series(plot_x, list(self.nps_history), tag="nps_series")
 
-                        with dpg.table_cell():
-                            with dpg.plot(
-                                label="CPU Graph",
-                                height=150,
-                                width=-1,
-                                anti_aliased=True,
-                                no_menus=True,
-                                no_box_select=True,
-                                no_mouse_pos=True,
-                            ):
-                                dpg.add_plot_axis(
-                                    dpg.mvXAxis,
-                                    tag="cpu_x_axis",
-                                    no_tick_labels=True,
-                                    no_tick_marks=True,
-                                    no_initial_fit=True,
+                            with dpg.table_cell(tag="cpu_graph_cell"):
+                                with dpg.plot(
+                                    label="CPU Graph",
+                                    height=150,
+                                    width=-1,
+                                    anti_aliased=True,
                                     no_menus=True,
-                                    lock_min=True,
-                                    lock_max=True,
-                                )
-                                with dpg.plot_axis(
-                                    dpg.mvYAxis,
-                                    tag="cpu_y_axis",
-                                    no_initial_fit=True,
-                                    no_menus=True,
-                                    lock_min=True,
-                                    lock_max=True,
+                                    no_box_select=True,
+                                    no_mouse_pos=True,
                                 ):
-                                    dpg.add_line_series(plot_x, list(self.cpu_history), tag="cpu_series")
+                                    dpg.add_plot_axis(
+                                        dpg.mvXAxis,
+                                        tag="cpu_x_axis",
+                                        no_tick_labels=True,
+                                        no_tick_marks=True,
+                                        no_initial_fit=True,
+                                        no_menus=True,
+                                        lock_min=True,
+                                        lock_max=True,
+                                    )
+                                    with dpg.plot_axis(
+                                        dpg.mvYAxis,
+                                        tag="cpu_y_axis",
+                                        no_initial_fit=True,
+                                        no_menus=True,
+                                        lock_min=True,
+                                        lock_max=True,
+                                    ):
+                                        dpg.add_line_series(plot_x, list(self.cpu_history), tag="cpu_series")
+
+                with dpg.group(horizontal=True):
+                    dpg.add_button(
+                        tag="customize_button",
+                        label="Customize",
+                        callback=self.show_customize_window,
+                        width=104,
+                        height=30,
+                    )
 
             with dpg.window(
                 tag="loading_window",
@@ -494,6 +623,57 @@ class DpgMidiPlayerApp:
                 )
                 dpg.add_button(label="Launch Piano Roll", callback=self.launch_selected_piano_roll)
                 dpg.add_button(label="Close", callback=lambda: dpg.configure_item("piano_roll_window", show=False))
+
+            with dpg.window(
+                tag="customize_window",
+                label="Customize UI",
+                modal=True,
+                show=False,
+                no_resize=True,
+                no_collapse=True,
+                width=640,
+                height=620,
+            ):
+                dpg.add_text("Visibility", color=(223, 177, 103))
+                with dpg.group(horizontal=True):
+                    dpg.add_checkbox(label="Subtitle", tag="custom_show_subtitle")
+                    dpg.add_checkbox(label="Audio Panel", tag="custom_show_audio_panel")
+                    dpg.add_checkbox(label="Performance", tag="custom_show_performance_panel")
+                with dpg.group(horizontal=True):
+                    dpg.add_checkbox(label="Status Line", tag="custom_show_status_line")
+                    dpg.add_checkbox(label="Backend Hint", tag="custom_show_backend_hint")
+                    dpg.add_checkbox(label="NPS Graph", tag="custom_show_nps_graph")
+                    dpg.add_checkbox(label="CPU Graph", tag="custom_show_cpu_graph")
+
+                dpg.add_separator()
+                dpg.add_text("Master Theme Color", color=(223, 177, 103))
+                dpg.add_color_edit(label="Theme Seed", tag="custom_theme_seed", no_alpha=True, width=-1)
+                dpg.add_button(label="Generate Palette From Theme Color", callback=self.apply_theme_seed, width=-1, height=32)
+
+                dpg.add_separator()
+                dpg.add_text("Colors", color=(223, 177, 103))
+                with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp):
+                    dpg.add_table_column(init_width_or_weight=1.0)
+                    dpg.add_table_column(init_width_or_weight=1.0)
+                    with dpg.table_row():
+                        with dpg.table_cell():
+                            dpg.add_color_edit(label="Window BG", tag="custom_window_bg", no_alpha=True, width=-1)
+                            dpg.add_color_edit(label="Child BG", tag="custom_child_bg", no_alpha=True, width=-1)
+                            dpg.add_color_edit(label="Frame BG", tag="custom_frame_bg", no_alpha=True, width=-1)
+                            dpg.add_color_edit(label="Frame Hover", tag="custom_frame_bg_hovered", no_alpha=True, width=-1)
+                            dpg.add_color_edit(label="Frame Active", tag="custom_frame_bg_active", no_alpha=True, width=-1)
+                            dpg.add_color_edit(label="Button", tag="custom_button", no_alpha=True, width=-1)
+                        with dpg.table_cell():
+                            dpg.add_color_edit(label="Button Hover", tag="custom_button_hovered", no_alpha=True, width=-1)
+                            dpg.add_color_edit(label="Button Active", tag="custom_button_active", no_alpha=True, width=-1)
+                            dpg.add_color_edit(label="Accent Text", tag="custom_accent_text", no_alpha=True, width=-1)
+                            dpg.add_color_edit(label="Muted Text", tag="custom_muted_text", no_alpha=True, width=-1)
+                            dpg.add_color_edit(label="Body Text", tag="custom_body_text", no_alpha=True, width=-1)
+
+                dpg.add_separator()
+                with dpg.group(horizontal=True):
+                    dpg.add_button(label="Save", callback=self.save_customize_settings, width=140, height=32)
+                    dpg.add_button(label="Close", callback=lambda: dpg.configure_item("customize_window", show=False), width=140, height=32)
 
             with dpg.window(
                 tag="startup_window",
@@ -547,23 +727,27 @@ class DpgMidiPlayerApp:
         dpg.set_axis_limits("cpu_x_axis", 0, 99)
         dpg.set_axis_limits("nps_y_axis", 0, 100)
         dpg.set_axis_limits("cpu_y_axis", 0, 100)
+        self._apply_gui_customization()
 
     def _bind_theme(self):
-        with dpg.theme() as global_theme:
+        gui_cfg = self._gui_cfg()
+        if dpg.does_item_exist("global_theme"):
+            dpg.delete_item("global_theme")
+        with dpg.theme(tag="global_theme") as global_theme:
             with dpg.theme_component(dpg.mvAll):
-                dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (22, 24, 29), category=dpg.mvThemeCat_Core)
-                dpg.add_theme_color(dpg.mvThemeCol_ChildBg, (28, 31, 37), category=dpg.mvThemeCat_Core)
-                dpg.add_theme_color(dpg.mvThemeCol_FrameBg, (36, 39, 46), category=dpg.mvThemeCat_Core)
-                dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, (51, 57, 67), category=dpg.mvThemeCat_Core)
-                dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive, (73, 80, 91), category=dpg.mvThemeCat_Core)
-                dpg.add_theme_color(dpg.mvThemeCol_Button, (191, 120, 54), category=dpg.mvThemeCat_Core)
-                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, (216, 148, 79), category=dpg.mvThemeCat_Core)
-                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, (161, 97, 40), category=dpg.mvThemeCat_Core)
-                dpg.add_theme_color(dpg.mvThemeCol_SliderGrab, (191, 120, 54), category=dpg.mvThemeCat_Core)
-                dpg.add_theme_color(dpg.mvThemeCol_CheckMark, (223, 177, 103), category=dpg.mvThemeCat_Core)
-                dpg.add_theme_color(dpg.mvThemeCol_Header, (50, 54, 62), category=dpg.mvThemeCat_Core)
-                dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, (64, 71, 82), category=dpg.mvThemeCat_Core)
-                dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, (74, 83, 96), category=dpg.mvThemeCat_Core)
+                dpg.add_theme_color(dpg.mvThemeCol_WindowBg, self._color_tuple("window_bg"), category=dpg.mvThemeCat_Core)
+                dpg.add_theme_color(dpg.mvThemeCol_ChildBg, self._color_tuple("child_bg"), category=dpg.mvThemeCat_Core)
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBg, self._color_tuple("frame_bg"), category=dpg.mvThemeCat_Core)
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBgHovered, self._color_tuple("frame_bg_hovered"), category=dpg.mvThemeCat_Core)
+                dpg.add_theme_color(dpg.mvThemeCol_FrameBgActive, self._color_tuple("frame_bg_active"), category=dpg.mvThemeCat_Core)
+                dpg.add_theme_color(dpg.mvThemeCol_Button, self._color_tuple("button"), category=dpg.mvThemeCat_Core)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, self._color_tuple("button_hovered"), category=dpg.mvThemeCat_Core)
+                dpg.add_theme_color(dpg.mvThemeCol_ButtonActive, self._color_tuple("button_active"), category=dpg.mvThemeCat_Core)
+                dpg.add_theme_color(dpg.mvThemeCol_SliderGrab, self._color_tuple("button"), category=dpg.mvThemeCat_Core)
+                dpg.add_theme_color(dpg.mvThemeCol_CheckMark, self._color_tuple("accent_text"), category=dpg.mvThemeCat_Core)
+                dpg.add_theme_color(dpg.mvThemeCol_Header, self._color_tuple("frame_bg"), category=dpg.mvThemeCat_Core)
+                dpg.add_theme_color(dpg.mvThemeCol_HeaderHovered, self._color_tuple("frame_bg_hovered"), category=dpg.mvThemeCat_Core)
+                dpg.add_theme_color(dpg.mvThemeCol_HeaderActive, self._color_tuple("frame_bg_active"), category=dpg.mvThemeCat_Core)
                 dpg.add_theme_style(dpg.mvStyleVar_FrameRounding, 6, category=dpg.mvThemeCat_Core)
                 dpg.add_theme_style(dpg.mvStyleVar_WindowRounding, 8, category=dpg.mvThemeCat_Core)
                 dpg.add_theme_style(dpg.mvStyleVar_WindowPadding, 8, 8, category=dpg.mvThemeCat_Core)
@@ -572,6 +756,12 @@ class DpgMidiPlayerApp:
                 dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 4, 4, category=dpg.mvThemeCat_Core)
                 dpg.add_theme_style(dpg.mvStyleVar_ItemInnerSpacing, 4, 4, category=dpg.mvThemeCat_Core)
         dpg.bind_theme(global_theme)
+        if dpg.does_item_exist("title_text"):
+            dpg.configure_item("title_text", color=self._color_tuple("accent_text"))
+        if dpg.does_item_exist("subtitle_text"):
+            dpg.configure_item("subtitle_text", color=self._color_tuple("muted_text"))
+        if dpg.does_item_exist("status_text"):
+            dpg.configure_item("status_text", color=self._color_tuple("body_text"))
 
     def _initialize_process_monitoring(self):
         try:

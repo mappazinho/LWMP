@@ -22,6 +22,27 @@ DEFAULT_CONFIG = {
         "midi_backend": "omnimidi",
         "omnimidi_load_preference": "unset",
         "soundfont_path": None
+    },
+    "gui": {
+        "show_subtitle": True,
+        "show_audio_panel": True,
+        "show_performance_panel": True,
+        "show_status_line": True,
+        "show_backend_hint": True,
+        "show_nps_graph": True,
+        "show_cpu_graph": True,
+        "theme_seed": [191, 120, 54],
+        "window_bg": [22, 24, 29],
+        "child_bg": [28, 31, 37],
+        "frame_bg": [36, 39, 46],
+        "frame_bg_hovered": [51, 57, 67],
+        "frame_bg_active": [73, 80, 91],
+        "button": [191, 120, 54],
+        "button_hovered": [216, 148, 79],
+        "button_active": [161, 97, 40],
+        "accent_text": [229, 206, 160],
+        "muted_text": [160, 166, 178],
+        "body_text": [196, 198, 204]
     }
 }
 
