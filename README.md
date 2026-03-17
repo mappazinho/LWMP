@@ -7,7 +7,7 @@ Lightweight MIDI Player for heavy MIDI files/Black MIDI, made with Python and Cy
 • Pre-render function using BASSMIDI  
 • Simple GUI for noobies who just want to load and enjoy  
 • Graphs for CPU usage and NPS (Notes Per Second)  
-• Realtime note counter
+• Realtime note counter  
 • Support for custom bundled OmniMIDI dlls
 
 # Build instructions (for Windows)
