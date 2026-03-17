@@ -471,11 +471,9 @@ cdef class BassMidiEngine:
         cdef DWORD total_written = 0
         cdef QWORD remaining = bytes_needed
         cdef DWORD read_bytes
-        cdef DWORD written_bytes
-        cdef DWORD chunk_written
+        cdef DWORD queued_bytes
         cdef DWORD err_val = 0xFFFFFFFF 
         cdef DWORD to_read
-        cdef int retries = 0
         
         try:
             with nogil:
@@ -488,20 +486,13 @@ cdef class BassMidiEngine:
                     if read_bytes == err_val or read_bytes == 0:
                         break
                     
-                    chunk_written = 0
-                    retries = 0
-                    while chunk_written < read_bytes:
-                        written_bytes = self.f.StreamPutData(playback, buf + chunk_written, read_bytes - chunk_written)
-                        if written_bytes == err_val:
-                            break
-                        if written_bytes == 0:
-                            retries += 1
-                            if retries > 50:
-                                break
-                            break
-                        chunk_written += written_bytes
-                    
-                    total_written += chunk_written
+                    queued_bytes = self.f.StreamPutData(playback, buf, read_bytes)
+                    if queued_bytes == err_val:
+                        break
+
+                    # BASS_StreamPutData accepts the full block and returns the
+                    # queue level, not the number of bytes consumed from this call.
+                    total_written += read_bytes
                     remaining -= read_bytes
             
             self.total_bytes_pushed += total_written

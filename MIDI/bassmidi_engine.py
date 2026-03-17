@@ -267,14 +267,16 @@ class BassMidiEngine:
             if read == 0:
                 break
                 
-            written = bass.BASS_StreamPutData(self.playback_stream, buf, read)
-            if written == 0xFFFFFFFF:
+            queued = bass.BASS_StreamPutData(self.playback_stream, buf, read)
+            if queued == 0xFFFFFFFF:
                  err = bass.BASS_ErrorGetCode()
                  print(f"[DEBUG] BASS_StreamPutData failed: {err} (Buffer Full?)")
                  break
             
-            total_written += written
-            remaining -= written
+            # BASS_StreamPutData returns the queue level on success, not the
+            # number of bytes written from this call.
+            total_written += read
+            remaining -= read
             
         self.total_bytes_pushed += total_written
         return bass.BASS_ChannelBytes2Seconds(self.playback_stream, total_written)
