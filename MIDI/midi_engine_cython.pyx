@@ -36,6 +36,9 @@ cdef enum:
     
     BASS_MIDI_EVENTS_RAW = 0x10000
     BASS_MIDI_EVENT_NOTE = 1
+    BASS_MIDI_EVENT_PITCH = 4
+    BASS_MIDI_EVENT_PITCHRANGE = 5
+    BASS_MIDI_EVENT_NOTESOFF = 18
     BASS_MIDI_EVENTS_ASYNC = 0x40000000
     
     BASS_UNICODE = 0x80000000
@@ -405,7 +408,7 @@ cdef class BassMidiEngine:
         elif cmd == 0xE0:
             d1 = param & 0xFF
             d2 = (param >> 8) & 0xFF
-            ok = self.f.MIDI_StreamEvent(target, chan, 14, d1 | (d2 << 7))
+            ok = self.f.MIDI_StreamEvent(target, chan, BASS_MIDI_EVENT_PITCH, d1 | (d2 << 7))
         elif cmd == 0xB0:
             ok = self.f.MIDI_StreamEvent(target, chan, param & 0xFF, (param >> 8) & 0xFF)
         if self.debug_mode and not ok:
@@ -416,7 +419,21 @@ cdef class BassMidiEngine:
         if not target: return
         cdef int c
         for c in range(16):
-            self.f.MIDI_StreamEvent(target, c, 21, 0)
+            self.f.MIDI_StreamEvent(target, c, BASS_MIDI_EVENT_NOTESOFF, 0)
+
+    cpdef set_pitch_bend_range(self, int semitones):
+        cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
+        cdef int c
+        cdef uint32_t value
+        if not target:
+            return
+        if semitones < 0:
+            semitones = 0
+        elif semitones > 127:
+            semitones = 127
+        value = <uint32_t>semitones
+        for c in range(16):
+            self.f.MIDI_StreamEvent(target, c, BASS_MIDI_EVENT_PITCHRANGE, value)
     
     cpdef test_piano_sweep(self):
         if not self.soundfont: return

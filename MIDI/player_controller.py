@@ -297,6 +297,9 @@ class PlayerController:
         if not self.active_midi_backend:
             return
         print(f"Setting pitch bend range to +/- {semitones} semitones on all channels.")
+        if hasattr(self.active_midi_backend, "set_pitch_bend_range"):
+            self.active_midi_backend.set_pitch_bend_range(semitones)
+            return
         for channel in range(16):
             status = 0xB0 | channel
             self.active_midi_backend.send_raw_event(status, (0 << 8) | 101)

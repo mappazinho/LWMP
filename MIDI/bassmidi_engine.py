@@ -27,6 +27,9 @@ STREAMPROC_PUSH = -1
 BASS_FILEPOS_BUFFER = 5
 
 BASS_MIDI_EVENT_NOTE = 1
+BASS_MIDI_EVENT_PITCH = 4
+BASS_MIDI_EVENT_PITCHRANGE = 5
+BASS_MIDI_EVENT_NOTESOFF = 18
 BASS_MIDI_FONT_FORCELOAD = 0x4000000
 BASS_MIDI_SF_DEFAULT = 0
 BASS_UNICODE = 0x80000000
@@ -224,7 +227,7 @@ class BassMidiEngine:
             d1 = param & 0xFF
             d2 = (param >> 8) & 0xFF
             val = d1 | (d2 << 7)
-            bassmidi.BASS_MIDI_StreamEvent(target, chan, 14, val)
+            bassmidi.BASS_MIDI_StreamEvent(target, chan, BASS_MIDI_EVENT_PITCH, val)
         elif cmd == 0xB0:
             controller = param & 0xFF
             value = (param >> 8) & 0xFF
@@ -234,7 +237,15 @@ class BassMidiEngine:
         target = self.decode_stream if self.buffering_enabled else self.midi_stream
         if not target: return
         for c in range(16):
-            bassmidi.BASS_MIDI_StreamEvent(target, c, 21, 0)
+            bassmidi.BASS_MIDI_StreamEvent(target, c, BASS_MIDI_EVENT_NOTESOFF, 0)
+
+    def set_pitch_bend_range(self, semitones):
+        target = self.decode_stream if self.buffering_enabled else self.midi_stream
+        if not target:
+            return
+        value = max(0, min(int(semitones), 127))
+        for channel in range(16):
+            bassmidi.BASS_MIDI_StreamEvent(target, channel, BASS_MIDI_EVENT_PITCHRANGE, value)
 
     def render_forward(self, seconds):
         if not self.buffering_enabled or not self.decode_stream: return 0.0
