@@ -5,6 +5,7 @@ from libc.stdint cimport uint8_t, uint32_t, uint64_t, int64_t
 import ctypes
 import os
 import sys
+from runtime_paths import add_dll_search_dir, resolve_bass_library_paths
 from time import sleep 
 from libc.math cimport sin, M_PI, sqrt
 
@@ -128,6 +129,7 @@ cdef class BassMidiEngine:
     cdef HMODULE hBass
     cdef HMODULE hBassMidi
     cdef BassFuncs f
+    cdef object dll_dir_handle
     
     cdef public bint is_initialized
     cdef public bint buffering_enabled
@@ -162,14 +164,17 @@ cdef class BassMidiEngine:
         self.simulated_time = 0.0
         self.hBass = NULL
         self.hBassMidi = NULL
+        self.dll_dir_handle = None
 
-        cdef bytes script_dir = os.path.dirname(os.path.abspath(__file__)).encode('mbcs')
-        cdef bytes bass_path = os.path.join(script_dir.decode('mbcs'), "bassmidi", "bass.dll").encode('mbcs')
-        cdef bytes bassmidi_path = os.path.join(script_dir.decode('mbcs'), "bassmidi", "bassmidi.dll").encode('mbcs')
-        
-        if not os.path.exists(bass_path.decode('mbcs')):
-             bass_path = os.path.join(script_dir.decode('mbcs'), "bass.dll").encode('mbcs')
-             bassmidi_path = os.path.join(script_dir.decode('mbcs'), "bassmidi.dll").encode('mbcs')
+        cdef object bass_info = resolve_bass_library_paths(__file__)
+        cdef object bass_path_str = bass_info[0]
+        cdef object bassmidi_path_str = bass_info[1]
+        cdef object bass_dir_str = bass_info[2]
+        if not bass_path_str or not bassmidi_path_str:
+            raise ImportError("Could not locate bass.dll or bassmidi.dll")
+        self.dll_dir_handle = add_dll_search_dir(bass_dir_str)
+        cdef bytes bass_path = (<str>bass_path_str).encode('mbcs')
+        cdef bytes bassmidi_path = (<str>bassmidi_path_str).encode('mbcs')
 
         if self.debug_mode: print(f"Loading BASS from: {bass_path.decode('mbcs')}")
         

@@ -1,10 +1,14 @@
 import json
 import os
+import sys
 
-# --- Build absolute path to config file ---
-_config_dir = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILENAME = os.path.join(_config_dir, "config.json")
-BUNDLED_OMNIMIDI_DLL = os.path.join(_config_dir, "OmniMIDI.dll")
+# Keep bundled resources next to the module, but store config beside the
+# executable when the app is frozen into a standalone build.
+_resource_dir = os.path.dirname(os.path.abspath(__file__))
+_runtime_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else _resource_dir
+
+CONFIG_FILENAME = os.path.join(_runtime_dir, "config.json")
+BUNDLED_OMNIMIDI_DLL = os.path.join(_resource_dir, "OmniMIDI.dll")
 
 DEFAULT_CONFIG = {
     "visualizer": {

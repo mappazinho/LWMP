@@ -3,6 +3,7 @@ import os
 import sys
 import threading
 import time
+from runtime_paths import add_dll_search_dir, resolve_bass_library_paths
 
 BASS_OK = 0
 BASS_ERROR_ENDED = 27
@@ -35,17 +36,15 @@ BASS_MIDI_SF_DEFAULT = 0
 BASS_UNICODE = 0x80000000
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
-_bass_dir = os.path.join(_script_dir, "bassmidi")
+_dll_dir_handle = None
 
 try:
-    if os.path.exists(os.path.join(_bass_dir, "bass.dll")):
-        bass_path = os.path.join(_bass_dir, "bass.dll")
-        bassmidi_path = os.path.join(_bass_dir, "bassmidi.dll")
-    else:
-        bass_path = os.path.join(_script_dir, "bass.dll")
-        bassmidi_path = os.path.join(_script_dir, "bassmidi.dll")
+    bass_path, bassmidi_path, bass_dir = resolve_bass_library_paths(__file__)
+    if not bass_path or not bassmidi_path:
+        raise FileNotFoundError("bass.dll or bassmidi.dll not found in runtime search paths")
 
     print(f"Loading BASS from: {bass_path}")
+    _dll_dir_handle = add_dll_search_dir(bass_dir)
     bass = ctypes.cdll.LoadLibrary(bass_path)
     bassmidi = ctypes.cdll.LoadLibrary(bassmidi_path)
 except Exception as e:

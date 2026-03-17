@@ -8,3 +8,4 @@ __pycache__/
 MIDI/midi_engine_cython.c
 PARSER/midi_parser_cython.cpp
 *.json
+dist/

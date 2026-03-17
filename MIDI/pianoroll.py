@@ -12,6 +12,10 @@ import xml.etree.ElementTree as ET
 import os
 from midi_parser import GPU_NOTE_DTYPE
 
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_DIR = os.path.dirname(_SCRIPT_DIR)
+_SKIN_DIR = os.path.join(_PROJECT_DIR, "skin")
+
 VERT_SHADER = """#version 120
 attribute vec2 pos;
 attribute vec2 note_times;
@@ -316,7 +320,7 @@ class PianoRoll:
             return None, 0, 0
 
     def _load_keyboard_assets(self):
-        skin_dir = "skin"
+        skin_dir = _SKIN_DIR
         try:
             key_type_to_filename = {
                 'white_key': 'keyWhite.png',
@@ -416,8 +420,8 @@ class PianoRoll:
         self._init_slider_geometry()
 
         try:
-            self.note_texture, _, _ = self._load_texture(os.path.join("skin", "note.png"))
-            self.note_edge_texture, _, _ = self._load_texture(os.path.join("skin", "noteEdge.png"))
+            self.note_texture, _, _ = self._load_texture(os.path.join(_SKIN_DIR, "note.png"))
+            self.note_edge_texture, _, _ = self._load_texture(os.path.join(_SKIN_DIR, "noteEdge.png"))
             if self.note_texture is None or self.note_edge_texture is None:
                 raise pygame.error("Failed to load one or both note textures.")
             print("Note skin assets loaded.")
