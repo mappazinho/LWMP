@@ -1464,34 +1464,42 @@ class DpgMidiPlayerApp:
 
     def run_piano_roll(self):
         piano_roll_instance = self.piano_roll
-        piano_roll_instance.init_pygame_and_gl()
-        clock = pygame.time.Clock()
-        pygame.time.set_timer(pygame.USEREVENT, 250)
-        last_caption_update_time = 0
+        try:
+            piano_roll_instance.init_pygame_and_gl()
+            clock = pygame.time.Clock()
+            pygame.time.set_timer(pygame.USEREVENT, 250)
+            last_caption_update_time = 0
 
-        while piano_roll_instance.app_running.is_set():
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    piano_roll_instance.app_running.clear()
-                piano_roll_instance.handle_slider_event(event)
+            while piano_roll_instance.app_running.is_set():
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        piano_roll_instance.app_running.clear()
+                    piano_roll_instance.handle_slider_event(event)
 
-            if not piano_roll_instance.app_running.is_set():
-                break
+                if not piano_roll_instance.app_running.is_set():
+                    break
 
-            current_time = self.get_current_playback_time()
-            piano_roll_instance.draw(current_time)
+                current_time = self.get_current_playback_time()
+                piano_roll_instance.draw(current_time)
 
-            now = time.monotonic()
-            if now - last_caption_update_time > 0.2:
-                fps = clock.get_fps()
-                pygame.display.set_caption(
-                    f"Piano Roll - {fps:.1f} FPS - window {piano_roll_instance.window_seconds:.2f}s - scroll {piano_roll_instance.scroll_speed:.0f}"
-                )
-                last_caption_update_time = now
+                now = time.monotonic()
+                if now - last_caption_update_time > 0.2:
+                    fps = clock.get_fps()
+                    pygame.display.set_caption(
+                        f"Piano Roll - {fps:.1f} FPS - window {piano_roll_instance.window_seconds:.2f}s - scroll {piano_roll_instance.scroll_speed:.0f}"
+                    )
+                    last_caption_update_time = now
 
-            clock.tick(0)
-
-        piano_roll_instance.cleanup()
+                clock.tick(0)
+        except Exception as e:
+            traceback.print_exc()
+            self._queue_ui(dpg.set_value, "status_text", f"Piano Roll Error: {e}")
+            self._queue_ui(self._message_error, "Piano Roll Error", str(e))
+        finally:
+            try:
+                piano_roll_instance.cleanup()
+            except Exception:
+                traceback.print_exc()
 
     def _update_plot_series(self):
         x_values = list(range(100))
