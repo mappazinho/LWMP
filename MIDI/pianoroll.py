@@ -179,7 +179,8 @@ void main() {
         texColor = texture2D(u_texture_pressed, v_uv);
         vec3 lit_base = texColor.rgb * (u_is_white_key ? 0.16 : 0.10);
         vec3 normal_pressed = texColor.rgb * v_color;
-        gl_FragColor = vec4(mix(normal_pressed, lit_base, glow_mode), texColor.a);
+        vec3 glow_pressed = normal_pressed * 0.82 + v_color * 0.28;
+        gl_FragColor = vec4(mix(normal_pressed, glow_pressed, glow_mode), texColor.a);
     } else {
         texColor = texture2D(u_texture_unpressed, v_uv);
         vec3 lit_base = texColor.rgb * (u_is_white_key ? 0.08 : 0.04);
@@ -203,10 +204,11 @@ void main() {
 
     float light_strength = max(max(v_color.r, v_color.g), v_color.b);
     if (glow_mode > 0.5 && light_strength > 0.001) {
+        float luminance = dot(v_color, vec3(0.2126, 0.7152, 0.0722));
         vec2 centered = abs(v_uv - vec2(0.5, 0.48));
-        float spread = clamp(1.0 - max(centered.x * 1.7, centered.y * 1.2), 0.0, 1.0);
+        float spread = clamp(1.0 - max(centered.x * 1.45, centered.y * 1.08), 0.0, 1.0);
         float spill = pow(spread, 2.0);
-        float intensity = v_is_pressed > 0.5 ? 0.86 : 0.54;
+        float intensity = (v_is_pressed > 0.5 ? 0.90 : 0.62) * (0.82 + luminance * 0.55);
         gl_FragColor.rgb += v_color * spill * intensity;
     }
 
@@ -323,6 +325,19 @@ class PianoRoll:
             if keyboard_height is not None:
                 return self.height - keyboard_height
         return self.height * self.guide_line_y_ratio
+
+    def _combine_light_color(self, color_sum, weight_sum, color_peak):
+        if weight_sum <= 0.0:
+            return np.array(color_peak, dtype=np.float32)
+        avg_color = color_sum / weight_sum
+        combined = color_peak * 0.72 + avg_color * 0.28
+        max_component = float(np.max(combined))
+        if max_component > 1.0:
+            combined = combined / max_component
+        return np.clip(combined, 0.0, 1.0).astype(np.float32)
+
+    def _color_luminance(self, color):
+        return float(color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722)
 
     def _load_colors_from_xml(self, filepath=None):
         if filepath is None:
@@ -941,26 +956,49 @@ class PianoRoll:
                 track = int(note['track'])
                 color = self.channel_colors[track % 128]
                 if pitch not in active_pitch_colors:
-                    active_pitch_colors[pitch] = np.array(color, dtype=np.float32)
+                    active_pitch_colors[pitch] = {
+                        'sum': np.array(color, dtype=np.float32),
+                        'weight': 1.0,
+                        'peak': np.array(color, dtype=np.float32),
+                    }
                 else:
-                    active_pitch_colors[pitch] += color
+                    active_pitch_colors[pitch]['sum'] += color
+                    active_pitch_colors[pitch]['weight'] += 1.0
+                    active_pitch_colors[pitch]['peak'] = np.maximum(active_pitch_colors[pitch]['peak'], color)
 
         key_light_colors = {}
-        light_falloff = (1.0, 0.55, 0.28, 0.14, 0.07)
-        for pitch, color_sum in active_pitch_colors.items():
-            base_color = np.clip(color_sum, 0.0, 1.0)
+        light_falloff = (1.0, 0.88, 0.68, 0.50, 0.35, 0.23, 0.14, 0.08)
+        for pitch, pitch_color_data in active_pitch_colors.items():
+            base_color = self._combine_light_color(
+                pitch_color_data['sum'],
+                pitch_color_data['weight'],
+                pitch_color_data['peak'],
+            )
+            luminance_boost = 0.88 + self._color_luminance(base_color) * 0.45
             for distance, weight in enumerate(light_falloff):
                 neighbors = (pitch,) if distance == 0 else (pitch - distance, pitch + distance)
                 for neighbor in neighbors:
                     if neighbor < 0 or neighbor > 127 or neighbor not in self.keyboard_layout:
                         continue
+                    effective_weight = min(1.0, weight * luminance_boost)
                     if neighbor not in key_light_colors:
-                        key_light_colors[neighbor] = np.array(base_color * weight, dtype=np.float32)
+                        key_light_colors[neighbor] = {
+                            'sum': np.array(base_color * effective_weight, dtype=np.float32),
+                            'weight': effective_weight,
+                            'peak': np.array(base_color * effective_weight, dtype=np.float32),
+                        }
                     else:
-                        key_light_colors[neighbor] += base_color * weight
+                        weighted_color = base_color * effective_weight
+                        key_light_colors[neighbor]['sum'] += weighted_color
+                        key_light_colors[neighbor]['weight'] += effective_weight
+                        key_light_colors[neighbor]['peak'] = np.maximum(key_light_colors[neighbor]['peak'], weighted_color)
 
-        for pitch, color in key_light_colors.items():
-            clamped_color = np.clip(color, 0.0, 1.0)
+        for pitch, color_data in key_light_colors.items():
+            clamped_color = self._combine_light_color(
+                color_data['sum'],
+                color_data['weight'],
+                color_data['peak'],
+            )
             if pitch in self.white_key_pitch_map:
                 idx = self.white_key_pitch_map[pitch]
                 self.white_key_instance_data[idx]['color'] = clamped_color
