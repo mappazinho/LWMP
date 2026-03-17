@@ -203,6 +203,7 @@ cdef class MidiParser:
         self.note_events_for_playback = np.empty((0,), dtype=PLAYBACK_EVENT_DTYPE)
         self.program_change_events = []
         self.pitch_bend_events = []
+        self.control_change_events = []
         self.total_duration_sec = 0.0
 
     def count_total_events(self):
@@ -259,6 +260,7 @@ cdef class MidiParser:
         self.note_events_for_playback = np.empty((0,), dtype=PLAYBACK_EVENT_DTYPE)
         self.program_change_events = []
         self.pitch_bend_events = []
+        self.control_change_events = []
         self.total_duration_sec = 0.0
         
         _log(f"Opening {self.filename}...")
@@ -301,6 +303,7 @@ cdef class MidiParser:
         cdef vector[GpuNote] temp_gpu_notes_vec
         cdef vector[PlaybackEvent] temp_playback_events_vec
         cdef vector[PlaybackEvent] temp_pitch_bend_vec
+        cdef vector[PlaybackEvent] temp_control_change_vec
         cdef vector[NoteOnInfo] note_on_stack[128][16]
         cdef vector[uint64_t] event_heap
         event_heap.reserve(len(track_buffers))
@@ -414,7 +417,7 @@ cdef class MidiParser:
                         gpu_note.off_time = <np.float32_t>off_time
                         gpu_note.pitch = data1
                         gpu_note.velocity = vel
-                        gpu_note.track = channel
+                        gpu_note.track = <uint8_t>(on_track_num & 0xFF)
                         gpu_note.padding = 0
                         temp_gpu_notes_vec.push_back(gpu_note)
                         
@@ -438,6 +441,15 @@ cdef class MidiParser:
                     playback_event.channel = channel
                     playback_event.track_num = pitch_bend_value
                     temp_pitch_bend_vec.push_back(playback_event)
+
+                elif event_type == 0xB0:
+                    playback_event.on_time = current_time_sec
+                    playback_event.off_time = current_time_sec
+                    playback_event.pitch = data1
+                    playback_event.velocity = data2
+                    playback_event.channel = channel
+                    playback_event.track_num = 0
+                    temp_control_change_vec.push_back(playback_event)
 
                 ts = track_states[track_num]
                 if next_raw_event(&ts, &raw_ev):
@@ -474,6 +486,12 @@ cdef class MidiParser:
                                        temp_pitch_bend_vec[i].channel,
                                        temp_pitch_bend_vec[i].track_num)
                                       for i in range(temp_pitch_bend_vec.size())]
+        if temp_control_change_vec.size() > 0:
+            self.control_change_events = [(temp_control_change_vec[i].on_time,
+                                           temp_control_change_vec[i].channel,
+                                           temp_control_change_vec[i].pitch,
+                                           temp_control_change_vec[i].velocity)
+                                          for i in range(temp_control_change_vec.size())]
         self.total_duration_sec = max_off_time
 
         track_buffers = []
@@ -483,6 +501,7 @@ cdef class MidiParser:
         temp_gpu_notes_vec = vector[GpuNote]()
         temp_playback_events_vec = vector[PlaybackEvent]()
         temp_pitch_bend_vec = vector[PlaybackEvent]()
+        temp_control_change_vec = vector[PlaybackEvent]()
 
         cdef double end_parse_time = time.monotonic()
         cdef double total_parse_time = end_parse_time - start_parse_time

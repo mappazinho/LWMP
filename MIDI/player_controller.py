@@ -173,6 +173,10 @@ class PlayerController:
     def normalize_parsed_payload(self, payload, start_padding=3.0, end_padding=3.0):
         self.parsed_midi = types.SimpleNamespace(**payload)
 
+        if hasattr(self.parsed_midi, "note_data_for_gpu") and self.parsed_midi.note_data_for_gpu.size > 0:
+            self.parsed_midi.note_data_for_gpu["on_time"] += start_padding
+            self.parsed_midi.note_data_for_gpu["off_time"] += start_padding
+
         if self.parsed_midi.note_events_for_playback.size > 0:
             self.parsed_midi.note_events_for_playback["on_time"] += start_padding
             self.parsed_midi.note_events_for_playback["off_time"] += start_padding
@@ -180,6 +184,12 @@ class PlayerController:
         if hasattr(self.parsed_midi, "pitch_bend_events") and self.parsed_midi.pitch_bend_events:
             self.parsed_midi.pitch_bend_events = [
                 (t + start_padding, c, p) for t, c, p in self.parsed_midi.pitch_bend_events
+            ]
+
+        if hasattr(self.parsed_midi, "control_change_events") and self.parsed_midi.control_change_events:
+            self.parsed_midi.control_change_events = [
+                (t + start_padding, c, cc, value)
+                for t, c, cc, value in self.parsed_midi.control_change_events
             ]
 
         if hasattr(self.parsed_midi, "total_duration_sec"):
@@ -267,6 +277,8 @@ class PlayerController:
             self.paused_for_seeking = True
             self.paused = True
             self.paused_at_time = time.monotonic()
+            if self.active_midi_backend and hasattr(self.active_midi_backend, "pause"):
+                self.active_midi_backend.pause()
             return True
         self.paused_for_seeking = False
         return False

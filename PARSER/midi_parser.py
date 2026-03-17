@@ -45,6 +45,7 @@ except ImportError:
             self.note_events_for_playback = None
             self.program_change_events = []
             self.pitch_bend_events = []
+            self.control_change_events = []
             self.total_duration_sec = 0.0
 
         def count_total_events(self):
@@ -62,6 +63,7 @@ except ImportError:
             self.note_events_for_playback = None
             self.program_change_events = []
             self.pitch_bend_events = []
+            self.control_change_events = []
             self.total_duration_sec = 0.0
             
             _log(f"Opening {self.filename}...")
@@ -158,7 +160,7 @@ except ImportError:
                         if off_time > max_off_time:
                             max_off_time = off_time
                         
-                        temp_gpu_notes.append((on_time, off_time, data1, vel, channel, 0))
+                        temp_gpu_notes.append((on_time, off_time, data1, vel, on_track_num % 256, 0))
                         self.note_events_for_playback_list.append((on_time, off_time, data1, vel, channel, on_track_num))
 
                         if not note_on_dict[key]:
@@ -170,6 +172,8 @@ except ImportError:
                 elif event_type == 0xE0:
                     pitch_bend_value = (data2 << 7) | data1
                     self.pitch_bend_events.append((current_time_sec, channel, pitch_bend_value))
+                elif event_type == 0xB0:
+                    self.control_change_events.append((current_time_sec, channel, data1, data2))
 
                 try:
                     next_tick, next_event = next(track_event_streams[track_num])

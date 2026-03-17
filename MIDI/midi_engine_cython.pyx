@@ -289,6 +289,7 @@ cdef class BassMidiEngine:
 
         cdef double buffer_level
         cdef double chunk_dur = 0.0005
+        cdef double rendered_dur
         cdef HSTREAM decode = self.decode_stream
         cdef HSTREAM playback = self.playback_stream
         cdef MiniEvent* ev
@@ -316,8 +317,10 @@ cdef class BassMidiEngine:
                 else:
                     break
 
-            self.render_forward(chunk_dur)
-            self.simulated_time += chunk_dur
+            rendered_dur = self.render_forward(chunk_dur)
+            if rendered_dur <= 0.0:
+                break
+            self.simulated_time += rendered_dur
             loops += 1
             
             pos_bytes = self.f.ChannelGetPosition(playback, BASS_POS_BYTE)
@@ -407,6 +410,7 @@ cdef class BassMidiEngine:
         cdef uint32_t d1
         cdef uint32_t d2
         cdef BOOL ok = 0
+        cdef uint8_t raw_cc[3]
         
         if cmd == 0x90 or cmd == 0x80:
             ok = self.f.MIDI_StreamEvent(target, chan, BASS_MIDI_EVENT_NOTE, param)
@@ -415,7 +419,11 @@ cdef class BassMidiEngine:
             d2 = (param >> 8) & 0xFF
             ok = self.f.MIDI_StreamEvent(target, chan, BASS_MIDI_EVENT_PITCH, d1 | (d2 << 7))
         elif cmd == 0xB0:
-            ok = self.f.MIDI_StreamEvent(target, chan, param & 0xFF, (param >> 8) & 0xFF)
+            raw_cc[0] = <uint8_t>status
+            raw_cc[1] = <uint8_t>(param & 0xFF)
+            raw_cc[2] = <uint8_t>((param >> 8) & 0xFF)
+            self.f.MIDI_StreamEvents(target, BASS_MIDI_EVENTS_RAW, raw_cc, 3)
+            ok = 1
         if self.debug_mode and not ok:
             print(f"[Cython] MIDI_StreamEvent failed: status=0x{status:02X} chan={chan} param={param} err={self.f.ErrorGetCode()}")
 

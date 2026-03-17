@@ -28,6 +28,7 @@ cdef class MidiParser:
     cdef public np.ndarray note_events_for_playback
     cdef public list program_change_events
     cdef public list pitch_bend_events
+    cdef public list control_change_events
     cdef public double total_duration_sec
     cdef public int ticks_per_beat
     cdef public str filename

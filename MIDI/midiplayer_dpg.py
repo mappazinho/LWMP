@@ -84,6 +84,7 @@ def run_parser_process(filepath, result_queue):
             "note_data_for_gpu": parser.note_data_for_gpu,
             "note_events_for_playback": parser.note_events_for_playback,
             "pitch_bend_events": parser.pitch_bend_events,
+            "control_change_events": getattr(parser, "control_change_events", []),
         }
         result_queue.put(("success", result_data))
     except Exception as e:
@@ -1194,10 +1195,12 @@ class DpgMidiPlayerApp:
 
             note_events = self.controller.parsed_midi.note_events_for_playback
             pitch_bend_events = self.controller.parsed_midi.pitch_bend_events
+            control_change_events = getattr(self.controller.parsed_midi, "control_change_events", [])
 
             count_notes = len(note_events)
             count_bends = len(pitch_bend_events)
-            total_ops = (count_notes * 2) + count_bends
+            count_ccs = len(control_change_events)
+            total_ops = (count_notes * 2) + count_bends + count_ccs
 
             times = np.empty(total_ops, dtype=np.float64)
             statuses = np.empty(total_ops, dtype=np.uint32)
@@ -1214,11 +1217,20 @@ class DpgMidiPlayerApp:
             if count_bends > 0:
                 pb_arr = np.array(pitch_bend_events, dtype=[("time", "f8"), ("chan", "u4"), ("val", "u4")])
                 start_idx = count_notes * 2
-                times[start_idx:] = pb_arr["time"]
-                statuses[start_idx:] = 0xE0 + pb_arr["chan"]
+                end_idx = start_idx + count_bends
+                times[start_idx:end_idx] = pb_arr["time"]
+                statuses[start_idx:end_idx] = 0xE0 + pb_arr["chan"]
                 bend_lsb = pb_arr["val"] & 0x7F
                 bend_msb = (pb_arr["val"] >> 7) & 0x7F
-                params[start_idx:] = (bend_msb << 8) | bend_lsb
+                params[start_idx:end_idx] = (bend_msb << 8) | bend_lsb
+
+            if count_ccs > 0:
+                cc_arr = np.array(control_change_events, dtype=[("time", "f8"), ("chan", "u4"), ("cc", "u4"), ("val", "u4")])
+                start_idx = (count_notes * 2) + count_bends
+                end_idx = start_idx + count_ccs
+                times[start_idx:end_idx] = cc_arr["time"]
+                statuses[start_idx:end_idx] = 0xB0 + cc_arr["chan"]
+                params[start_idx:end_idx] = (cc_arr["val"] << 8) | cc_arr["cc"]
 
             sort_indices = np.argsort(times)
             times = times[sort_indices]
@@ -1232,10 +1244,6 @@ class DpgMidiPlayerApp:
             has_started_playback = False
 
             while self.controller.playing:
-                while self.controller.paused:
-                    if not self.controller.playing:
-                        break
-                    time.sleep(0.02)
                 if not self.controller.playing:
                     break
 
@@ -1254,6 +1262,14 @@ class DpgMidiPlayerApp:
                 buffer_lvl = self.controller.active_midi_backend.fill_buffer(60.0)
                 is_active = self.controller.active_midi_backend.is_active()
 
+                if self.controller.paused:
+                    self.controller.active_midi_backend.pause()
+                    if buffer_lvl >= 60.0:
+                        time.sleep(0.1)
+                    else:
+                        time.sleep(0.005)
+                    continue
+
                 if not has_started_playback:
                     if buffer_lvl > 4.0:
                         self._queue_ui(dpg.set_value, "status_text", "Playing...")
@@ -1266,7 +1282,7 @@ class DpgMidiPlayerApp:
                         self.controller.active_midi_backend.pause()
                         self._queue_ui(dpg.set_value, "status_text", "Buffering...")
                         has_started_playback = False
-                    elif not is_active and buffer_lvl > 2.0:
+                    elif not self.controller.paused and not is_active and buffer_lvl > 2.0:
                         self.controller.active_midi_backend.play()
                         self._queue_ui(dpg.set_value, "status_text", "Playing...")
 
@@ -1294,9 +1310,11 @@ class DpgMidiPlayerApp:
 
             note_events = self.controller.parsed_midi.note_events_for_playback
             pitch_bend_events = self.controller.parsed_midi.pitch_bend_events
+            control_change_events = getattr(self.controller.parsed_midi, "control_change_events", [])
 
             num_note_events = len(note_events)
             num_pitch_bend_events = len(pitch_bend_events)
+            num_control_change_events = len(control_change_events)
 
             if self.controller.active_midi_backend:
                 for channel in range(16):
@@ -1307,6 +1325,7 @@ class DpgMidiPlayerApp:
             start_time = self.get_current_playback_time()
             note_event_index = bisect.bisect_left(note_events["on_time"], start_time)
             pitch_bend_index = bisect.bisect_left(pitch_bend_events, (start_time, -float("inf"), -float("inf")))
+            control_change_index = bisect.bisect_left(control_change_events, (start_time, -float("inf"), -float("inf"), -float("inf")))
 
             with self.playback_lock:
                 self.controller.last_processed_event_time = start_time
@@ -1321,6 +1340,7 @@ class DpgMidiPlayerApp:
             while self.controller.playing and (
                 note_event_index < num_note_events
                 or pitch_bend_index < num_pitch_bend_events
+                or control_change_index < num_control_change_events
                 or len(note_off_heap) > 0
             ):
                 while self.controller.paused:
@@ -1341,6 +1361,7 @@ class DpgMidiPlayerApp:
                         self.controller.last_processed_event_time = requested_time
                     note_event_index = bisect.bisect_left(note_events["on_time"], requested_time)
                     pitch_bend_index = bisect.bisect_left(pitch_bend_events, (requested_time, -float("inf"), -float("inf")))
+                    control_change_index = bisect.bisect_left(control_change_events, (requested_time, -float("inf"), -float("inf"), -float("inf")))
                     self.controller.playback_start_time = time.monotonic() - requested_time
                     self.controller.total_paused_duration = 0.0
                     self.controller.paused_at_time = 0.0
@@ -1356,7 +1377,8 @@ class DpgMidiPlayerApp:
                 next_note_on_time = note_events[note_event_index]["on_time"] if note_event_index < num_note_events else float("inf")
                 next_note_off_time = note_off_heap[0][0] if note_off_heap else float("inf")
                 next_pitch_bend_time = pitch_bend_events[pitch_bend_index][0] if pitch_bend_index < num_pitch_bend_events else float("inf")
-                event_time_sec = min(next_note_on_time, next_note_off_time, next_pitch_bend_time)
+                next_control_change_time = control_change_events[control_change_index][0] if control_change_index < num_control_change_events else float("inf")
+                event_time_sec = min(next_note_on_time, next_note_off_time, next_pitch_bend_time, next_control_change_time)
 
                 if event_time_sec == float("inf"):
                     break
@@ -1411,6 +1433,14 @@ class DpgMidiPlayerApp:
                             param = (data2 << 8) | data1
                             self.controller.active_midi_backend.send_raw_event(status, param)
                         pitch_bend_index += 1
+
+                    while control_change_index < num_control_change_events and control_change_events[control_change_index][0] <= event_time_sec:
+                        _time, channel, controller, value = control_change_events[control_change_index]
+                        status = 0xB0 + channel
+                        if self.controller.active_midi_backend:
+                            param = (value << 8) | controller
+                            self.controller.active_midi_backend.send_raw_event(status, param)
+                        control_change_index += 1
                 except Exception as e:
                     print(f"MIDI backend send error: {e}")
                     self._queue_ui(dpg.set_value, "status_text", f"Playback Error: {e}")
@@ -1448,12 +1478,7 @@ class DpgMidiPlayerApp:
         self.piano_roll_thread.start()
 
         if self.controller.parsed_midi:
-            notes_for_gpu = np.empty(len(self.controller.parsed_midi.note_events_for_playback), dtype=GPU_NOTE_DTYPE)
-            notes_for_gpu["on_time"] = self.controller.parsed_midi.note_events_for_playback["on_time"]
-            notes_for_gpu["off_time"] = self.controller.parsed_midi.note_events_for_playback["off_time"]
-            notes_for_gpu["pitch"] = self.controller.parsed_midi.note_events_for_playback["pitch"]
-            notes_for_gpu["velocity"] = self.controller.parsed_midi.note_events_for_playback["velocity"]
-            notes_for_gpu["track"] = self.controller.parsed_midi.note_events_for_playback["channel"]
+            notes_for_gpu = np.ascontiguousarray(self.controller.parsed_midi.note_data_for_gpu)
             threading.Timer(
                 0.5,
                 lambda: self.piano_roll.load_midi(notes_for_gpu, self.get_current_playback_time_thread_safe),

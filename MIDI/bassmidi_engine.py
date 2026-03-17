@@ -26,6 +26,7 @@ BASS_MIDI_SINCINTER = 0x800000
 BASS_POS_BYTE = 0
 STREAMPROC_PUSH = -1
 BASS_FILEPOS_BUFFER = 5
+BASS_MIDI_EVENTS_RAW = 0x10000
 
 BASS_MIDI_EVENT_NOTE = 1
 BASS_MIDI_EVENT_PITCH = 4
@@ -109,6 +110,8 @@ if bass:
 if bassmidi:
     bassmidi.BASS_MIDI_StreamCreate.argtypes = [DWORD, DWORD, DWORD]
     bassmidi.BASS_MIDI_StreamCreate.restype = HSTREAM
+    bassmidi.BASS_MIDI_StreamEvents.argtypes = [HSTREAM, DWORD, ctypes.c_void_p, DWORD]
+    bassmidi.BASS_MIDI_StreamEvents.restype = DWORD
     bassmidi.BASS_MIDI_StreamEvent.argtypes = [HSTREAM, DWORD, DWORD, DWORD]
     bassmidi.BASS_MIDI_StreamEvent.restype = BOOL
     
@@ -230,7 +233,8 @@ class BassMidiEngine:
         elif cmd == 0xB0:
             controller = param & 0xFF
             value = (param >> 8) & 0xFF
-            bassmidi.BASS_MIDI_StreamEvent(target, chan, controller, value)
+            raw_event = (ctypes.c_ubyte * 3)(status, controller, value)
+            bassmidi.BASS_MIDI_StreamEvents(target, BASS_MIDI_EVENTS_RAW, raw_event, 3)
 
     def send_all_notes_off(self):
         target = self.decode_stream if self.buffering_enabled else self.midi_stream
