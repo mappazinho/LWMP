@@ -25,3 +25,11 @@ Just launch build.bat, and all dependencies and compilation happens automaticall
 Requires Python 3.13+ for building!
 
 ### ⚠️ Still in beta stage, lots of bugs still needs fixing and features are somewhat incomplete.
+
+## Credits
+- [BASS](https://www.un4seen.com/) and [BASSMIDI](https://www.un4seen.com/bass.html) by Un4seen for MIDI synthesis and audio streaming.
+- [NumPy](https://numpy.org/) for array processing and playback/parser data handling.
+- [Cython](https://cython.org/) for the compiled parser and audio engine modules.
+- [pygame](https://www.pygame.org/news) and [PyOpenGL](https://pyopengl.sourceforge.net/) for the piano roll renderer.
+- [DearPyGUI](https://github.com/hoffstadt/DearPyGui) for the modern GUI frontend.
+- [psutil](https://github.com/giampaolo/psutil) for CPU and memory statistics.
