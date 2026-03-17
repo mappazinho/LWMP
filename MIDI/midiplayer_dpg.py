@@ -116,6 +116,7 @@ class DpgMidiPlayerApp:
         self._seek_was_active = False
         self._cleaned_up = False
         self.startup_ready = False
+        self.pending_midi_name = None
         self.has_bundled_omnimidi = os.path.exists(os.path.join(script_dir, "OmniMIDI.dll"))
         self.recommended_mode = "local" if self.has_bundled_omnimidi else "path"
         self.recommended_note_limit = 20_000_000
@@ -180,6 +181,49 @@ class DpgMidiPlayerApp:
     def _set_item_visibility(self, item_tag, visible):
         if dpg.does_item_exist(item_tag):
             dpg.configure_item(item_tag, show=bool(visible))
+
+    def _nps_series_theme_tag(self, value):
+        if value > 1_000_000:
+            return "plot_theme_dark_red"
+        if value > 500_000:
+            return "plot_theme_red"
+        if value > 200_000:
+            return "plot_theme_orange"
+        if value > 100_000:
+            return "plot_theme_yellow"
+        return "plot_theme_normal"
+
+    def _cpu_series_theme_tag(self, value):
+        if value > 75.0:
+            return "plot_theme_red"
+        if value > 50.0:
+            return "plot_theme_orange"
+        if value > 30.0:
+            return "plot_theme_yellow"
+        return "plot_theme_normal"
+
+    def _apply_graph_series_colors(self, nps_value, cpu_value):
+        if dpg.does_item_exist("nps_series"):
+            dpg.bind_item_theme("nps_series", self._nps_series_theme_tag(nps_value))
+        if dpg.does_item_exist("cpu_series"):
+            dpg.bind_item_theme("cpu_series", self._cpu_series_theme_tag(cpu_value))
+
+    def _update_now_playing_header(self, midi_name=None):
+        if midi_name is not None:
+            self.pending_midi_name = midi_name
+
+        active_name = None
+        if self.controller.parsed_midi is not None and getattr(self.controller.parsed_midi, "filename", None):
+            active_name = os.path.basename(self.controller.parsed_midi.filename)
+        elif self.pending_midi_name:
+            active_name = self.pending_midi_name
+
+        header_text = "Now Playing"
+        if active_name:
+            header_text = f"Now Playing: {active_name}"
+
+        if dpg.does_item_exist("now_playing_text"):
+            dpg.set_value("now_playing_text", header_text)
 
     def _get_screen_size(self):
         try:
@@ -314,7 +358,7 @@ class DpgMidiPlayerApp:
         gui_cfg = self._gui_cfg()
         self._set_item_visibility("subtitle_text", gui_cfg["show_subtitle"])
         self._set_item_visibility("audio_panel", gui_cfg["show_audio_panel"])
-        self._set_item_visibility("status_row", gui_cfg["show_status_line"])
+        self._set_item_visibility("status_text", gui_cfg["show_status_line"])
         self._set_item_visibility("backend_hint_text", gui_cfg["show_backend_hint"])
         self._set_item_visibility("performance_section", gui_cfg["show_performance_panel"])
         self._set_item_visibility("nps_graph_cell", gui_cfg["show_nps_graph"])
@@ -429,8 +473,13 @@ class DpgMidiPlayerApp:
 
                     with dpg.table_row():
                         with dpg.table_cell():
-                            dpg.add_text("Now Playing", color=(223, 177, 103))
-                            dpg.add_text("No file loaded.", tag="filename_text", wrap=470)
+                            dpg.add_text("Now Playing", tag="now_playing_text", color=(223, 177, 103), wrap=470)
+                            dpg.add_text(
+                                "Choose a startup mode to initialize audio.",
+                                tag="status_text",
+                                wrap=470,
+                                color=(196, 198, 204),
+                            )
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Position", color=(160, 166, 178))
                                 dpg.add_text("00:00 / 00:00", tag="time_text")
@@ -452,15 +501,6 @@ class DpgMidiPlayerApp:
                                 dpg.add_item_activated_handler(callback=self.on_seek_start)
                                 dpg.add_item_deactivated_after_edit_handler(callback=self.on_seek_end)
                             dpg.bind_item_handler_registry("seek_slider", "seek_handler")
-
-                            with dpg.group(horizontal=True, tag="status_row"):
-                                dpg.add_text("Status", color=(160, 166, 178))
-                                dpg.add_text(
-                                    "Choose a startup mode to initialize audio.",
-                                    tag="status_text",
-                                    wrap=410,
-                                    color=(196, 198, 204),
-                                )
 
                         with dpg.table_cell(tag="audio_panel"):
                             dpg.add_text("Audio", color=(223, 177, 103))
@@ -549,6 +589,7 @@ class DpgMidiPlayerApp:
                                         no_menus=True,
                                         lock_min=True,
                                         lock_max=True,
+                                        tick_format="%.0f",
                                     ):
                                         dpg.add_line_series(plot_x, list(self.nps_history), tag="nps_series")
 
@@ -579,6 +620,7 @@ class DpgMidiPlayerApp:
                                         no_menus=True,
                                         lock_min=True,
                                         lock_max=True,
+                                        tick_format="%.0f",
                                     ):
                                         dpg.add_line_series(plot_x, list(self.cpu_history), tag="cpu_series")
 
@@ -756,12 +798,31 @@ class DpgMidiPlayerApp:
                 dpg.add_theme_style(dpg.mvStyleVar_ItemSpacing, 4, 4, category=dpg.mvThemeCat_Core)
                 dpg.add_theme_style(dpg.mvStyleVar_ItemInnerSpacing, 4, 4, category=dpg.mvThemeCat_Core)
         dpg.bind_theme(global_theme)
+
+        for theme_tag, color in (
+            ("plot_theme_normal", (96, 152, 255)),
+            ("plot_theme_yellow", (232, 212, 92)),
+            ("plot_theme_orange", (232, 145, 58)),
+            ("plot_theme_red", (220, 70, 62)),
+            ("plot_theme_dark_red", (128, 24, 24)),
+        ):
+            if not dpg.does_item_exist(theme_tag):
+                with dpg.theme(tag=theme_tag):
+                    with dpg.theme_component(dpg.mvLineSeries):
+                        dpg.add_theme_color(dpg.mvPlotCol_Line, color, category=dpg.mvThemeCat_Plots)
+
         if dpg.does_item_exist("title_text"):
             dpg.configure_item("title_text", color=self._color_tuple("accent_text"))
         if dpg.does_item_exist("subtitle_text"):
             dpg.configure_item("subtitle_text", color=self._color_tuple("muted_text"))
+        if dpg.does_item_exist("now_playing_text"):
+            dpg.configure_item("now_playing_text", color=self._color_tuple("accent_text"))
         if dpg.does_item_exist("status_text"):
             dpg.configure_item("status_text", color=self._color_tuple("body_text"))
+        self._apply_graph_series_colors(
+            self.nps_history[-1] if self.nps_history else 0,
+            self.last_cpu_percent,
+        )
 
     def _initialize_process_monitoring(self):
         try:
@@ -880,7 +941,8 @@ class DpgMidiPlayerApp:
         self.controller.parsed_midi = None
         self.controller.total_song_notes = 0
         self.controller.total_song_duration = 0.0
-        dpg.set_value("filename_text", "No file loaded.")
+        self.pending_midi_name = None
+        self._update_now_playing_header()
         dpg.set_value("time_text", "00:00 / 00:00")
         dpg.set_value("note_count_value", "0 / 0")
         dpg.set_value("seek_slider", 0.0)
@@ -900,7 +962,8 @@ class DpgMidiPlayerApp:
         if not filepath:
             return
 
-        dpg.set_value("filename_text", f"Parsing {os.path.basename(filepath)}...")
+        self._update_now_playing_header(os.path.basename(filepath))
+        dpg.set_value("status_text", f"Parsing {os.path.basename(filepath)}...")
         dpg.configure_item("load_button", enabled=False)
         dpg.set_value("loading_label", "Initializing...")
         dpg.set_value("loading_progress", 0.0)
@@ -919,7 +982,9 @@ class DpgMidiPlayerApp:
             self.loading_visible = False
             dpg.configure_item("loading_window", show=False)
             self._message_error("Error", f"Failed to start parser: {e}")
-            dpg.set_value("filename_text", "Failed to start parser.")
+            self.pending_midi_name = None
+            self._update_now_playing_header()
+            dpg.set_value("status_text", "Failed to start parser.")
             dpg.configure_item("load_button", enabled=True)
 
     def _poll_parser(self):
@@ -945,7 +1010,8 @@ class DpgMidiPlayerApp:
                 elif event["kind"] == "success":
                     self.loading_visible = False
                     dpg.configure_item("loading_window", show=False)
-                    dpg.set_value("filename_text", f"Loaded: {os.path.basename(self.controller.parsed_midi.filename)}")
+                    self._update_now_playing_header()
+                    dpg.set_value("status_text", "Ready to play.")
                     dpg.set_value("time_text", f"00:00 / {self.format_time(self.controller.total_song_duration)}")
                     dpg.set_value("note_count_value", f"0 / {self.controller.total_song_notes:,}")
                     dpg.set_value("seek_slider", 0.0)
@@ -964,7 +1030,9 @@ class DpgMidiPlayerApp:
                     self.loading_visible = False
                     dpg.configure_item("loading_window", show=False)
                     self._message_error("Parse Error", f"Could not load MIDI file: {event['payload']}")
-                    dpg.set_value("filename_text", "Failed to load file.")
+                    self.pending_midi_name = None
+                    self._update_now_playing_header()
+                    dpg.set_value("status_text", "Failed to load file.")
                     dpg.configure_item("load_button", enabled=True)
                     return
         except Exception as e:
@@ -972,7 +1040,9 @@ class DpgMidiPlayerApp:
             dpg.configure_item("loading_window", show=False)
             self.controller.clear_parse_job()
             self._message_error("Error", f"Error checking parser status: {e}")
-            dpg.set_value("filename_text", "Error during parsing.")
+            self.pending_midi_name = None
+            self._update_now_playing_header()
+            dpg.set_value("status_text", "Error during parsing.")
             dpg.configure_item("load_button", enabled=True)
 
     def on_seek_start(self, sender, app_data):
@@ -981,7 +1051,7 @@ class DpgMidiPlayerApp:
         if not self._seek_was_active:
             paused_for_seek = self.controller.begin_seek()
             if paused_for_seek:
-                dpg.set_value("filename_text", "Seeking...")
+                dpg.set_value("status_text", "Seeking...")
             self._seek_was_active = True
 
     def on_seek_end(self, sender, app_data):
@@ -994,7 +1064,7 @@ class DpgMidiPlayerApp:
             resumed = self.controller.complete_seek(seek_time)
         if resumed:
             dpg.configure_item("play_button", label="Pause")
-            dpg.set_value("filename_text", "Playing...")
+            dpg.set_value("status_text", "Playing...")
         if not self.controller.playing or self.controller.paused:
             dpg.set_value(
                 "time_text",
@@ -1007,18 +1077,18 @@ class DpgMidiPlayerApp:
             if self.controller.paused:
                 self.controller.resume_playback()
                 dpg.configure_item("play_button", label="Pause")
-                dpg.set_value("filename_text", "Playing...")
+                dpg.set_value("status_text", "Playing...")
             else:
                 self.controller.pause_playback()
                 dpg.configure_item("play_button", label="Resume")
-                dpg.set_value("filename_text", "Paused")
+                dpg.set_value("status_text", "Paused")
         else:
             if self.controller.parsed_midi is None:
                 return
             current_time = self.get_current_playback_time()
             self.controller.start_playback(current_time)
             dpg.configure_item("play_button", label="Pause")
-            dpg.set_value("filename_text", "Playing...")
+            dpg.set_value("status_text", "Playing...")
             dpg.configure_item("voices_slider", enabled=False)
             self.playback_thread = threading.Thread(target=self.play_music_thread, daemon=True)
             self.playback_thread.start()
@@ -1029,7 +1099,7 @@ class DpgMidiPlayerApp:
         dpg.configure_item("play_button", label="Play")
         if self.controller.parsed_midi:
             dpg.set_value("time_text", f"00:00 / {self.format_time(self.controller.total_song_duration)}")
-            dpg.set_value("filename_text", f"Loaded: {os.path.basename(self.controller.parsed_midi.filename)}")
+            dpg.set_value("status_text", "Ready to play.")
         dpg.configure_item("voices_slider", enabled=True)
 
     def unload_file(self):
@@ -1040,7 +1110,9 @@ class DpgMidiPlayerApp:
 
         self.controller.unload_midi()
         self.reset_playback_state()
-        dpg.set_value("filename_text", "No file loaded.")
+        self.pending_midi_name = None
+        self._update_now_playing_header()
+        dpg.set_value("status_text", "No file loaded.")
         dpg.set_value("time_text", "00:00 / 00:00")
         dpg.set_value("note_count_value", "0 / 0")
         dpg.set_value("seek_slider", 0.0)
@@ -1068,6 +1140,7 @@ class DpgMidiPlayerApp:
             self.nps_history.append(0)
             self.cpu_history.append(0.0)
         self._update_plot_series()
+        self._apply_graph_series_colors(0, 0.0)
         dpg.set_value("nps_max_text", "Max: 0")
         dpg.set_value("nps_text", "0")
         dpg.set_value("cpu_text", "0.0%")
@@ -1083,7 +1156,7 @@ class DpgMidiPlayerApp:
         self.controller.finish_playback()
         dpg.configure_item("play_button", label="Play")
         if self.controller.parsed_midi:
-            dpg.set_value("filename_text", f"Finished: {os.path.basename(self.controller.parsed_midi.filename)}")
+            dpg.set_value("status_text", "Finished.")
             finished = self.format_time(self.controller.total_song_duration)
             dpg.set_value("time_text", f"{finished} / {finished}")
             dpg.set_value("seek_slider", self.controller.total_song_duration)
@@ -1113,7 +1186,7 @@ class DpgMidiPlayerApp:
                 self._queue_ui(self.playback_finished)
                 return
 
-            self._queue_ui(dpg.set_value, "filename_text", "Pre-rendering events...")
+            self._queue_ui(dpg.set_value, "status_text", "Pre-rendering events...")
 
             if self.controller.active_midi_backend:
                 self.set_pitch_bend_range(semitones=12)
@@ -1183,19 +1256,19 @@ class DpgMidiPlayerApp:
 
                 if not has_started_playback:
                     if buffer_lvl > 4.0:
-                        self._queue_ui(dpg.set_value, "filename_text", "Playing...")
+                        self._queue_ui(dpg.set_value, "status_text", "Playing...")
                         self.controller.active_midi_backend.play()
                         has_started_playback = True
                     else:
-                        self._queue_ui(dpg.set_value, "filename_text", f"Prerendering... {buffer_lvl:.1f}s / 4.0s")
+                        self._queue_ui(dpg.set_value, "status_text", f"Prerendering... {buffer_lvl:.1f}s / 4.0s")
                 else:
                     if buffer_lvl < 0.2:
                         self.controller.active_midi_backend.pause()
-                        self._queue_ui(dpg.set_value, "filename_text", "Buffering...")
+                        self._queue_ui(dpg.set_value, "status_text", "Buffering...")
                         has_started_playback = False
                     elif not is_active and buffer_lvl > 2.0:
                         self.controller.active_midi_backend.play()
-                        self._queue_ui(dpg.set_value, "filename_text", "Playing...")
+                        self._queue_ui(dpg.set_value, "status_text", "Playing...")
 
                 if buffer_lvl >= 60.0:
                     time.sleep(0.1)
@@ -1214,7 +1287,7 @@ class DpgMidiPlayerApp:
                 self._queue_ui(self.playback_finished)
                 return
 
-            self._queue_ui(dpg.set_value, "filename_text", "Starting playback...")
+            self._queue_ui(dpg.set_value, "status_text", "Starting playback...")
 
             if self.controller.active_midi_backend:
                 self.set_pitch_bend_range(semitones=12)
@@ -1340,7 +1413,7 @@ class DpgMidiPlayerApp:
                         pitch_bend_index += 1
                 except Exception as e:
                     print(f"MIDI backend send error: {e}")
-                    self._queue_ui(dpg.set_value, "filename_text", f"Playback Error: {e}")
+                    self._queue_ui(dpg.set_value, "status_text", f"Playback Error: {e}")
                     break
         except Exception as e:
             print(f"Playback thread error: {e}")
@@ -1431,6 +1504,10 @@ class DpgMidiPlayerApp:
             nps_axis_top = math.ceil(current_max_nps * 1.15 / 50) * 50
         dpg.set_axis_limits("nps_y_axis", 0, nps_axis_top)
         dpg.set_axis_limits("cpu_y_axis", 0, 100)
+        self._apply_graph_series_colors(
+            self.nps_history[-1] if self.nps_history else 0,
+            self.last_cpu_percent,
+        )
 
     def update_cpu_graph(self):
         now = time.monotonic()

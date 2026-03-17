@@ -213,8 +213,8 @@ cdef class MidiParser:
         cdef TrackState ts
         cdef RawEvent raw_ev
         cdef bytes data_bytes
+        cdef uint64_t total_event_count = 0
 
-        total_event_count = 0
         with open(self.filename, 'rb') as f:
             if f.read(4) != b'MThd':
                 return 0
@@ -238,16 +238,12 @@ cdef class MidiParser:
                     ts.last_status = -1
                     ts.track_index = 0
 
-
                     while next_raw_event(&ts, &raw_ev):
                         total_event_count += 1
-                        if total_event_count > 50000000:
-                            print("[ERROR] Event count limit exceeded! Possible infinite loop.")
-                            break
                 else:
                     f.seek(track_length, 1)
         
-        return total_event_count
+        return int(total_event_count)
 
     def parse(self, progress_queue=None, total_events=0):
         def _log(message):
