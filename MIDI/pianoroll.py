@@ -174,12 +174,16 @@ uniform float u_glow_strength;
 
 void main() {
     vec4 texColor;
+    float glow_mode = step(0.001, u_glow_strength);
     if (v_is_pressed > 0.5) {
         texColor = texture2D(u_texture_pressed, v_uv);
-        gl_FragColor = texColor * vec4(v_color, 1.0);
+        vec3 lit_base = texColor.rgb * (u_is_white_key ? 0.16 : 0.10);
+        vec3 normal_pressed = texColor.rgb * v_color;
+        gl_FragColor = vec4(mix(normal_pressed, lit_base, glow_mode), texColor.a);
     } else {
         texColor = texture2D(u_texture_unpressed, v_uv);
-        gl_FragColor = texColor;
+        vec3 lit_base = texColor.rgb * (u_is_white_key ? 0.08 : 0.04);
+        gl_FragColor = vec4(mix(texColor.rgb, lit_base, glow_mode), texColor.a);
     }
 
     if (u_is_white_key) {
@@ -189,18 +193,27 @@ void main() {
         float border_y = border_size * fw_uv.y;
 
         if (v_uv.x < border_x || v_uv.x > 1.0 - border_x || v_uv.y < border_y || v_uv.y > 1.0 - border_y) {
-            vec3 border_color = vec3(0.5, 0.5, 0.5);
+            vec3 border_color = mix(vec3(0.5, 0.5, 0.5), vec3(0.14, 0.14, 0.16), glow_mode);
             if (v_is_pressed > 0.5) {
-                border_color = vec3(0.2, 0.2, 0.2);
+                border_color = mix(vec3(0.2, 0.2, 0.2), vec3(0.18, 0.18, 0.20), glow_mode);
             }
             gl_FragColor = vec4(border_color, texColor.a);
         }
     }
 
-    if (v_is_pressed > 0.5 && u_glow_strength > 0.001) {
+    float light_strength = max(max(v_color.r, v_color.g), v_color.b);
+    if (glow_mode > 0.5 && light_strength > 0.001) {
+        vec2 centered = abs(v_uv - vec2(0.5, 0.48));
+        float spread = clamp(1.0 - max(centered.x * 1.7, centered.y * 1.2), 0.0, 1.0);
+        float spill = pow(spread, 2.0);
+        float intensity = v_is_pressed > 0.5 ? 0.86 : 0.54;
+        gl_FragColor.rgb += v_color * spill * intensity;
+    }
+
+    if (v_is_pressed > 0.5 && glow_mode > 0.5) {
         vec2 centered = abs(v_uv - vec2(0.5, 0.5));
         float glow = clamp(1.0 - max(centered.x * 1.6, centered.y * 2.0), 0.0, 1.0);
-        gl_FragColor.rgb += v_color * pow(glow, 2.0) * u_glow_strength * 0.45;
+        gl_FragColor.rgb += v_color * pow(glow, 2.0) * u_glow_strength * 0.82;
     }
 }
 """
@@ -296,6 +309,13 @@ class PianoRoll:
         self.color_button_rect = None
         self.glow_button_rect = None
         self.color_button_size = 32
+        self.controls_panel_expanded = False
+        self.controls_toggle_rect = None
+        self.controls_panel_rect = None
+        self.controls_close_rect = None
+        self.controls_panel_size = (300, 136)
+        self.overlay_font = None
+        self._text_texture_cache = {}
 
     def _get_guide_line_y(self):
         if self.show_keyboard and 'white_key' in self.keyboard_texture_info:
@@ -440,14 +460,14 @@ class PianoRoll:
         if white_keys_geom:
             self.white_key_instance_data['rect'] = np.array(white_keys_geom, dtype=np.float32)
             self.white_key_instance_data['is_pressed'] = 0.0
-            self.white_key_instance_data['color'] = (1.0, 1.0, 1.0)
+            self.white_key_instance_data['color'] = (0.0, 0.0, 0.0)
 
         black_key_dtype = np.dtype([('rect', 'f4', 4), ('is_pressed', 'f4'), ('color', 'f4', 3)])
         self.black_key_instance_data = np.zeros(len(black_keys_geom), dtype=black_key_dtype)
         if black_keys_geom:
             self.black_key_instance_data['rect'] = np.array(black_keys_geom, dtype=np.float32)
             self.black_key_instance_data['is_pressed'] = 0.0
-            self.black_key_instance_data['color'] = (1.0, 1.0, 1.0)
+            self.black_key_instance_data['color'] = (0.0, 0.0, 0.0)
 
         self.pitch_layout_data = np.zeros((128, 2), dtype=np.float32)
         for pitch, key_info in self.keyboard_layout.items():
@@ -457,6 +477,7 @@ class PianoRoll:
     def init_pygame_and_gl(self):
         pygame.init()
         pygame.font.init()
+        self.overlay_font = pygame.font.Font(None, 18)
         
         self.screen = pygame.display.set_mode((self.width, self.height), DOUBLEBUF | OPENGL | pygame.HWSURFACE)
         pygame.display.set_caption("Piano Roll")
@@ -724,6 +745,7 @@ class PianoRoll:
     def draw(self, current_time):
         """Draw the latest buffer provided by the data thread."""
         self._upload_pending_midi_data()
+        self._update_glow_trails(current_time)
         
         glClearColor(0.05, 0.05, 0.08, 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
@@ -788,7 +810,7 @@ class PianoRoll:
 
         pygame.display.flip()
 
-    def _draw_active_note_glow_overlay(self, current_time):
+    def _update_glow_trails(self, current_time):
         if self.last_glow_time is not None and current_time + 0.001 < self.last_glow_time:
             self.glow_trails.clear()
         self.last_glow_time = current_time
@@ -820,10 +842,27 @@ class PianoRoll:
                     'last_active_time': current_time,
                 }
 
+        expired_keys = []
+        for key, trail in list(self.glow_trails.items()):
+            elapsed = max(0.0, current_time - trail['last_active_time'])
+            fade = 1.0 - (elapsed / self.glow_fade_duration)
+            if fade <= 0.0:
+                expired_keys.append(key)
+
+        for key in expired_keys:
+            self.glow_trails.pop(key, None)
+
+    def _draw_active_note_glow_overlay(self, current_time):
         if not self.glow_trails:
             return
 
         guide_y = self._get_guide_line_y()
+        active_pitch_keys = set()
+        if self.last_visible_notes is not None and len(self.last_visible_notes) > 0:
+            active_mask = (self.last_visible_notes['on_time'] <= current_time) & (self.last_visible_notes['off_time'] > current_time)
+            active_notes = self.last_visible_notes[active_mask]
+            for note in active_notes:
+                active_pitch_keys.add(int(note['pitch']))
 
         glDisable(GL_DEPTH_TEST)
         glUseProgram(0)
@@ -831,13 +870,10 @@ class PianoRoll:
         glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); glOrtho(0, self.width, self.height, 0, -1, 1)
         glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
 
-        expired_keys = []
-        active_pitch_keys = set(active_pitch_data.keys())
-        for key, trail in list(self.glow_trails.items()):
+        for trail in self.glow_trails.values():
             elapsed = max(0.0, current_time - trail['last_active_time'])
             fade = 1.0 - (elapsed / self.glow_fade_duration)
             if fade <= 0.0:
-                expired_keys.append(key)
                 continue
 
             pitch = trail['pitch']
@@ -872,9 +908,6 @@ class PianoRoll:
                 glVertex2f(center_x + np.cos(angle) * radius_x * 1.25, center_y - 8.0 + np.sin(angle) * radius_y * 1.65)
             glEnd()
 
-        for key in expired_keys:
-            self.glow_trails.pop(key, None)
-
         glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
@@ -890,36 +923,54 @@ class PianoRoll:
         keyboard_y = self.height - keyboard_height
         glUniform1f(glGetUniformLocation(self.keyboard_shader, "u_keyboard_y"), keyboard_y)
 
+        if len(self.white_key_instance_data) > 0:
+            self.white_key_instance_data['is_pressed'].fill(0.0)
+            self.white_key_instance_data['color'][:] = 0.0
+        if len(self.black_key_instance_data) > 0:
+            self.black_key_instance_data['is_pressed'].fill(0.0)
+            self.black_key_instance_data['color'][:] = 0.0
+
         current_active_pitches = set()
-        
+        active_pitch_colors = {}
         if self.last_visible_notes is not None and len(self.last_visible_notes) > 0:
             active_mask = (self.last_visible_notes['on_time'] <= current_time) & (self.last_visible_notes['off_time'] > current_time)
             active_notes = self.last_visible_notes[active_mask]
             for note in active_notes:
-                pitch = note['pitch']
+                pitch = int(note['pitch'])
                 current_active_pitches.add(pitch)
-                track = note['track']
+                track = int(note['track'])
                 color = self.channel_colors[track % 128]
-                
-                if pitch in self.white_key_pitch_map:
-                    idx = self.white_key_pitch_map[pitch]
-                    self.white_key_instance_data[idx]['is_pressed'] = 1.0
-                    self.white_key_instance_data[idx]['color'] = color
-                elif pitch in self.black_key_pitch_map:
-                    idx = self.black_key_pitch_map[pitch]
-                    self.black_key_instance_data[idx]['is_pressed'] = 1.0
-                    self.black_key_instance_data[idx]['color'] = color
-        
-        released_keys = self.active_pitches_last_frame - current_active_pitches
-        for pitch in released_keys:
+                if pitch not in active_pitch_colors:
+                    active_pitch_colors[pitch] = np.array(color, dtype=np.float32)
+                else:
+                    active_pitch_colors[pitch] += color
+
+        key_light_colors = {}
+        light_falloff = (1.0, 0.55, 0.28, 0.14, 0.07)
+        for pitch, color_sum in active_pitch_colors.items():
+            base_color = np.clip(color_sum, 0.0, 1.0)
+            for distance, weight in enumerate(light_falloff):
+                neighbors = (pitch,) if distance == 0 else (pitch - distance, pitch + distance)
+                for neighbor in neighbors:
+                    if neighbor < 0 or neighbor > 127 or neighbor not in self.keyboard_layout:
+                        continue
+                    if neighbor not in key_light_colors:
+                        key_light_colors[neighbor] = np.array(base_color * weight, dtype=np.float32)
+                    else:
+                        key_light_colors[neighbor] += base_color * weight
+
+        for pitch, color in key_light_colors.items():
+            clamped_color = np.clip(color, 0.0, 1.0)
             if pitch in self.white_key_pitch_map:
                 idx = self.white_key_pitch_map[pitch]
-                self.white_key_instance_data[idx]['is_pressed'] = 0.0
-                self.white_key_instance_data[idx]['color'] = (1.0, 1.0, 1.0)
+                self.white_key_instance_data[idx]['color'] = clamped_color
+                if pitch in current_active_pitches:
+                    self.white_key_instance_data[idx]['is_pressed'] = 1.0
             elif pitch in self.black_key_pitch_map:
                 idx = self.black_key_pitch_map[pitch]
-                self.black_key_instance_data[idx]['is_pressed'] = 0.0
-                self.black_key_instance_data[idx]['color'] = (1.0, 1.0, 1.0)
+                self.black_key_instance_data[idx]['color'] = clamped_color
+                if pitch in current_active_pitches:
+                    self.black_key_instance_data[idx]['is_pressed'] = 1.0
         
         self.active_pitches_last_frame = current_active_pitches
 
@@ -946,14 +997,21 @@ class PianoRoll:
 
     def _init_slider_geometry(self):
         padding = 16
-        bar_width = max(140, self.width // 5)
+        panel_width, panel_height = self.controls_panel_size
+        panel_x = padding - 4
+        panel_y = padding - 2
+        self.controls_toggle_rect = pygame.Rect(panel_x, panel_y, 34, 34)
+        self.controls_panel_rect = pygame.Rect(panel_x, panel_y, panel_width, panel_height)
+        self.controls_close_rect = pygame.Rect(panel_x + panel_width - 34 - 8, panel_y + 8, 34, 34)
+
+        bar_width = panel_width - 32
         bar_height = 6
-        x = padding
-        y = padding
+        x = panel_x + 16
+        y = panel_y + 42
         self.slider_rect = pygame.Rect(x, y, bar_width, self.slider_area_height)
         self.slider_bar = (x, y + (self.slider_area_height - bar_height) // 2, bar_width, bar_height)
         self._recalc_slider_handle()
-        scroll_y = y + self.slider_area_height + 8
+        scroll_y = y + self.slider_area_height + 18
         self.scroll_slider_rect = pygame.Rect(x, scroll_y, bar_width, self.slider_area_height)
         self.scroll_slider_bar = (x, scroll_y + (self.slider_area_height - bar_height) // 2, bar_width, bar_height)
         self._recalc_scroll_slider_handle()
@@ -972,16 +1030,26 @@ class PianoRoll:
 
     def handle_slider_event(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            if (not self.controls_panel_expanded) and self.controls_toggle_rect and self.controls_toggle_rect.collidepoint(event.pos):
+                self.controls_panel_expanded = not self.controls_panel_expanded
+                self.slider_dragging = False
+                self.scroll_slider_dragging = False
+                return
+            if self.controls_panel_expanded and self.controls_close_rect and self.controls_close_rect.collidepoint(event.pos):
+                self.controls_panel_expanded = False
+                self.slider_dragging = False
+                self.scroll_slider_dragging = False
+                return
             if self.glow_button_rect and self.glow_button_rect.collidepoint(event.pos):
                 self.toggle_glow()
                 return
             if self.color_button_rect and self.color_button_rect.collidepoint(event.pos):
                 self.randomize_colors()
                 return
-            if self.slider_rect and self.slider_rect.collidepoint(event.pos):
+            if self.controls_panel_expanded and self.slider_rect and self.slider_rect.collidepoint(event.pos):
                 self.slider_dragging = True
                 self._update_slider_from_pos(event.pos[0])
-            if self.scroll_slider_rect and self.scroll_slider_rect.collidepoint(event.pos):
+            if self.controls_panel_expanded and self.scroll_slider_rect and self.scroll_slider_rect.collidepoint(event.pos):
                 self.scroll_slider_dragging = True
                 self._update_scroll_slider_from_pos(event.pos[0])
         elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
@@ -1037,36 +1105,121 @@ class PianoRoll:
         self.scroll_speed = new_val
         self._recalc_scroll_slider_handle()
 
+    def _get_text_texture(self, text, color=(225, 228, 235)):
+        if self.overlay_font is None:
+            return None
+        key = (text, color)
+        if key in self._text_texture_cache:
+            return self._text_texture_cache[key]
+
+        surface = self.overlay_font.render(text, True, color)
+        width, height = surface.get_size()
+        image_data = pygame.image.tostring(surface, "RGBA", True)
+        self._text_texture_cache[key] = (image_data, width, height)
+        return self._text_texture_cache[key]
+
+    def _draw_text_overlay(self, text, x, y, color=(225, 228, 235)):
+        tex_info = self._get_text_texture(text, color)
+        if tex_info is None:
+            return
+        pixel_data, width, height = tex_info
+        glColor4f(1.0, 1.0, 1.0, 1.0)
+        glWindowPos2i(int(x), int(self.height - y - height))
+        glDrawPixels(width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixel_data)
+
     def _draw_slider_overlay(self):
-        if not self.slider_rect: return
+        if not self.slider_rect:
+            return
         glDisable(GL_DEPTH_TEST)
         glUseProgram(0)
         glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); glOrtho(0, self.width, self.height, 0, -1, 1)
         glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
         handle_half = 6
-        x, y, w, h = self.slider_bar
-        glColor3f(0.2, 0.2, 0.25)
-        glBegin(GL_QUADS); glVertex2f(x, y); glVertex2f(x + w, y); glVertex2f(x + w, y + h); glVertex2f(x, y + h); glEnd()
-        filled_w = (self.slider_handle_x - x)
-        glColor3f(0.4, 0.7, 0.9)
-        glBegin(GL_QUADS); glVertex2f(x, y); glVertex2f(x + filled_w, y); glVertex2f(x + filled_w, y + h); glVertex2f(x, y + h); glEnd()
-        hx = self.slider_handle_x
-        hy = y + h / 2
-        glColor3f(0.9, 0.9, 0.95)
-        glBegin(GL_QUADS); glVertex2f(hx - handle_half, hy - handle_half); glVertex2f(hx + handle_half, hy - handle_half); glVertex2f(hx + handle_half, hy + handle_half); glVertex2f(hx - handle_half, hy + handle_half); glEnd()
+        if self.controls_panel_expanded and self.controls_panel_rect:
+            px, py, pw, ph = self.controls_panel_rect
+            glColor4f(0.08, 0.08, 0.11, 0.88)
+            glBegin(GL_QUADS)
+            glVertex2f(px, py); glVertex2f(px + pw, py)
+            glVertex2f(px + pw, py + ph); glVertex2f(px, py + ph)
+            glEnd()
+            glColor4f(0.62, 0.64, 0.70, 0.95)
+            glLineWidth(1.0)
+            glBegin(GL_LINE_LOOP)
+            glVertex2f(px, py); glVertex2f(px + pw, py)
+            glVertex2f(px + pw, py + ph); glVertex2f(px, py + ph)
+            glEnd()
 
-        if self.scroll_slider_bar:
-            x2, y2, w2, h2 = self.scroll_slider_bar
-            glColor3f(0.22, 0.22, 0.28)
-            glBegin(GL_QUADS); glVertex2f(x2, y2); glVertex2f(x2 + w2, y2); glVertex2f(x2 + w2, y2 + h2); glVertex2f(x2, y2 + h2); glEnd()
-            filled_w2 = (self.scroll_slider_handle_x - x2)
-            glColor3f(0.5, 0.8, 0.5)
-            glBegin(GL_QUADS); glVertex2f(x2, y2); glVertex2f(x2 + filled_w2, y2); glVertex2f(x2 + filled_w2, y2 + h2); glVertex2f(x2, y2 + h2); glEnd()
-            hx2 = self.scroll_slider_handle_x
-            hy2 = y2 + h2 / 2
-            glColor3f(0.95, 0.95, 0.95)
-            glBegin(GL_QUADS); glVertex2f(hx2 - handle_half, hy2 - handle_half); glVertex2f(hx2 + handle_half, hy2 - handle_half); glVertex2f(hx2 + handle_half, hy2 + handle_half); glVertex2f(hx2 - handle_half, hy2 + handle_half); glEnd()
-        
+        if (not self.controls_panel_expanded) and self.controls_toggle_rect:
+            bx, by = self.controls_toggle_rect.x, self.controls_toggle_rect.y
+            bs = self.controls_toggle_rect.width
+            glColor4f(0.10, 0.10, 0.14, 0.82)
+            glBegin(GL_QUADS)
+            glVertex2f(bx, by); glVertex2f(bx + bs, by)
+            glVertex2f(bx + bs, by + bs); glVertex2f(bx, by + bs)
+            glEnd()
+            glColor4f(0.78, 0.80, 0.86, 0.95)
+            glLineWidth(2.0)
+            for i in range(3):
+                ly = by + 9 + i * 7
+                glBegin(GL_LINES)
+                glVertex2f(bx + 8, ly)
+                glVertex2f(bx + bs - 8, ly)
+                glEnd()
+            glColor4f(0.35, 0.38, 0.44, 0.9)
+            glLineWidth(1.0)
+            glBegin(GL_LINE_LOOP)
+            glVertex2f(bx, by); glVertex2f(bx + bs, by)
+            glVertex2f(bx + bs, by + bs); glVertex2f(bx, by + bs)
+            glEnd()
+
+        if self.controls_panel_expanded and self.controls_panel_rect:
+            if self.controls_close_rect:
+                bx, by = self.controls_close_rect.x, self.controls_close_rect.y
+                bs = self.controls_close_rect.width
+                glColor4f(0.10, 0.10, 0.14, 0.82)
+                glBegin(GL_QUADS)
+                glVertex2f(bx, by); glVertex2f(bx + bs, by)
+                glVertex2f(bx + bs, by + bs); glVertex2f(bx, by + bs)
+                glEnd()
+                glColor4f(0.86, 0.86, 0.90, 0.98)
+                glLineWidth(2.0)
+                glBegin(GL_LINES)
+                glVertex2f(bx + 9, by + 9); glVertex2f(bx + bs - 9, by + bs - 9)
+                glVertex2f(bx + bs - 9, by + 9); glVertex2f(bx + 9, by + bs - 9)
+                glEnd()
+                glColor4f(0.35, 0.38, 0.44, 0.9)
+                glLineWidth(1.0)
+                glBegin(GL_LINE_LOOP)
+                glVertex2f(bx, by); glVertex2f(bx + bs, by)
+                glVertex2f(bx + bs, by + bs); glVertex2f(bx, by + bs)
+                glEnd()
+
+            self._draw_text_overlay("Note Length", self.slider_rect.x, self.slider_rect.y - 12)
+            self._draw_text_overlay("Scroll Speed", self.scroll_slider_rect.x, self.scroll_slider_rect.y - 12)
+
+            x, y, w, h = self.slider_bar
+            glColor3f(0.2, 0.2, 0.25)
+            glBegin(GL_QUADS); glVertex2f(x, y); glVertex2f(x + w, y); glVertex2f(x + w, y + h); glVertex2f(x, y + h); glEnd()
+            filled_w = (self.slider_handle_x - x)
+            glColor3f(0.4, 0.7, 0.9)
+            glBegin(GL_QUADS); glVertex2f(x, y); glVertex2f(x + filled_w, y); glVertex2f(x + filled_w, y + h); glVertex2f(x, y + h); glEnd()
+            hx = self.slider_handle_x
+            hy = y + h / 2
+            glColor3f(0.9, 0.9, 0.95)
+            glBegin(GL_QUADS); glVertex2f(hx - handle_half, hy - handle_half); glVertex2f(hx + handle_half, hy - handle_half); glVertex2f(hx + handle_half, hy + handle_half); glVertex2f(hx - handle_half, hy + handle_half); glEnd()
+
+            if self.scroll_slider_bar:
+                x2, y2, w2, h2 = self.scroll_slider_bar
+                glColor3f(0.22, 0.22, 0.28)
+                glBegin(GL_QUADS); glVertex2f(x2, y2); glVertex2f(x2 + w2, y2); glVertex2f(x2 + w2, y2 + h2); glVertex2f(x2, y2 + h2); glEnd()
+                filled_w2 = (self.scroll_slider_handle_x - x2)
+                glColor3f(0.5, 0.8, 0.5)
+                glBegin(GL_QUADS); glVertex2f(x2, y2); glVertex2f(x2 + filled_w2, y2); glVertex2f(x2 + filled_w2, y2 + h2); glVertex2f(x2, y2 + h2); glEnd()
+                hx2 = self.scroll_slider_handle_x
+                hy2 = y2 + h2 / 2
+                glColor3f(0.95, 0.95, 0.95)
+                glBegin(GL_QUADS); glVertex2f(hx2 - handle_half, hy2 - handle_half); glVertex2f(hx2 + handle_half, hy2 - handle_half); glVertex2f(hx2 + handle_half, hy2 + handle_half); glVertex2f(hx2 - handle_half, hy2 + handle_half); glEnd()
+
         if self.color_button_rect:
             bx, by = self.color_button_rect.x, self.color_button_rect.y
             bs = self.color_button_size
@@ -1159,6 +1312,8 @@ class PianoRoll:
         self.app_running.clear()
         if self.data_thread:
             self.data_thread.join(timeout=0.5)
+
+        self._text_texture_cache.clear()
 
         glDeleteProgram(self.shader)
         glDeleteVertexArrays(1, [self.vao])
