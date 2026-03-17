@@ -28,7 +28,7 @@ Requires Python 3.13+ for building!
 
 ## Credits
 - [BASSMIDI](https://www.un4seen.com/bass.html) libraries by Un4seen for MIDI synthesis and audio streaming.
-- BASSMIDI [drivers](ttps://github.com/kode54/BASSMIDI-Driver) by kode54
+- [BASSMIDI drivers](https://github.com/kode54/BASSMIDI-Driver) by kode54
 - [KDMAPI](https://pypi.org/project/kdmapi/) for realtime audio playback
 - [NumPy](https://numpy.org/) for array processing and playback/parser data handling.
 - [Cython](https://cython.org/) for the compiled parser and audio engine modules.
