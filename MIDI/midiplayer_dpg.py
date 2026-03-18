@@ -104,6 +104,7 @@ class DpgMidiPlayerApp:
         )
 
         self.playback_thread = None
+        self.audio_sweep_thread = None
         self.playback_lock = threading.Lock()
         self.process = None
         self.cpu_history = deque([0.0] * 100, maxlen=100)
@@ -514,6 +515,9 @@ class DpgMidiPlayerApp:
                                 width=-1,
                             )
                             dpg.add_button(label="Apply Audio Mode", callback=self.apply_audio_mode, width=-1, height=30)
+                            dpg.add_text("Current SoundFont", color=(160, 166, 178))
+                            dpg.add_text("No SoundFont selected", tag="soundfont_text", wrap=470)
+                            dpg.add_button(label="Change SoundFont", callback=self.change_soundfont, width=-1, height=28)
                             dpg.add_text("Synth Controls", color=(160, 166, 178))
                             dpg.add_slider_float(
                                 label="Volume",
@@ -846,9 +850,71 @@ class DpgMidiPlayerApp:
         return self._run_dialog(
             lambda root: filedialog.askopenfilename(
                 parent=root,
-                filetypes=(("SoundFont", "*.sf2"), ("All files", "*.*")),
+                filetypes=(
+                    ("SoundFont", "*.sf2 *.sfz"),
+                    ("SF2 SoundFont", "*.sf2"),
+                    ("SFZ SoundFont", "*.sfz"),
+                    ("All files", "*.*"),
+                ),
             )
         )
+
+    def _current_soundfont_label(self):
+        sf_path = CONFIG["audio"].get("soundfont_path")
+        if sf_path:
+            return os.path.basename(sf_path)
+        return "No SoundFont selected"
+
+    def _refresh_soundfont_text(self):
+        if dpg.does_item_exist("soundfont_text"):
+            dpg.set_value("soundfont_text", self._current_soundfont_label())
+
+    def _wait_for_audio_sweep(self, timeout=2.0):
+        if self.audio_sweep_thread and self.audio_sweep_thread.is_alive():
+            self.audio_sweep_thread.join(timeout)
+        self.audio_sweep_thread = None
+
+    def _launch_audio_sweep(self, backend):
+        self._wait_for_audio_sweep(timeout=2.0)
+
+        def _run_sweep():
+            try:
+                backend.test_piano_sweep()
+            except Exception as e:
+                print(f"Audio sweep failed: {e}")
+
+        self.audio_sweep_thread = threading.Thread(target=_run_sweep, daemon=True)
+        self.audio_sweep_thread.start()
+
+    def _stop_playback_for_backend_reinit(self):
+        self._wait_for_audio_sweep(timeout=2.0)
+        self.controller.playing = False
+        self.controller.paused = False
+        self.controller.paused_for_seeking = False
+        with self.playback_lock:
+            self.controller.seek_request_time = None
+
+        if self.playback_thread and self.playback_thread.is_alive():
+            self.playback_thread.join(1.0)
+
+        self.playback_thread = None
+        dpg.configure_item("play_button", label="Play")
+        dpg.configure_item("voices_slider", enabled=True)
+
+        if self.controller.active_midi_backend:
+            try:
+                self.controller.reset_playback_state()
+            except Exception as e:
+                print(f"Failed to reset backend before reinit: {e}")
+
+        self.reset_graph_history()
+        dpg.set_value("seek_slider", 0.0)
+        if self.controller.parsed_midi:
+            dpg.set_value("time_text", f"00:00 / {self.format_time(self.controller.total_song_duration)}")
+            dpg.set_value("status_text", "Ready to play.")
+        else:
+            dpg.set_value("time_text", "00:00 / 00:00")
+            dpg.set_value("status_text", "No file loaded.")
 
     def _queue_ui(self, callback, *args, **kwargs):
         self.ui_actions.put((callback, args, kwargs))
@@ -888,13 +954,15 @@ class DpgMidiPlayerApp:
             prompt_warning=self._message_warning,
             prompt_error=self._message_error,
             pick_soundfont=self._pick_soundfont,
-            launch_sweep=lambda backend: threading.Thread(target=backend.test_piano_sweep, daemon=True).start(),
+            launch_sweep=self._launch_audio_sweep,
         )
         dpg.set_value("backend_hint_text", self._build_audio_hint_text())
+        self._refresh_soundfont_text()
 
     def apply_audio_mode(self):
         selected_label = dpg.get_value("backend_combo")
         selected_mode = self._normalize_backend_mode(self.backend_values.get(selected_label, "path"))
+        self._stop_playback_for_backend_reinit()
         if self.controller.active_midi_backend:
             try:
                 self.controller.shutdown()
@@ -907,6 +975,30 @@ class DpgMidiPlayerApp:
         self.controller.active_midi_backend = None
         self.set_status("Reinitializing audio backend...")
         self.initialize_audio_backend()
+
+    def change_soundfont(self):
+        sf_path = self._pick_soundfont()
+        if not sf_path:
+            return
+
+        CONFIG["audio"]["soundfont_path"] = sf_path
+        save_config(CONFIG)
+        self.controller.config["audio"]["soundfont_path"] = sf_path
+        self._refresh_soundfont_text()
+
+        current_mode = self._normalize_backend_mode(CONFIG["audio"].get("omnimidi_load_preference", "path"))
+        if current_mode == "bassmidi":
+            self._stop_playback_for_backend_reinit()
+            if self.controller.active_midi_backend:
+                try:
+                    self.controller.shutdown()
+                except Exception as e:
+                    print(f"Failed to shutdown current backend before soundfont change: {e}")
+            self.controller.active_midi_backend = None
+            self.set_status("Reinitializing BASSMIDI with new SoundFont...")
+            self.initialize_audio_backend()
+        else:
+            self.set_status(f"SoundFont set to {os.path.basename(sf_path)}. It will be used when BASSMIDI is selected.")
 
     def on_volume_change(self, sender, app_data):
         if self.controller.active_midi_backend and hasattr(self.controller.active_midi_backend, "set_volume"):
@@ -1635,6 +1727,7 @@ class DpgMidiPlayerApp:
             self.controller.playing = False
             if self.playback_thread and self.playback_thread.is_alive():
                 self.playback_thread.join(0.1)
+        self._wait_for_audio_sweep(timeout=2.0)
 
         if self.piano_roll:
             self.piano_roll.app_running.clear()

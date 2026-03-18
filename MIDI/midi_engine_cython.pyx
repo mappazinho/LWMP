@@ -2,6 +2,9 @@
 from libc.stdlib cimport malloc, free, qsort
 from libc.string cimport memcpy, memset
 from libc.stdint cimport uint8_t, uint32_t, uint64_t, int64_t
+from libc.stddef cimport wchar_t
+from cpython.unicode cimport PyUnicode_AsWideCharString
+from cpython.mem cimport PyMem_Free
 import ctypes
 import os
 import sys
@@ -79,7 +82,7 @@ ctypedef HSTREAM (*t_BASS_MIDI_StreamCreate)(DWORD channels, DWORD flags, DWORD 
 ctypedef DWORD (*t_BASS_MIDI_StreamEvents)(HSTREAM handle, DWORD mode, const void* events, DWORD length) nogil
 ctypedef BOOL (*t_BASS_MIDI_StreamEvent)(HSTREAM handle, DWORD chan, DWORD event, DWORD param) nogil
 ctypedef HSOUNDFONT (*t_BASS_MIDI_FontInit)(const void* file, DWORD flags)
-ctypedef HSOUNDFONT (*t_BASS_MIDI_FontLoad)(const void* file, DWORD flags)
+ctypedef BOOL (*t_BASS_MIDI_FontLoad)(HSOUNDFONT handle, int preset, int bank)
 ctypedef BOOL (*t_BASS_MIDI_FontFree)(HSOUNDFONT handle)
 ctypedef BOOL (*t_BASS_MIDI_StreamSetFonts)(HSTREAM handle, void* fonts, DWORD count)
 
@@ -140,6 +143,8 @@ cdef class BassMidiEngine:
     cdef public HSTREAM decode_stream
     cdef public HSTREAM playback_stream
     cdef HSOUNDFONT soundfont
+    cdef int soundfont_preset
+    cdef int soundfont_bank
     
     cdef uint64_t total_bytes_pushed
     
@@ -157,6 +162,8 @@ cdef class BassMidiEngine:
         self.decode_stream = 0
         self.playback_stream = 0
         self.soundfont = 0
+        self.soundfont_preset = -1
+        self.soundfont_bank = 0
         self.total_bytes_pushed = 0
         self.event_buffer = NULL
         self.event_count = 0
@@ -383,23 +390,43 @@ cdef class BassMidiEngine:
         if self.debug_mode: print(f"[Cython] load_soundfont called for path: {path}")
         if not path or not os.path.exists(path): return
 
-        cdef bytes b_path_bytes
-        try: b_path_bytes = path.encode('mbcs')
-        except: b_path_bytes = path.encode('utf-8')
-        cdef const char* c_path = b_path_bytes
-            
-        self.soundfont = self.f.MIDI_FontInit(<const void*>c_path, 0)
-        if self.debug_mode:
-            print(f"[Cython] MIDI_FontInit handle={self.soundfont} err={self.f.ErrorGetCode()}")
-        if not self.soundfont: return
-        
+        cdef str ext = os.path.splitext(path)[1].lower()
+        cdef wchar_t* wide_path = PyUnicode_AsWideCharString(path, NULL)
+        cdef const void* c_path = <const void*>wide_path
         cdef BASS_MIDI_FONT font_struct
-        font_struct.font = self.soundfont
-        font_struct.preset = -1
-        font_struct.bank = 0
-        cdef BOOL ok = self.f.MIDI_StreamSetFonts(stream, &font_struct, 1)
-        if self.debug_mode:
-            print(f"[Cython] MIDI_StreamSetFonts ok={ok} err={self.f.ErrorGetCode()} stream={stream}")
+        cdef BOOL ok = 0
+
+        try:
+            if self.soundfont:
+                self.f.MIDI_FontFree(self.soundfont)
+                self.soundfont = 0
+                
+            self.soundfont = self.f.MIDI_FontInit(c_path, BASS_UNICODE)
+            if self.debug_mode:
+                print(f"[Cython] MIDI_FontInit handle={self.soundfont} err={self.f.ErrorGetCode()}")
+            if not self.soundfont:
+                return
+
+            if ext == ".sfz":
+                self.soundfont_preset = 0
+                self.soundfont_bank = 0
+                self.f.MIDI_FontLoad(self.soundfont, 0, 0)
+            else:
+                self.soundfont_preset = -1
+                self.soundfont_bank = 0
+
+            font_struct.font = self.soundfont
+            font_struct.preset = self.soundfont_preset
+            font_struct.bank = self.soundfont_bank
+            ok = self.f.MIDI_StreamSetFonts(stream, &font_struct, 1)
+            if self.debug_mode:
+                print(
+                    f"[Cython] MIDI_StreamSetFonts ok={ok} err={self.f.ErrorGetCode()} "
+                    f"stream={stream} preset={self.soundfont_preset} bank={self.soundfont_bank}"
+                )
+        finally:
+            if wide_path != NULL:
+                PyMem_Free(wide_path)
 
     cpdef send_raw_event(self, uint32_t event, uint32_t param):
         cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
@@ -454,8 +481,8 @@ cdef class BassMidiEngine:
         if not sweep_stream: return
         cdef BASS_MIDI_FONT font_struct
         font_struct.font = self.soundfont
-        font_struct.preset = -1
-        font_struct.bank = 0
+        font_struct.preset = self.soundfont_preset
+        font_struct.bank = self.soundfont_bank
         self.f.MIDI_StreamSetFonts(sweep_stream, &font_struct, 1)
         self.f.ChannelSetAttribute(sweep_stream, BASS_ATTRIB_VOL, self.volume_level)
         self.f.ChannelPlay(sweep_stream, False)
@@ -535,12 +562,28 @@ cdef class BassMidiEngine:
         if self.event_buffer != NULL:
             free(self.event_buffer)
             self.event_buffer = NULL
-        if self.midi_stream: self.f.StreamFree(self.midi_stream)
-        if self.decode_stream: self.f.StreamFree(self.decode_stream)
-        if self.soundfont: self.f.MIDI_FontFree(self.soundfont)
-        if self.is_initialized: self.f.Free()
-        if self.hBassMidi: FreeLibrary(self.hBassMidi)
-        if self.hBass: FreeLibrary(self.hBass)
+        if self.midi_stream:
+            self.f.StreamFree(self.midi_stream)
+            self.midi_stream = 0
+        if self.decode_stream:
+            self.f.StreamFree(self.decode_stream)
+            self.decode_stream = 0
+        self.playback_stream = 0
+        if self.soundfont:
+            self.f.MIDI_FontFree(self.soundfont)
+            self.soundfont = 0
+        self.soundfont_preset = -1
+        self.soundfont_bank = 0
+        if self.is_initialized:
+            self.f.Free()
+            self.is_initialized = False
+        if self.hBassMidi:
+            FreeLibrary(self.hBassMidi)
+            self.hBassMidi = NULL
+        if self.hBass:
+            FreeLibrary(self.hBass)
+            self.hBass = NULL
+        self.dll_dir_handle = None
 
     def __dealloc__(self):
         self.shutdown()

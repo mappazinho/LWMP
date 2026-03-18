@@ -81,7 +81,7 @@ class PlayerController:
                         if prompt_info:
                             prompt_info(
                                 "SoundFont Missing",
-                                f"Configured SoundFont ({missing_name}) not found.\nPlease select a SoundFont (.sf2) to use.",
+                                f"Configured SoundFont ({missing_name}) not found.\nPlease select a SoundFont (.sf2 or .sfz) to use.",
                             )
                         sf_path = None
                         self.config["audio"]["soundfont_path"] = None
@@ -91,7 +91,7 @@ class PlayerController:
                         if prompt_info:
                             prompt_info(
                                 "SoundFont Missing",
-                                "No SoundFont is configured.\nPlease select a SoundFont (.sf2) to use.",
+                                "No SoundFont is configured.\nPlease select a SoundFont (.sf2 or .sfz) to use.",
                             )
                         sf_path = pick_soundfont() if pick_soundfont else None
                         if sf_path:
@@ -104,6 +104,8 @@ class PlayerController:
                             self.save_config(self.config)
                             sf_path = None
 
+                    sf_ext = os.path.splitext(sf_path)[1].lower() if sf_path else ""
+                    is_sfz = sf_ext == ".sfz"
                     self.active_midi_backend = self.bass_engine_cls(
                         {}, soundfont_path=sf_path, buffering=True, debug=self.debug
                     )

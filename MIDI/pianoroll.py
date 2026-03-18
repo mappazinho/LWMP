@@ -260,6 +260,7 @@ class PianoRoll:
         self.show_guide_line = bool(vis_cfg.get('show_guide_line', True))
         self.show_glow = bool(vis_cfg.get('show_glow', False))
         self.glow_strength = 1.0 if self.show_glow else 0.0
+        self.show_key_press_glow = bool(vis_cfg.get('show_key_press_glow', True))
         self.glow_fade_duration = 0.1
         
         self.slider_min = 0.2
@@ -310,6 +311,10 @@ class PianoRoll:
         
         self.color_button_rect = None
         self.glow_button_rect = None
+        self.glow_options_button_rect = None
+        self.glow_options_panel_rect = None
+        self.glow_options_checkbox_rect = None
+        self.glow_options_expanded = False
         self.color_button_size = 32
         self.controls_panel_expanded = False
         self.controls_toggle_rect = None
@@ -338,6 +343,18 @@ class PianoRoll:
 
     def _color_luminance(self, color):
         return float(color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722)
+
+    def _should_replace_spill_color(self, existing_entry, new_weight, new_distance, new_luminance):
+        if existing_entry is None:
+            return True
+        if new_weight > existing_entry['weight'] + 1e-6:
+            return True
+        if abs(new_weight - existing_entry['weight']) <= 1e-6:
+            if new_distance < existing_entry['distance']:
+                return True
+            if new_distance == existing_entry['distance'] and new_luminance > existing_entry['luminance']:
+                return True
+        return False
 
     def _load_colors_from_xml(self, filepath=None):
         if filepath is None:
@@ -670,6 +687,26 @@ class PianoRoll:
             self.color_button_size,
             self.color_button_size
         )
+        self.glow_options_button_rect = pygame.Rect(
+            self.glow_button_rect.x,
+            self.glow_button_rect.y + self.color_button_size + 6,
+            self.color_button_size,
+            18
+        )
+        panel_width = 190
+        panel_height = 56
+        self.glow_options_panel_rect = pygame.Rect(
+            self.glow_options_button_rect.x - (panel_width - self.glow_options_button_rect.width),
+            self.glow_options_button_rect.y + self.glow_options_button_rect.height + 6,
+            panel_width,
+            panel_height
+        )
+        self.glow_options_checkbox_rect = pygame.Rect(
+            self.glow_options_panel_rect.x + 10,
+            self.glow_options_panel_rect.y + 28,
+            16,
+            16
+        )
 
     def load_midi(self, all_notes_gpu, get_current_time_func):
         """Prepare note data for the render thread."""
@@ -760,8 +797,11 @@ class PianoRoll:
     def draw(self, current_time):
         """Draw the latest buffer provided by the data thread."""
         self._upload_pending_midi_data()
-        self._update_glow_trails(current_time)
-        
+        if self.show_key_press_glow:
+            self._update_glow_trails(current_time)
+        else:
+            self.glow_trails.clear()
+
         glClearColor(0.05, 0.05, 0.08, 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         
@@ -805,7 +845,7 @@ class PianoRoll:
             glUseProgram(0)
             glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-        if self.show_glow:
+        if self.show_glow and self.show_key_press_glow:
             self._draw_active_note_glow_overlay(current_time)
 
         if self.show_keyboard and self.keyboard_layout:
@@ -954,61 +994,60 @@ class PianoRoll:
                 pitch = int(note['pitch'])
                 current_active_pitches.add(pitch)
                 track = int(note['track'])
-                color = self.channel_colors[track % 128]
-                if pitch not in active_pitch_colors:
+                color = np.array(self.channel_colors[track % 128], dtype=np.float32)
+                on_time = float(note['on_time'])
+                existing = active_pitch_colors.get(pitch)
+                if existing is None or on_time >= existing['on_time']:
                     active_pitch_colors[pitch] = {
-                        'sum': np.array(color, dtype=np.float32),
-                        'weight': 1.0,
-                        'peak': np.array(color, dtype=np.float32),
+                        'color': color,
+                        'on_time': on_time,
                     }
-                else:
-                    active_pitch_colors[pitch]['sum'] += color
-                    active_pitch_colors[pitch]['weight'] += 1.0
-                    active_pitch_colors[pitch]['peak'] = np.maximum(active_pitch_colors[pitch]['peak'], color)
 
         key_light_colors = {}
         light_falloff = (1.0, 0.88, 0.68, 0.50, 0.35, 0.23, 0.14, 0.08)
         for pitch, pitch_color_data in active_pitch_colors.items():
-            base_color = self._combine_light_color(
-                pitch_color_data['sum'],
-                pitch_color_data['weight'],
-                pitch_color_data['peak'],
-            )
+            base_color = pitch_color_data['color']
             luminance_boost = 0.88 + self._color_luminance(base_color) * 0.45
-            for distance, weight in enumerate(light_falloff):
-                neighbors = (pitch,) if distance == 0 else (pitch - distance, pitch + distance)
+            for distance, weight in enumerate(light_falloff[1:], start=1):
+                neighbors = (pitch - distance, pitch + distance)
                 for neighbor in neighbors:
                     if neighbor < 0 or neighbor > 127 or neighbor not in self.keyboard_layout:
                         continue
                     effective_weight = min(1.0, weight * luminance_boost)
-                    if neighbor not in key_light_colors:
+                    weighted_color = np.array(base_color * effective_weight, dtype=np.float32)
+                    existing = key_light_colors.get(neighbor)
+                    if self._should_replace_spill_color(
+                        existing,
+                        effective_weight,
+                        distance,
+                        self._color_luminance(base_color),
+                    ):
                         key_light_colors[neighbor] = {
-                            'sum': np.array(base_color * effective_weight, dtype=np.float32),
+                            'color': weighted_color,
                             'weight': effective_weight,
-                            'peak': np.array(base_color * effective_weight, dtype=np.float32),
+                            'distance': distance,
+                            'luminance': self._color_luminance(base_color),
                         }
-                    else:
-                        weighted_color = base_color * effective_weight
-                        key_light_colors[neighbor]['sum'] += weighted_color
-                        key_light_colors[neighbor]['weight'] += effective_weight
-                        key_light_colors[neighbor]['peak'] = np.maximum(key_light_colors[neighbor]['peak'], weighted_color)
 
         for pitch, color_data in key_light_colors.items():
-            clamped_color = self._combine_light_color(
-                color_data['sum'],
-                color_data['weight'],
-                color_data['peak'],
-            )
+            clamped_color = np.clip(color_data['color'], 0.0, 1.0).astype(np.float32)
             if pitch in self.white_key_pitch_map:
                 idx = self.white_key_pitch_map[pitch]
                 self.white_key_instance_data[idx]['color'] = clamped_color
-                if pitch in current_active_pitches:
-                    self.white_key_instance_data[idx]['is_pressed'] = 1.0
             elif pitch in self.black_key_pitch_map:
                 idx = self.black_key_pitch_map[pitch]
                 self.black_key_instance_data[idx]['color'] = clamped_color
-                if pitch in current_active_pitches:
-                    self.black_key_instance_data[idx]['is_pressed'] = 1.0
+
+        for pitch, pitch_color_data in active_pitch_colors.items():
+            active_color = np.clip(pitch_color_data['color'], 0.0, 1.0).astype(np.float32)
+            if pitch in self.white_key_pitch_map:
+                idx = self.white_key_pitch_map[pitch]
+                self.white_key_instance_data[idx]['color'] = active_color
+                self.white_key_instance_data[idx]['is_pressed'] = 1.0
+            elif pitch in self.black_key_pitch_map:
+                idx = self.black_key_pitch_map[pitch]
+                self.black_key_instance_data[idx]['color'] = active_color
+                self.black_key_instance_data[idx]['is_pressed'] = 1.0
         
         self.active_pitches_last_frame = current_active_pitches
 
@@ -1077,6 +1116,14 @@ class PianoRoll:
                 self.controls_panel_expanded = False
                 self.slider_dragging = False
                 self.scroll_slider_dragging = False
+                return
+            if self.glow_options_button_rect and self.glow_options_button_rect.collidepoint(event.pos):
+                self.glow_options_expanded = not self.glow_options_expanded
+                return
+            if self.glow_options_expanded and self.glow_options_checkbox_rect and self.glow_options_checkbox_rect.collidepoint(event.pos):
+                self.show_key_press_glow = not self.show_key_press_glow
+                if not self.show_key_press_glow:
+                    self.glow_trails.clear()
                 return
             if self.glow_button_rect and self.glow_button_rect.collidepoint(event.pos):
                 self.toggle_glow()
@@ -1343,6 +1390,69 @@ class PianoRoll:
             glVertex2f(bx, by); glVertex2f(bx + bs, by)
             glVertex2f(bx + bs, by + bs); glVertex2f(bx, by + bs)
             glEnd()
+
+        if self.glow_options_button_rect:
+            bx, by = self.glow_options_button_rect.x, self.glow_options_button_rect.y
+            bw, bh = self.glow_options_button_rect.width, self.glow_options_button_rect.height
+            glColor4f(0.12, 0.12, 0.16, 0.82)
+            glBegin(GL_QUADS)
+            glVertex2f(bx, by); glVertex2f(bx + bw, by)
+            glVertex2f(bx + bw, by + bh); glVertex2f(bx, by + bh)
+            glEnd()
+            glColor4f(0.78, 0.80, 0.86, 0.95)
+            glLineWidth(2.0)
+            glBegin(GL_LINES)
+            glVertex2f(bx + 8, by + 6); glVertex2f(bx + bw * 0.5, by + bh - 5)
+            glVertex2f(bx + bw - 8, by + 6); glVertex2f(bx + bw * 0.5, by + bh - 5)
+            glEnd()
+            glColor4f(0.5, 0.5, 0.55, 0.8)
+            glLineWidth(1.0)
+            glBegin(GL_LINE_LOOP)
+            glVertex2f(bx, by); glVertex2f(bx + bw, by)
+            glVertex2f(bx + bw, by + bh); glVertex2f(bx, by + bh)
+            glEnd()
+
+        if self.glow_options_expanded and self.glow_options_panel_rect:
+            px, py, pw, ph = self.glow_options_panel_rect
+            glColor4f(0.08, 0.08, 0.11, 0.92)
+            glBegin(GL_QUADS)
+            glVertex2f(px, py); glVertex2f(px + pw, py)
+            glVertex2f(px + pw, py + ph); glVertex2f(px, py + ph)
+            glEnd()
+            glColor4f(0.62, 0.64, 0.70, 0.95)
+            glLineWidth(1.0)
+            glBegin(GL_LINE_LOOP)
+            glVertex2f(px, py); glVertex2f(px + pw, py)
+            glVertex2f(px + pw, py + ph); glVertex2f(px, py + ph)
+            glEnd()
+
+            self._draw_text_overlay("Glow on key press", px + 32, py + 30)
+
+            if self.glow_options_checkbox_rect:
+                cbx, cby, cbw, cbh = (
+                    self.glow_options_checkbox_rect.x,
+                    self.glow_options_checkbox_rect.y,
+                    self.glow_options_checkbox_rect.width,
+                    self.glow_options_checkbox_rect.height,
+                )
+                glColor4f(0.12, 0.12, 0.16, 0.92)
+                glBegin(GL_QUADS)
+                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
+                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
+                glEnd()
+                glColor4f(0.72, 0.74, 0.80, 0.95)
+                glLineWidth(1.0)
+                glBegin(GL_LINE_LOOP)
+                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
+                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
+                glEnd()
+                if self.show_key_press_glow:
+                    glColor4f(0.95, 0.78, 0.24, 0.95)
+                    glLineWidth(2.0)
+                    glBegin(GL_LINES)
+                    glVertex2f(cbx + 3, cby + 9); glVertex2f(cbx + 7, cby + 13)
+                    glVertex2f(cbx + 7, cby + 13); glVertex2f(cbx + 13, cby + 4)
+                    glEnd()
         
         glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
 

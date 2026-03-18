@@ -119,6 +119,9 @@ if bassmidi:
     bassmidi.BASS_MIDI_FontInit.restype = HSTREAM
     USE_FONTLOAD = False
 
+    bassmidi.BASS_MIDI_FontLoad.argtypes = [HSTREAM, ctypes.c_int, ctypes.c_int]
+    bassmidi.BASS_MIDI_FontLoad.restype = BOOL
+
     bassmidi.BASS_MIDI_FontFree.argtypes = [HSTREAM]
     bassmidi.BASS_MIDI_FontFree.restype = BOOL
     
@@ -137,6 +140,8 @@ class BassMidiEngine:
         self.debug_mode = bool(debug)
         self.total_bytes_pushed = 0
         self.volume_level = 1.0
+        self.soundfont_preset = -1
+        self.soundfont_bank = 0
         
         if not bass or not bassmidi:
             raise Exception("BASS libraries not loaded.")
@@ -185,32 +190,38 @@ class BassMidiEngine:
             print("No SoundFont found/provided.")
             return
 
-        try:
-            c_path = path.encode('mbcs')
-        except:
-            c_path = path.encode('utf-8')
-            
-        print(f"[DEBUG] Loading SoundFont: {c_path}")
+        ext = os.path.splitext(path)[1].lower()
+        c_path = ctypes.create_unicode_buffer(path)
+        flags = BASS_UNICODE
+        print(f"[DEBUG] Loading SoundFont: {path} (ext={ext})")
         
         pre_err = bass.BASS_ErrorGetCode()
         if pre_err: print(f"[DEBUG] Pre-existing BASS error: {pre_err}")
 
         if USE_FONTLOAD:
             print("[DEBUG] Using BASS_MIDI_FontLoad")
-            self.soundfont = bassmidi.BASS_MIDI_FontLoad(c_path, 0)
+            self.soundfont = bassmidi.BASS_MIDI_FontLoad(c_path, flags)
         else:
             print("[DEBUG] Using BASS_MIDI_FontInit")
-            self.soundfont = bassmidi.BASS_MIDI_FontInit(c_path, 0)
+            self.soundfont = bassmidi.BASS_MIDI_FontInit(c_path, flags)
             
         if not self.soundfont:
             err = bass.BASS_ErrorGetCode()
             print(f"Font load failed: {err}")
             return
 
+        if ext == ".sfz":
+            self.soundfont_preset = 0
+            self.soundfont_bank = 0
+            bassmidi.BASS_MIDI_FontLoad(self.soundfont, 0, 0)
+        else:
+            self.soundfont_preset = -1
+            self.soundfont_bank = 0
+
         font_struct = BASS_MIDI_FONT()
         font_struct.font = self.soundfont
-        font_struct.preset = -1
-        font_struct.bank = 0
+        font_struct.preset = self.soundfont_preset
+        font_struct.bank = self.soundfont_bank
         
         if not bassmidi.BASS_MIDI_StreamSetFonts(stream, ctypes.byref(font_struct), 1):
             print(f"SetFonts failed: {bass.BASS_ErrorGetCode()}")
