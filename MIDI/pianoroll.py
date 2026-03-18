@@ -12,6 +12,7 @@ import xml.etree.ElementTree as ET
 import os
 import sys
 from midi_parser import GPU_NOTE_DTYPE
+from config import save_config
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _RUNTIME_ROOT = getattr(sys, "_MEIPASS", _SCRIPT_DIR)
@@ -261,6 +262,7 @@ class PianoRoll:
         self.show_glow = bool(vis_cfg.get('show_glow', False))
         self.glow_strength = 1.0 if self.show_glow else 0.0
         self.show_key_press_glow = bool(vis_cfg.get('show_key_press_glow', True))
+        self.show_key_light_fade = bool(vis_cfg.get('show_key_light_fade', False))
         self.glow_fade_duration = 0.1
         
         self.slider_min = 0.2
@@ -314,6 +316,7 @@ class PianoRoll:
         self.glow_options_button_rect = None
         self.glow_options_panel_rect = None
         self.glow_options_checkbox_rect = None
+        self.key_light_fade_checkbox_rect = None
         self.glow_options_expanded = False
         self.color_button_size = 32
         self.controls_panel_expanded = False
@@ -323,6 +326,9 @@ class PianoRoll:
         self.controls_panel_size = (300, 136)
         self.overlay_font = None
         self._text_texture_cache = {}
+        self.hover_fade_states = {}
+        self.hover_tooltip_text = None
+        self.hover_mouse_pos = (0, 0)
 
     def _get_guide_line_y(self):
         if self.show_keyboard and 'white_key' in self.keyboard_texture_info:
@@ -343,6 +349,103 @@ class PianoRoll:
 
     def _color_luminance(self, color):
         return float(color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722)
+
+    def _save_visualizer_config(self):
+        vis_cfg = self.config.setdefault('visualizer', {})
+        vis_cfg['show_glow'] = bool(self.show_glow)
+        vis_cfg['show_key_press_glow'] = bool(self.show_key_press_glow)
+        vis_cfg['show_key_light_fade'] = bool(self.show_key_light_fade)
+        vis_cfg['seconds_before_cursor'] = float(self.window_seconds)
+        vis_cfg['seconds_after_cursor'] = float(self.window_seconds)
+        vis_cfg['scroll_speed'] = float(self.scroll_speed)
+        vis_cfg['streaming_vbo_capacity'] = int(self.streaming_vbo_capacity)
+        save_config(self.config)
+
+    def _iter_hover_targets(self):
+        if (not self.controls_panel_expanded) and self.controls_toggle_rect:
+            yield ("controls_toggle", self.controls_toggle_rect, "Open control panel")
+        if self.controls_panel_expanded and self.controls_close_rect:
+            yield ("controls_close", self.controls_close_rect, "Close control panel")
+        if self.glow_button_rect:
+            yield ("glow_button", self.glow_button_rect, "Toggle glow mode")
+        if self.glow_options_button_rect:
+            yield ("glow_options", self.glow_options_button_rect, "Glow options")
+        if self.color_button_rect:
+            yield ("color_button", self.color_button_rect, "Randomize note colors")
+        if self.glow_options_expanded and self.glow_options_checkbox_rect:
+            yield ("glow_checkbox", self.glow_options_checkbox_rect, "Toggle glow on key press")
+        if self.glow_options_expanded and self.key_light_fade_checkbox_rect:
+            yield ("key_fade_checkbox", self.key_light_fade_checkbox_rect, "Toggle fade key lighting")
+
+    def _update_hover_ui_state(self):
+        if self.overlay_font is None:
+            return
+        mouse_pos = pygame.mouse.get_pos()
+        self.hover_mouse_pos = mouse_pos
+
+        hovered_id = None
+        hovered_text = None
+        for target_id, rect, tooltip in self._iter_hover_targets():
+            if rect and rect.collidepoint(mouse_pos):
+                hovered_id = target_id
+                hovered_text = tooltip
+                break
+
+        self.hover_tooltip_text = hovered_text
+        seen_ids = set()
+        if hovered_id is not None:
+            seen_ids.add(hovered_id)
+        for target_id, _, _ in self._iter_hover_targets():
+            seen_ids.add(target_id)
+
+        for target_id in seen_ids:
+            current = self.hover_fade_states.get(target_id, 0.0)
+            target = 1.0 if target_id == hovered_id else 0.0
+            current += (target - current) * 0.28
+            if abs(current) < 0.01 and target == 0.0:
+                self.hover_fade_states.pop(target_id, None)
+            else:
+                self.hover_fade_states[target_id] = current
+
+    def _get_hover_alpha(self, target_id):
+        return float(self.hover_fade_states.get(target_id, 0.0))
+
+    def _draw_hover_highlight(self, rect, alpha):
+        if not rect or alpha <= 0.001:
+            return
+        glColor4f(1.0, 1.0, 1.0, 0.14 * alpha)
+        glBegin(GL_QUADS)
+        glVertex2f(rect.x, rect.y); glVertex2f(rect.x + rect.width, rect.y)
+        glVertex2f(rect.x + rect.width, rect.y + rect.height); glVertex2f(rect.x, rect.y + rect.height)
+        glEnd()
+
+    def _draw_hover_tooltip(self):
+        if not self.hover_tooltip_text:
+            return
+        tex_info = self._get_text_texture(self.hover_tooltip_text, (235, 238, 244))
+        if tex_info is None:
+            return
+        _, text_w, text_h = tex_info
+        padding_x = 10
+        padding_y = 8
+        box_w = text_w + padding_x * 2
+        box_h = text_h + padding_y * 2
+        mouse_x, mouse_y = self.hover_mouse_pos
+        box_x = min(mouse_x + 14, self.width - box_w - 8)
+        box_y = min(mouse_y + 16, self.height - box_h - 8)
+
+        glColor4f(0.06, 0.06, 0.09, 0.94)
+        glBegin(GL_QUADS)
+        glVertex2f(box_x, box_y); glVertex2f(box_x + box_w, box_y)
+        glVertex2f(box_x + box_w, box_y + box_h); glVertex2f(box_x, box_y + box_h)
+        glEnd()
+        glColor4f(0.82, 0.84, 0.90, 0.9)
+        glLineWidth(1.0)
+        glBegin(GL_LINE_LOOP)
+        glVertex2f(box_x, box_y); glVertex2f(box_x + box_w, box_y)
+        glVertex2f(box_x + box_w, box_y + box_h); glVertex2f(box_x, box_y + box_h)
+        glEnd()
+        self._draw_text_overlay(self.hover_tooltip_text, box_x + padding_x, box_y + padding_y)
 
     def _should_replace_spill_color(self, existing_entry, new_weight, new_distance, new_luminance):
         if existing_entry is None:
@@ -694,7 +797,7 @@ class PianoRoll:
             18
         )
         panel_width = 190
-        panel_height = 56
+        panel_height = 82
         self.glow_options_panel_rect = pygame.Rect(
             self.glow_options_button_rect.x - (panel_width - self.glow_options_button_rect.width),
             self.glow_options_button_rect.y + self.glow_options_button_rect.height + 6,
@@ -704,6 +807,12 @@ class PianoRoll:
         self.glow_options_checkbox_rect = pygame.Rect(
             self.glow_options_panel_rect.x + 10,
             self.glow_options_panel_rect.y + 28,
+            16,
+            16
+        )
+        self.key_light_fade_checkbox_rect = pygame.Rect(
+            self.glow_options_panel_rect.x + 10,
+            self.glow_options_panel_rect.y + 52,
             16,
             16
         )
@@ -797,7 +906,7 @@ class PianoRoll:
     def draw(self, current_time):
         """Draw the latest buffer provided by the data thread."""
         self._upload_pending_midi_data()
-        if self.show_key_press_glow:
+        if self.show_key_press_glow or self.show_key_light_fade:
             self._update_glow_trails(current_time)
         else:
             self.glow_trails.clear()
@@ -966,6 +1075,16 @@ class PianoRoll:
         glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
+    def _get_trail_fade(self, current_time, pitch):
+        trail = self.glow_trails.get(pitch)
+        if not trail:
+            return None, 0.0
+        elapsed = max(0.0, current_time - trail['last_active_time'])
+        fade = 1.0 - (elapsed / self.glow_fade_duration)
+        if fade <= 0.0:
+            return None, 0.0
+        return trail, fade
+
     def _draw_keyboard_opengl(self, current_time):
         """Draw the keyboard overlay using the latest visible-note slice."""
         if self.keyboard_shader == 0:
@@ -1002,6 +1121,18 @@ class PianoRoll:
                         'color': color,
                         'on_time': on_time,
                     }
+
+        if self.show_key_light_fade:
+            for pitch, trail in self.glow_trails.items():
+                if pitch in active_pitch_colors:
+                    continue
+                trail_obj, fade = self._get_trail_fade(current_time, pitch)
+                if trail_obj is None or fade <= 0.0:
+                    continue
+                active_pitch_colors[pitch] = {
+                    'color': np.array(trail_obj['color'], dtype=np.float32) * fade,
+                    'on_time': -1.0,
+                }
 
         key_light_colors = {}
         light_falloff = (1.0, 0.88, 0.68, 0.50, 0.35, 0.23, 0.14, 0.08)
@@ -1122,8 +1253,15 @@ class PianoRoll:
                 return
             if self.glow_options_expanded and self.glow_options_checkbox_rect and self.glow_options_checkbox_rect.collidepoint(event.pos):
                 self.show_key_press_glow = not self.show_key_press_glow
-                if not self.show_key_press_glow:
+                if not self.show_key_press_glow and not self.show_key_light_fade:
                     self.glow_trails.clear()
+                self._save_visualizer_config()
+                return
+            if self.glow_options_expanded and self.key_light_fade_checkbox_rect and self.key_light_fade_checkbox_rect.collidepoint(event.pos):
+                self.show_key_light_fade = not self.show_key_light_fade
+                if not self.show_key_press_glow and not self.show_key_light_fade:
+                    self.glow_trails.clear()
+                self._save_visualizer_config()
                 return
             if self.glow_button_rect and self.glow_button_rect.collidepoint(event.pos):
                 self.toggle_glow()
@@ -1171,6 +1309,7 @@ class PianoRoll:
                 glUniform1f(keyboard_glow_loc, self.glow_strength)
             glUseProgram(0)
 
+        self._save_visualizer_config()
         print(f"Piano roll glow {'enabled' if self.show_glow else 'disabled'}.")
 
     def _update_slider_from_pos(self, x_pos):
@@ -1181,6 +1320,7 @@ class PianoRoll:
         self.seconds_before_cursor = new_val
         self.seconds_after_cursor = new_val
         self._recalc_slider_handle()
+        self._save_visualizer_config()
         self.force_data_update.set() # Force update when slider moves
 
     def _update_scroll_slider_from_pos(self, x_pos):
@@ -1189,6 +1329,7 @@ class PianoRoll:
         new_val = self.scroll_slider_min + t * (self.scroll_slider_max - self.scroll_slider_min)
         self.scroll_speed = new_val
         self._recalc_scroll_slider_handle()
+        self._save_visualizer_config()
 
     def _get_text_texture(self, text, color=(225, 228, 235)):
         if self.overlay_font is None:
@@ -1219,6 +1360,7 @@ class PianoRoll:
         glUseProgram(0)
         glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); glOrtho(0, self.width, self.height, 0, -1, 1)
         glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
+        self._update_hover_ui_state()
         handle_half = 6
         if self.controls_panel_expanded and self.controls_panel_rect:
             px, py, pw, ph = self.controls_panel_rect
@@ -1256,6 +1398,7 @@ class PianoRoll:
             glVertex2f(bx, by); glVertex2f(bx + bs, by)
             glVertex2f(bx + bs, by + bs); glVertex2f(bx, by + bs)
             glEnd()
+            self._draw_hover_highlight(self.controls_toggle_rect, self._get_hover_alpha("controls_toggle"))
 
         if self.controls_panel_expanded and self.controls_panel_rect:
             if self.controls_close_rect:
@@ -1278,6 +1421,7 @@ class PianoRoll:
                 glVertex2f(bx, by); glVertex2f(bx + bs, by)
                 glVertex2f(bx + bs, by + bs); glVertex2f(bx, by + bs)
                 glEnd()
+                self._draw_hover_highlight(self.controls_close_rect, self._get_hover_alpha("controls_close"))
 
             self._draw_text_overlay("Note Length", self.slider_rect.x, self.slider_rect.y - 12)
             self._draw_text_overlay("Scroll Speed", self.scroll_slider_rect.x, self.scroll_slider_rect.y - 12)
@@ -1350,6 +1494,7 @@ class PianoRoll:
             glVertex2f(bx, by); glVertex2f(bx + bs, by)
             glVertex2f(bx + bs, by + bs); glVertex2f(bx, by + bs)
             glEnd()
+            self._draw_hover_highlight(self.color_button_rect, self._get_hover_alpha("color_button"))
 
         if self.glow_button_rect:
             bx, by = self.glow_button_rect.x, self.glow_button_rect.y
@@ -1390,6 +1535,7 @@ class PianoRoll:
             glVertex2f(bx, by); glVertex2f(bx + bs, by)
             glVertex2f(bx + bs, by + bs); glVertex2f(bx, by + bs)
             glEnd()
+            self._draw_hover_highlight(self.glow_button_rect, self._get_hover_alpha("glow_button"))
 
         if self.glow_options_button_rect:
             bx, by = self.glow_options_button_rect.x, self.glow_options_button_rect.y
@@ -1411,6 +1557,7 @@ class PianoRoll:
             glVertex2f(bx, by); glVertex2f(bx + bw, by)
             glVertex2f(bx + bw, by + bh); glVertex2f(bx, by + bh)
             glEnd()
+            self._draw_hover_highlight(self.glow_options_button_rect, self._get_hover_alpha("glow_options"))
 
         if self.glow_options_expanded and self.glow_options_panel_rect:
             px, py, pw, ph = self.glow_options_panel_rect
@@ -1427,6 +1574,7 @@ class PianoRoll:
             glEnd()
 
             self._draw_text_overlay("Glow on key press", px + 32, py + 30)
+            self._draw_text_overlay("Fade key lighting", px + 32, py + 54)
 
             if self.glow_options_checkbox_rect:
                 cbx, cby, cbw, cbh = (
@@ -1453,6 +1601,36 @@ class PianoRoll:
                     glVertex2f(cbx + 3, cby + 9); glVertex2f(cbx + 7, cby + 13)
                     glVertex2f(cbx + 7, cby + 13); glVertex2f(cbx + 13, cby + 4)
                     glEnd()
+                self._draw_hover_highlight(self.glow_options_checkbox_rect, self._get_hover_alpha("glow_checkbox"))
+
+            if self.key_light_fade_checkbox_rect:
+                cbx, cby, cbw, cbh = (
+                    self.key_light_fade_checkbox_rect.x,
+                    self.key_light_fade_checkbox_rect.y,
+                    self.key_light_fade_checkbox_rect.width,
+                    self.key_light_fade_checkbox_rect.height,
+                )
+                glColor4f(0.12, 0.12, 0.16, 0.92)
+                glBegin(GL_QUADS)
+                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
+                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
+                glEnd()
+                glColor4f(0.72, 0.74, 0.80, 0.95)
+                glLineWidth(1.0)
+                glBegin(GL_LINE_LOOP)
+                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
+                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
+                glEnd()
+                if self.show_key_light_fade:
+                    glColor4f(0.95, 0.78, 0.24, 0.95)
+                    glLineWidth(2.0)
+                    glBegin(GL_LINES)
+                    glVertex2f(cbx + 3, cby + 9); glVertex2f(cbx + 7, cby + 13)
+                    glVertex2f(cbx + 7, cby + 13); glVertex2f(cbx + 13, cby + 4)
+                    glEnd()
+                self._draw_hover_highlight(self.key_light_fade_checkbox_rect, self._get_hover_alpha("key_fade_checkbox"))
+
+        self._draw_hover_tooltip()
         
         glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
 

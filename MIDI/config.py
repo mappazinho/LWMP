@@ -16,6 +16,8 @@ DEFAULT_CONFIG = {
         "note_width": 10.0,
         "show_guide_line": True,
         "show_glow": False,
+        "show_key_press_glow": True,
+        "show_key_light_fade": False,
         "seconds_before_cursor": 3.0,
         "seconds_after_cursor": 4.0,
         "streaming_vbo_capacity": 10000000,

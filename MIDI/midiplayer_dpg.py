@@ -456,13 +456,14 @@ class DpgMidiPlayerApp:
                         with dpg.table_cell():
                             with dpg.group(horizontal=True):
                                 dpg.add_button(tag="load_button", label="Load MIDI", callback=self.on_load_unload, width=118, height=30)
-                                dpg.add_button(tag="play_button", label="Play", callback=self.toggle_play_pause, enabled=False, width=90, height=30)
-                                dpg.add_button(tag="stop_button", label="Stop", callback=self.stop_playback, enabled=False, width=90, height=30)
+                                dpg.add_button(tag="play_button", label="Play", callback=self.toggle_play_pause, enabled=False, show=False, width=90, height=30)
+                                dpg.add_button(tag="stop_button", label="Stop", callback=self.stop_playback, enabled=False, show=False, width=90, height=30)
                                 dpg.add_button(
                                     tag="piano_roll_button",
                                     label="Piano Roll",
                                     callback=self.show_piano_roll_dialog,
                                     enabled=False,
+                                    show=False,
                                     width=114,
                                     height=30,
                                 )
@@ -869,6 +870,26 @@ class DpgMidiPlayerApp:
         if dpg.does_item_exist("soundfont_text"):
             dpg.set_value("soundfont_text", self._current_soundfont_label())
 
+    def _refresh_transport_button_state(self):
+        has_midi = self.controller.parsed_midi is not None
+        if has_midi:
+            dpg.show_item("play_button")
+            dpg.show_item("stop_button")
+            dpg.show_item("piano_roll_button")
+            dpg.enable_item("play_button")
+            dpg.enable_item("stop_button")
+            if PianoRoll is not None:
+                dpg.enable_item("piano_roll_button")
+            else:
+                dpg.disable_item("piano_roll_button")
+        else:
+            dpg.hide_item("play_button")
+            dpg.hide_item("stop_button")
+            dpg.hide_item("piano_roll_button")
+            dpg.disable_item("play_button")
+            dpg.disable_item("stop_button")
+            dpg.disable_item("piano_roll_button")
+
     def _wait_for_audio_sweep(self, timeout=2.0):
         if self.audio_sweep_thread and self.audio_sweep_thread.is_alive():
             self.audio_sweep_thread.join(timeout)
@@ -915,6 +936,7 @@ class DpgMidiPlayerApp:
         else:
             dpg.set_value("time_text", "00:00 / 00:00")
             dpg.set_value("status_text", "No file loaded.")
+        self._refresh_transport_button_state()
 
     def _queue_ui(self, callback, *args, **kwargs):
         self.ui_actions.put((callback, args, kwargs))
@@ -958,6 +980,7 @@ class DpgMidiPlayerApp:
         )
         dpg.set_value("backend_hint_text", self._build_audio_hint_text())
         self._refresh_soundfont_text()
+        self._refresh_transport_button_state()
 
     def apply_audio_mode(self):
         selected_label = dpg.get_value("backend_combo")
@@ -1040,7 +1063,7 @@ class DpgMidiPlayerApp:
         dpg.set_value("note_count_value", "0 / 0")
         dpg.set_value("seek_slider", 0.0)
         dpg.configure_item("seek_slider", enabled=False, max_value=100.0)
-        dpg.configure_item("play_button", enabled=False)
+        self._refresh_transport_button_state()
 
         if self.controller.parser_process and self.controller.parser_process.is_alive():
             self._message_warning("Busy", "Already parsing a file. Please wait.")
@@ -1109,9 +1132,8 @@ class DpgMidiPlayerApp:
                     dpg.set_value("note_count_value", f"0 / {self.controller.total_song_notes:,}")
                     dpg.set_value("seek_slider", 0.0)
                     dpg.configure_item("seek_slider", enabled=True, max_value=float(self.controller.total_song_duration))
-                    dpg.configure_item("play_button", enabled=True, label="Play")
-                    dpg.configure_item("stop_button", enabled=True)
-                    dpg.configure_item("piano_roll_button", enabled=PianoRoll is not None)
+                    dpg.configure_item("play_button", label="Play")
+                    self._refresh_transport_button_state()
                     dpg.configure_item("load_button", enabled=True, label="Unload MIDI")
                     self.reset_graph_history()
 
@@ -1210,9 +1232,8 @@ class DpgMidiPlayerApp:
         dpg.set_value("note_count_value", "0 / 0")
         dpg.set_value("seek_slider", 0.0)
         dpg.configure_item("seek_slider", enabled=False, max_value=100.0)
-        dpg.configure_item("play_button", enabled=False, label="Play")
-        dpg.configure_item("stop_button", enabled=False)
-        dpg.configure_item("piano_roll_button", enabled=False)
+        dpg.configure_item("play_button", label="Play")
+        self._refresh_transport_button_state()
 
         if self.piano_roll and self.piano_roll.app_running.is_set():
             self.was_piano_roll_open_before_unload = True
@@ -1254,6 +1275,7 @@ class DpgMidiPlayerApp:
             dpg.set_value("time_text", f"{finished} / {finished}")
             dpg.set_value("seek_slider", self.controller.total_song_duration)
         dpg.configure_item("voices_slider", enabled=True)
+        self._refresh_transport_button_state()
         self.panic_all_notes_off()
 
     def panic_all_notes_off(self):
