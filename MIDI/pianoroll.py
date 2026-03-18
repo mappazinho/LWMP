@@ -60,6 +60,7 @@ uniform int u_is_white_key[128];
 varying vec3 v_fragColor;
 varying vec2 v_pos;
 varying float v_note_h;
+varying float v_note_w;
 
 void main() {
     float on_time = note_times.x;
@@ -91,6 +92,7 @@ void main() {
     
     v_pos = pos;
     v_note_h = note_h;
+    v_note_w = layout.y;
     
     int color_idx = int(mod(float(track), 128.0));
     v_fragColor = u_colors[color_idx] * 1.2;
@@ -101,6 +103,7 @@ FRAG_SHADER = """#version 120
 varying vec3 v_fragColor;
 varying vec2 v_pos;
 varying float v_note_h;
+varying float v_note_w;
 
 uniform sampler2D u_note_texture;
 uniform sampler2D u_note_edge_texture;
@@ -109,7 +112,6 @@ uniform float u_glow_strength;
 void main() {
     vec2 fw = fwidth(v_pos);
     float texture_border_y = 1.5 * fw.y;
-    float side_border_width = 0.5 * fw.x;
     vec4 texture_color;
     if (v_note_h < 4.0) {
         texture_color = texture2D(u_note_edge_texture, v_pos);
@@ -123,9 +125,12 @@ void main() {
     
     vec4 final_color = texture_color * vec4(v_fragColor, 1.0);
 
-    if (v_pos.x < side_border_width || v_pos.x > 1.0 - side_border_width) {
-        vec3 outline_color = v_fragColor * 0.3;
-        final_color = vec4(outline_color, 1.0);
+    float outline_px_uv = 1.0 / max(v_note_w, 1.0);
+    float left_edge = step(v_pos.x, outline_px_uv);
+    float right_edge = step(1.0 - outline_px_uv, v_pos.x);
+    if (left_edge + right_edge > 0.0) {
+        vec3 outline_color = vec3(0.08, 0.08, 0.10);
+        final_color.rgb = outline_color;
     }
 
     if (u_glow_strength > 0.001) {
