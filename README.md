@@ -10,7 +10,8 @@ Lightweight MIDI Player for heavy MIDI files/Black MIDI, made with Python and Cy
 • Realtime note counter  
 • Support for custom bundled OmniMIDI dlls
 
-# Build instructions (for Windows)
+# Build instructions
+### For Windows
 Just launch build.bat, and all dependencies and compilation happens automatically.  
 
 ### For Linux (not tested as of now):
@@ -21,9 +22,9 @@ Just launch build.bat, and all dependencies and compilation happens automaticall
 `python setup.py build_ext --inplace`
 
 3. Launch LWMP:  
-`python MIDI/midiplayer.py`
+`python MIDI/midiplayer_dpg.py`
 
-Requires Python 3.13+ for building!
+Requires Python 3.11+ for building!
 
 ### ⚠️ Still in beta stage, lots of bugs still needs fixing and features are somewhat incomplete.
 
