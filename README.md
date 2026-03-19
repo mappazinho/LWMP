@@ -26,7 +26,7 @@ Just launch build.bat, and all dependencies and compilation happens automaticall
 `python setup.py build_ext --inplace`
 
 5. Launch LWMP:  
-`python MIDI/midiplayer_dpg.py`
+`python MIDI/midiplayer.py`
 
 Requires Python 3.11+ for building!
 

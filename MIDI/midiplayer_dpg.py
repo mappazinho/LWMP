@@ -14,16 +14,6 @@ import time
 import traceback
 from collections import deque
 
-try:
-    import tkinter as tk
-    from tkinter import filedialog, messagebox
-    TK_AVAILABLE = True
-except Exception:
-    tk = None
-    filedialog = None
-    messagebox = None
-    TK_AVAILABLE = False
-
 import dearpygui.dearpygui as dpg
 import numpy as np
 import psutil
@@ -132,6 +122,7 @@ class DpgMidiPlayerApp:
         self.recommended_note_limit = 20_000_000
         self.last_cpu_sample_time = 0.0
         self.last_cpu_percent = 0.0
+        self.pending_soundfont_callback = None
 
         self.all_backend_labels = {
             "bassmidi": "BASSMIDI (Buffered)",
@@ -240,24 +231,7 @@ class DpgMidiPlayerApp:
             user32 = ctypes.windll.user32
             return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
         except Exception:
-            if not TK_AVAILABLE:
-                return 1366, 768
-            root = tk.Tk()
-            root.withdraw()
-            try:
-                return root.winfo_screenwidth(), root.winfo_screenheight()
-            finally:
-                root.destroy()
-
-    def _run_dialog(self, callback):
-        if not TK_AVAILABLE:
-            raise RuntimeError("Tk dialogs are unavailable on this system.")
-        root = tk.Tk()
-        root.withdraw()
-        try:
-            return callback(root)
-        finally:
-            root.destroy()
+            return 1366, 768
 
     def _build_resolution_list(self):
         common = [
@@ -662,7 +636,33 @@ class DpgMidiPlayerApp:
                 height=120,
             ):
                 dpg.add_text("Initializing...", tag="loading_label")
-                dpg.add_progress_bar(tag="loading_progress", default_value=0.0, width=-1)
+                dpg.add_progress_bar(tag="loading_progress", default_value=0.0, width=-1, overlay="0%")
+
+            with dpg.file_dialog(
+                tag="midi_file_dialog",
+                show=False,
+                modal=True,
+                directory_selector=False,
+                width=760,
+                height=460,
+                callback=self._on_midi_dialog_selected,
+            ):
+                dpg.add_file_extension(".mid", color=(120, 200, 255, 255))
+                dpg.add_file_extension(".*")
+
+            with dpg.file_dialog(
+                tag="soundfont_file_dialog",
+                show=False,
+                modal=True,
+                directory_selector=False,
+                width=760,
+                height=460,
+                callback=self._on_soundfont_dialog_selected,
+                cancel_callback=lambda: self._on_soundfont_dialog_cancel(),
+            ):
+                dpg.add_file_extension(".sf2", color=(120, 200, 255, 255))
+                dpg.add_file_extension(".sfz", color=(120, 200, 255, 255))
+                dpg.add_file_extension(".*")
 
             with dpg.window(
                 tag="message_window",
@@ -880,42 +880,68 @@ class DpgMidiPlayerApp:
             dpg.configure_item("message_window", label=title, show=True)
 
     def _message_info(self, title, text):
-        if TK_AVAILABLE:
-            self._run_dialog(lambda root: messagebox.showinfo(title, text, parent=root))
-        else:
-            self._show_message_window(title, text)
+        self._show_message_window(title, text)
 
     def _message_warning(self, title, text):
-        if TK_AVAILABLE:
-            self._run_dialog(lambda root: messagebox.showwarning(title, text, parent=root))
-        else:
-            self._show_message_window(title, text)
+        self._show_message_window(title, text)
 
     def _message_error(self, title, text):
-        if TK_AVAILABLE:
-            self._run_dialog(lambda root: messagebox.showerror(title, text, parent=root))
-        else:
-            self._show_message_window(title, text)
+        self._show_message_window(title, text)
 
-    def _pick_soundfont(self):
-        if not TK_AVAILABLE:
-            self._message_error(
-                "SoundFont Picker Unavailable",
-                "Tk file dialogs are not available on this system.\n"
-                "Install python3-tk / Tk, or set audio.soundfont_path in config.json manually.",
-            )
-            return None
-        return self._run_dialog(
-            lambda root: filedialog.askopenfilename(
-                parent=root,
-                filetypes=(
-                    ("SoundFont", "*.sf2 *.sfz"),
-                    ("SF2 SoundFont", "*.sf2"),
-                    ("SFZ SoundFont", "*.sfz"),
-                    ("All files", "*.*"),
-                ),
-            )
-        )
+    def _open_midi_file_dialog(self):
+        dpg.show_item("midi_file_dialog")
+
+    def _open_soundfont_dialog(self, callback):
+        self.pending_soundfont_callback = callback
+        dpg.show_item("soundfont_file_dialog")
+
+    def _extract_dialog_path(self, app_data):
+        if isinstance(app_data, dict):
+            return app_data.get("file_path_name")
+        return None
+
+    def _on_midi_dialog_selected(self, sender, app_data):
+        filepath = self._extract_dialog_path(app_data)
+        if filepath:
+            self._begin_load_file(filepath)
+
+    def _on_soundfont_dialog_selected(self, sender, app_data):
+        sf_path = self._extract_dialog_path(app_data)
+        callback = self.pending_soundfont_callback
+        self.pending_soundfont_callback = None
+        if callback and sf_path:
+            callback(sf_path)
+
+    def _on_soundfont_dialog_cancel(self):
+        callback = self.pending_soundfont_callback
+        self.pending_soundfont_callback = None
+        if callback:
+            callback(None)
+
+    def _ensure_bassmidi_soundfont(self, on_ready):
+        sf_path = self.controller.config["audio"].get("soundfont_path")
+        if sf_path and os.path.exists(sf_path):
+            on_ready()
+            return
+
+        if sf_path and not os.path.exists(sf_path):
+            self.controller.config["audio"]["soundfont_path"] = None
+            CONFIG["audio"]["soundfont_path"] = None
+            save_config(CONFIG)
+
+        def _after_pick(selected_path):
+            if selected_path:
+                CONFIG["audio"]["soundfont_path"] = selected_path
+                self.controller.config["audio"]["soundfont_path"] = selected_path
+                save_config(CONFIG)
+                self._refresh_soundfont_text()
+                on_ready()
+                return
+
+            self._refresh_soundfont_text()
+            self.set_status("No SoundFont selected. Playback will be silent.")
+
+        self._open_soundfont_dialog(_after_pick)
 
     def _current_soundfont_label(self):
         sf_path = CONFIG["audio"].get("soundfont_path")
@@ -1024,6 +1050,15 @@ class DpgMidiPlayerApp:
         dpg.set_value("backend_hint_text", self._build_audio_hint_text())
 
     def initialize_audio_backend(self):
+        current_mode = self._normalize_backend_mode(CONFIG["audio"].get("omnimidi_load_preference", "path"))
+        if current_mode == "bassmidi":
+            self.set_status("Select a SoundFont to initialize BASSMIDI.")
+            self._ensure_bassmidi_soundfont(self._complete_initialize_audio_backend)
+            return
+
+        self._complete_initialize_audio_backend()
+
+    def _complete_initialize_audio_backend(self):
         self.set_status("Initializing audio backend...")
         self.controller.init_midi_backends(
             volume=dpg.get_value("volume_slider"),
@@ -1032,7 +1067,7 @@ class DpgMidiPlayerApp:
             prompt_info=self._message_info,
             prompt_warning=self._message_warning,
             prompt_error=self._message_error,
-            pick_soundfont=self._pick_soundfont,
+            pick_soundfont=None,
             launch_sweep=self._launch_audio_sweep,
         )
         dpg.set_value("backend_hint_text", self._build_audio_hint_text())
@@ -1057,28 +1092,30 @@ class DpgMidiPlayerApp:
         self.initialize_audio_backend()
 
     def change_soundfont(self):
-        sf_path = self._pick_soundfont()
-        if not sf_path:
-            return
+        def _after_pick(sf_path):
+            if not sf_path:
+                return
 
-        CONFIG["audio"]["soundfont_path"] = sf_path
-        save_config(CONFIG)
-        self.controller.config["audio"]["soundfont_path"] = sf_path
-        self._refresh_soundfont_text()
+            CONFIG["audio"]["soundfont_path"] = sf_path
+            save_config(CONFIG)
+            self.controller.config["audio"]["soundfont_path"] = sf_path
+            self._refresh_soundfont_text()
 
-        current_mode = self._normalize_backend_mode(CONFIG["audio"].get("omnimidi_load_preference", "path"))
-        if current_mode == "bassmidi":
-            self._stop_playback_for_backend_reinit()
-            if self.controller.active_midi_backend:
-                try:
-                    self.controller.shutdown()
-                except Exception as e:
-                    print(f"Failed to shutdown current backend before soundfont change: {e}")
-            self.controller.active_midi_backend = None
-            self.set_status("Reinitializing BASSMIDI with new SoundFont...")
-            self.initialize_audio_backend()
-        else:
-            self.set_status(f"SoundFont set to {os.path.basename(sf_path)}. It will be used when BASSMIDI is selected.")
+            current_mode = self._normalize_backend_mode(CONFIG["audio"].get("omnimidi_load_preference", "path"))
+            if current_mode == "bassmidi":
+                self._stop_playback_for_backend_reinit()
+                if self.controller.active_midi_backend:
+                    try:
+                        self.controller.shutdown()
+                    except Exception as e:
+                        print(f"Failed to shutdown current backend before soundfont change: {e}")
+                self.controller.active_midi_backend = None
+                self.set_status("Reinitializing BASSMIDI with new SoundFont...")
+                self.initialize_audio_backend()
+            else:
+                self.set_status(f"SoundFont set to {os.path.basename(sf_path)}. It will be used when BASSMIDI is selected.")
+
+        self._open_soundfont_dialog(_after_pick)
 
     def on_volume_change(self, sender, app_data):
         if self.controller.active_midi_backend and hasattr(self.controller.active_midi_backend, "set_volume"):
@@ -1104,13 +1141,6 @@ class DpgMidiPlayerApp:
         if not self.startup_ready:
             self._message_warning("Startup Required", "Choose a startup audio mode before loading a MIDI.")
             return
-        if not TK_AVAILABLE:
-            self._message_error(
-                "MIDI File Picker Unavailable",
-                "Tk file dialogs are not available on this system.\n"
-                "Install python3-tk / Tk to use the file picker.",
-            )
-            return
 
         if self.controller.playing:
             self.controller.playing = False
@@ -1133,20 +1163,15 @@ class DpgMidiPlayerApp:
             self._message_warning("Busy", "Already parsing a file. Please wait.")
             return
 
-        filepath = self._run_dialog(
-            lambda root: filedialog.askopenfilename(
-                parent=root,
-                filetypes=(("MIDI files", "*.mid"), ("All files", "*.*")),
-            )
-        )
-        if not filepath:
-            return
+        self._open_midi_file_dialog()
 
+    def _begin_load_file(self, filepath):
         self._update_now_playing_header(os.path.basename(filepath))
         dpg.set_value("status_text", f"Parsing {os.path.basename(filepath)}...")
         dpg.configure_item("load_button", enabled=False)
         dpg.set_value("loading_label", "Initializing...")
         dpg.set_value("loading_progress", 0.0)
+        dpg.configure_item("loading_progress", overlay="0%")
         dpg.configure_item("loading_window", show=True)
         self.loading_visible = True
 
@@ -1183,6 +1208,7 @@ class DpgMidiPlayerApp:
                             eta = progress_payload.get("eta", 0)
                             fraction = (current / total) if total > 0 else 0.0
                             dpg.set_value("loading_progress", fraction)
+                            dpg.configure_item("loading_progress", overlay=f"{fraction * 100:.1f}%")
                             eta_str = f"ETA: {eta:.1f}s" if eta > 0 else "Calculating..."
                             dpg.set_value("loading_label", f"Parsing... {current:,} / {total:,} events ({eta_str})")
                         else:

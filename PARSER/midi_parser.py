@@ -135,7 +135,15 @@ except ImportError:
                     elapsed = now - loop_start_time
                     if elapsed > 0.5:
                         evts_per_sec = total_event_count / elapsed
-                        _log(f"Parsing... {total_event_count:,} events ({evts_per_sec:,.0f} evt/s)")
+                        eta_seconds = 0
+                        if evts_per_sec > 0 and total_events > 0:
+                            remaining_events = max(0, total_events - total_event_count)
+                            eta_seconds = remaining_events / evts_per_sec
+                        _log({
+                            "current": total_event_count,
+                            "total": total_events,
+                            "eta": eta_seconds,
+                        })
 
 
                 tick_delta = abs_tick - last_event_tick

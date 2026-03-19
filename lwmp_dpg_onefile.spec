@@ -34,7 +34,7 @@ hiddenimports += collect_submodules("OpenGL")
 
 
 a = Analysis(
-    [os.path.join(MIDI_DIR, "midiplayer_dpg.py")],
+    [os.path.join(MIDI_DIR, "midiplayer.py")],
     pathex=[PROJECT_ROOT, MIDI_DIR, PARSER_DIR],
     binaries=binaries,
     datas=datas,
