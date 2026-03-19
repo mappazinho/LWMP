@@ -37,12 +37,27 @@ def get_runtime_search_dirs(module_file):
     )
 
 
+def _get_bass_library_name_sets():
+    if sys.platform.startswith("win"):
+        return [("bass.dll", "bassmidi.dll")]
+    if sys.platform == "darwin":
+        return [
+            ("libbass.dylib", "libbassmidi.dylib"),
+            ("libbass.so", "libbassmidi.so"),
+        ]
+    return [
+        ("libbass.so", "libbassmidi.so"),
+        ("bass.so", "bassmidi.so"),
+    ]
+
+
 def resolve_bass_library_paths(module_file):
     for base_dir in get_runtime_search_dirs(module_file):
-        bass_path = os.path.join(base_dir, "bass.dll")
-        bassmidi_path = os.path.join(base_dir, "bassmidi.dll")
-        if os.path.exists(bass_path) and os.path.exists(bassmidi_path):
-            return bass_path, bassmidi_path, base_dir
+        for bass_name, bassmidi_name in _get_bass_library_name_sets():
+            bass_path = os.path.join(base_dir, bass_name)
+            bassmidi_path = os.path.join(base_dir, bassmidi_name)
+            if os.path.exists(bass_path) and os.path.exists(bassmidi_path):
+                return bass_path, bassmidi_path, base_dir
     return None, None, None
 
 

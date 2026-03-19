@@ -12,13 +12,29 @@ from runtime_paths import add_dll_search_dir, resolve_bass_library_paths
 from time import sleep 
 from libc.math cimport sin, M_PI, sqrt
 
-cdef extern from "windows.h":
-    ctypedef void* HMODULE
-    ctypedef void* FARPROC
-    ctypedef const char* LPCSTR
-    HMODULE LoadLibraryA(LPCSTR lpLibFileName)
-    FARPROC GetProcAddress(HMODULE hModule, LPCSTR lpProcName)
-    int FreeLibrary(HMODULE hLibModule)
+cdef extern from *:
+    """
+    #ifdef _WIN32
+    #include <windows.h>
+    typedef HMODULE lwmp_lib_handle;
+    typedef FARPROC lwmp_func_ptr;
+    static lwmp_lib_handle lwmp_dlopen(const char* path) { return LoadLibraryA(path); }
+    static lwmp_func_ptr lwmp_dlsym(lwmp_lib_handle h, const char* name) { return GetProcAddress(h, name); }
+    static int lwmp_dlclose(lwmp_lib_handle h) { return FreeLibrary(h); }
+    #else
+    #include <dlfcn.h>
+    typedef void* lwmp_lib_handle;
+    typedef void* lwmp_func_ptr;
+    static lwmp_lib_handle lwmp_dlopen(const char* path) { return dlopen(path, RTLD_NOW | RTLD_LOCAL); }
+    static lwmp_func_ptr lwmp_dlsym(lwmp_lib_handle h, const char* name) { return dlsym(h, name); }
+    static int lwmp_dlclose(lwmp_lib_handle h) { return dlclose(h); }
+    #endif
+    """
+    ctypedef void* lwmp_lib_handle
+    ctypedef void* lwmp_func_ptr
+    lwmp_lib_handle lwmp_dlopen(const char* path)
+    lwmp_func_ptr lwmp_dlsym(lwmp_lib_handle h, const char* name)
+    int lwmp_dlclose(lwmp_lib_handle h)
 
 cdef enum:
     BASS_OK = 0
@@ -125,12 +141,12 @@ cdef struct MiniEvent:
     uint32_t status
     uint32_t param
 
-cdef void* get_func(HMODULE h, const char* name):
-    return <void*>GetProcAddress(h, name)
+cdef void* get_func(lwmp_lib_handle h, const char* name):
+    return <void*>lwmp_dlsym(h, name)
 
 cdef class BassMidiEngine:
-    cdef HMODULE hBass
-    cdef HMODULE hBassMidi
+    cdef lwmp_lib_handle hBass
+    cdef lwmp_lib_handle hBassMidi
     cdef BassFuncs f
     cdef object dll_dir_handle
     
@@ -178,21 +194,28 @@ cdef class BassMidiEngine:
         cdef object bassmidi_path_str = bass_info[1]
         cdef object bass_dir_str = bass_info[2]
         if not bass_path_str or not bassmidi_path_str:
-            raise ImportError("Could not locate bass.dll or bassmidi.dll")
+            raise ImportError("Could not locate BASS or BASSMIDI runtime libraries")
         self.dll_dir_handle = add_dll_search_dir(bass_dir_str)
-        cdef bytes bass_path = (<str>bass_path_str).encode('mbcs')
-        cdef bytes bassmidi_path = (<str>bassmidi_path_str).encode('mbcs')
+        cdef bytes bass_path
+        cdef bytes bassmidi_path
+        if os.name == "nt":
+            bass_path = (<str>bass_path_str).encode('mbcs')
+            bassmidi_path = (<str>bassmidi_path_str).encode('mbcs')
+        else:
+            bass_path = os.fsencode(<str>bass_path_str)
+            bassmidi_path = os.fsencode(<str>bassmidi_path_str)
 
-        if self.debug_mode: print(f"Loading BASS from: {bass_path.decode('mbcs')}")
+        if self.debug_mode:
+            print(f"Loading BASS from: {bass_path.decode(errors='replace')}")
         
-        self.hBass = LoadLibraryA(bass_path)
+        self.hBass = lwmp_dlopen(bass_path)
         if not self.hBass:
-            raise ImportError("Could not load bass.dll")
+            raise ImportError("Could not load BASS runtime library")
             
-        self.hBassMidi = LoadLibraryA(bassmidi_path)
+        self.hBassMidi = lwmp_dlopen(bassmidi_path)
         if not self.hBassMidi:
-            FreeLibrary(self.hBass)
-            raise ImportError("Could not load bassmidi.dll")
+            lwmp_dlclose(self.hBass)
+            raise ImportError("Could not load BASSMIDI runtime library")
 
         self.f.Init = <t_BASS_Init>get_func(self.hBass, "BASS_Init")
         self.f.Free = <t_BASS_Free>get_func(self.hBass, "BASS_Free")
@@ -391,8 +414,10 @@ cdef class BassMidiEngine:
         if not path or not os.path.exists(path): return
 
         cdef str ext = os.path.splitext(path)[1].lower()
-        cdef wchar_t* wide_path = PyUnicode_AsWideCharString(path, NULL)
-        cdef const void* c_path = <const void*>wide_path
+        cdef wchar_t* wide_path = NULL
+        cdef bytes fs_path = b""
+        cdef const void* c_path = NULL
+        cdef DWORD font_flags = 0
         cdef BASS_MIDI_FONT font_struct
         cdef BOOL ok = 0
 
@@ -400,8 +425,17 @@ cdef class BassMidiEngine:
             if self.soundfont:
                 self.f.MIDI_FontFree(self.soundfont)
                 self.soundfont = 0
-                
-            self.soundfont = self.f.MIDI_FontInit(c_path, BASS_UNICODE)
+
+            if os.name == "nt":
+                wide_path = PyUnicode_AsWideCharString(path, NULL)
+                c_path = <const void*>wide_path
+                font_flags = BASS_UNICODE
+            else:
+                fs_path = os.fsencode(path)
+                c_path = <const void*>fs_path
+                font_flags = 0
+
+            self.soundfont = self.f.MIDI_FontInit(c_path, font_flags)
             if self.debug_mode:
                 print(f"[Cython] MIDI_FontInit handle={self.soundfont} err={self.f.ErrorGetCode()}")
             if not self.soundfont:
@@ -578,10 +612,10 @@ cdef class BassMidiEngine:
             self.f.Free()
             self.is_initialized = False
         if self.hBassMidi:
-            FreeLibrary(self.hBassMidi)
+            lwmp_dlclose(self.hBassMidi)
             self.hBassMidi = NULL
         if self.hBass:
-            FreeLibrary(self.hBass)
+            lwmp_dlclose(self.hBass)
             self.hBass = NULL
         self.dll_dir_handle = None
 
