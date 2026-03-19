@@ -3,8 +3,8 @@ Lightweight MIDI Player for heavy MIDI files/Black MIDI, made with Python and Cy
 
 ### Features:
 • Fast MIDI loading, whilst optimized for RAM usage  
-• Piano Roll with custom skin support  
-• Pre-render function using BASSMIDI  
+• Piano Roll with custom skin support and glow/bloom effects  
+• Audio pre-render mode using BASSMIDI  
 • Simple GUI for noobies who just want to load and enjoy  
 • Graphs for CPU usage and NPS (Notes Per Second)  
 • Realtime note counter  
