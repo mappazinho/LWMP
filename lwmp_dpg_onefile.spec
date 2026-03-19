@@ -18,7 +18,6 @@ datas = [
 binaries = [
     (os.path.join(MIDI_DIR, "bassmidi", "bass.dll"), os.path.join("MIDI", "bassmidi")),
     (os.path.join(MIDI_DIR, "bassmidi", "bassmidi.dll"), os.path.join("MIDI", "bassmidi")),
-    (os.path.join(MIDI_DIR, "bassmidi", "bassasio.dll"), os.path.join("MIDI", "bassmidi")),
 ]
 
 hiddenimports = [
