@@ -12,9 +12,17 @@ import sys
 import threading
 import time
 import traceback
-import tkinter as tk
 from collections import deque
-from tkinter import filedialog, messagebox
+
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox
+    TK_AVAILABLE = True
+except Exception:
+    tk = None
+    filedialog = None
+    messagebox = None
+    TK_AVAILABLE = False
 
 import dearpygui.dearpygui as dpg
 import numpy as np
@@ -232,6 +240,8 @@ class DpgMidiPlayerApp:
             user32 = ctypes.windll.user32
             return user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
         except Exception:
+            if not TK_AVAILABLE:
+                return 1366, 768
             root = tk.Tk()
             root.withdraw()
             try:
@@ -240,6 +250,8 @@ class DpgMidiPlayerApp:
                 root.destroy()
 
     def _run_dialog(self, callback):
+        if not TK_AVAILABLE:
+            raise RuntimeError("Tk dialogs are unavailable on this system.")
         root = tk.Tk()
         root.withdraw()
         try:
@@ -653,6 +665,27 @@ class DpgMidiPlayerApp:
                 dpg.add_progress_bar(tag="loading_progress", default_value=0.0, width=-1)
 
             with dpg.window(
+                tag="message_window",
+                label="Message",
+                modal=True,
+                show=False,
+                no_resize=True,
+                no_collapse=True,
+                width=460,
+                height=180,
+            ):
+                dpg.add_text("", tag="message_title", color=(223, 177, 103))
+                dpg.add_spacer(height=8)
+                dpg.add_text("", tag="message_body", wrap=420)
+                dpg.add_spacer(height=12)
+                dpg.add_button(
+                    label="OK",
+                    width=100,
+                    height=30,
+                    callback=lambda: dpg.configure_item("message_window", show=False),
+                )
+
+            with dpg.window(
                 tag="piano_roll_window",
                 label="Piano Roll Settings",
                 modal=True,
@@ -838,16 +871,40 @@ class DpgMidiPlayerApp:
             print(f"Failed to initialize psutil: {e}")
             self.process = None
 
+    def _show_message_window(self, title, text):
+        if dpg.does_item_exist("message_title"):
+            dpg.set_value("message_title", title)
+        if dpg.does_item_exist("message_body"):
+            dpg.set_value("message_body", text)
+        if dpg.does_item_exist("message_window"):
+            dpg.configure_item("message_window", label=title, show=True)
+
     def _message_info(self, title, text):
-        self._run_dialog(lambda root: messagebox.showinfo(title, text, parent=root))
+        if TK_AVAILABLE:
+            self._run_dialog(lambda root: messagebox.showinfo(title, text, parent=root))
+        else:
+            self._show_message_window(title, text)
 
     def _message_warning(self, title, text):
-        self._run_dialog(lambda root: messagebox.showwarning(title, text, parent=root))
+        if TK_AVAILABLE:
+            self._run_dialog(lambda root: messagebox.showwarning(title, text, parent=root))
+        else:
+            self._show_message_window(title, text)
 
     def _message_error(self, title, text):
-        self._run_dialog(lambda root: messagebox.showerror(title, text, parent=root))
+        if TK_AVAILABLE:
+            self._run_dialog(lambda root: messagebox.showerror(title, text, parent=root))
+        else:
+            self._show_message_window(title, text)
 
     def _pick_soundfont(self):
+        if not TK_AVAILABLE:
+            self._message_error(
+                "SoundFont Picker Unavailable",
+                "Tk file dialogs are not available on this system.\n"
+                "Install python3-tk / Tk, or set audio.soundfont_path in config.json manually.",
+            )
+            return None
         return self._run_dialog(
             lambda root: filedialog.askopenfilename(
                 parent=root,
@@ -1046,6 +1103,13 @@ class DpgMidiPlayerApp:
     def load_file(self):
         if not self.startup_ready:
             self._message_warning("Startup Required", "Choose a startup audio mode before loading a MIDI.")
+            return
+        if not TK_AVAILABLE:
+            self._message_error(
+                "MIDI File Picker Unavailable",
+                "Tk file dialogs are not available on this system.\n"
+                "Install python3-tk / Tk to use the file picker.",
+            )
             return
 
         if self.controller.playing:
