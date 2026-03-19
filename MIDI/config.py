@@ -16,6 +16,7 @@ DEFAULT_CONFIG = {
         "note_width": 10.0,
         "show_guide_line": True,
         "show_glow": False,
+        "show_bloom": False,
         "show_key_press_glow": True,
         "show_key_light_fade": False,
         "seconds_before_cursor": 3.0,
@@ -50,6 +51,9 @@ DEFAULT_CONFIG = {
         "accent_text": [229, 206, 160],
         "muted_text": [160, 166, 178],
         "body_text": [196, 198, 204]
+    },
+    "library": {
+        "midi_directories": []
     }
 }
 

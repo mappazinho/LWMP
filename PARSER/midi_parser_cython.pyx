@@ -349,6 +349,10 @@ cdef class MidiParser:
         cdef double seconds_per_tick, on_time, off_time
         cdef uint8_t vel
         cdef uint16_t on_track_num
+        cdef int first_note_track = -1
+        cdef int second_note_track = -1
+        cdef bint many_note_tracks = False
+        cdef uint32_t channel_mask = 0
         cdef pair[uint8_t, uint8_t] key
         cdef NoteOnInfo on_info
         cdef GpuNote gpu_note
@@ -412,13 +416,22 @@ cdef class MidiParser:
                         
                         if off_time > max_off_time:
                             max_off_time = off_time
+
+                        if first_note_track == -1:
+                            first_note_track = on_track_num
+                        elif on_track_num != first_note_track:
+                            if second_note_track == -1:
+                                second_note_track = on_track_num
+                            elif on_track_num != second_note_track:
+                                many_note_tracks = True
+                        channel_mask |= (1 << channel)
                         
                         gpu_note.on_time = <np.float32_t>on_time
                         gpu_note.off_time = <np.float32_t>off_time
                         gpu_note.pitch = data1
                         gpu_note.velocity = vel
                         gpu_note.track = <uint8_t>(on_track_num & 0xFF)
-                        gpu_note.padding = 0
+                        gpu_note.padding = <uint8_t>channel
                         temp_gpu_notes_vec.push_back(gpu_note)
                         
                         playback_event.on_time = on_time
@@ -470,7 +483,10 @@ cdef class MidiParser:
             self.note_data_for_gpu = np.empty((n_gpu_notes,), dtype=GPU_NOTE_DTYPE)
             memcpy(np.PyArray_DATA(self.note_data_for_gpu),
                    &temp_gpu_notes_vec[0],
-                   n_gpu_notes * sizeof(GpuNote))                         
+                   n_gpu_notes * sizeof(GpuNote))
+            if (not many_note_tracks) and channel_mask and (channel_mask & (channel_mask - 1)):
+                self.note_data_for_gpu['track'] = self.note_data_for_gpu['padding']
+            self.note_data_for_gpu['padding'] = 0
             
         if n_playback_events > 0:
             _log(f"Sorting {n_playback_events:,} playback events...")

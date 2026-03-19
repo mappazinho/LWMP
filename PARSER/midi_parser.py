@@ -120,6 +120,10 @@ except ImportError:
 
             temp_gpu_notes = []
             total_event_count = 0
+            first_note_track = None
+            second_note_track = None
+            many_note_tracks = False
+            channel_mask = 0
             
             _log("Parsing all track events (Python Fallback)...")
             loop_start_time = time.monotonic()
@@ -167,8 +171,17 @@ except ImportError:
                         
                         if off_time > max_off_time:
                             max_off_time = off_time
+
+                        if first_note_track is None:
+                            first_note_track = on_track_num
+                        elif on_track_num != first_note_track:
+                            if second_note_track is None:
+                                second_note_track = on_track_num
+                            elif on_track_num != second_note_track:
+                                many_note_tracks = True
+                        channel_mask |= (1 << channel)
                         
-                        temp_gpu_notes.append((on_time, off_time, data1, vel, on_track_num % 256, 0))
+                        temp_gpu_notes.append((on_time, off_time, data1, vel, on_track_num % 256, channel))
                         self.note_events_for_playback_list.append((on_time, off_time, data1, vel, channel, on_track_num))
 
                         if not note_on_dict[key]:
@@ -195,6 +208,10 @@ except ImportError:
                 _log(f"Sorting {len(temp_gpu_notes)} notes...")
                 self.note_data_for_gpu = np.array(temp_gpu_notes, dtype=GPU_NOTE_DTYPE)
                 self.note_data_for_gpu.sort(order='on_time')
+                use_channel_colors = (not many_note_tracks) and channel_mask and (channel_mask & (channel_mask - 1))
+                if use_channel_colors:
+                    self.note_data_for_gpu['track'] = self.note_data_for_gpu['padding']
+                self.note_data_for_gpu['padding'] = 0
             else:
                 self.note_data_for_gpu = np.empty((0,), dtype=GPU_NOTE_DTYPE)
                 

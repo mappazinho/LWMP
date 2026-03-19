@@ -125,6 +125,16 @@ void main() {
     
     vec4 final_color = texture_color * vec4(v_fragColor, 1.0);
 
+    float body_gradient = mix(0.92, 1.08, pow(clamp(1.0 - v_pos.y, 0.0, 1.0), 1.3));
+    float center_soft = 1.0 - abs(v_pos.x - 0.5) * 1.2;
+    float center_gloss = clamp(center_soft, 0.0, 1.0) * 0.06;
+    final_color.rgb *= body_gradient;
+    final_color.rgb += v_fragColor * center_gloss;
+
+    float top_band = 1.0 - smoothstep(0.0, max(0.012, 3.0 * fw.y), v_pos.y);
+    float top_glint = pow(top_band, 1.8) * 0.22;
+    final_color.rgb += vec3(1.0, 1.0, 1.0) * top_glint;
+
     float outline_px_uv = 1.0 / max(v_note_w, 1.0);
     float left_edge = step(v_pos.x, outline_px_uv);
     float right_edge = step(1.0 - outline_px_uv, v_pos.x);
@@ -142,6 +152,100 @@ void main() {
     }
     
     gl_FragColor = final_color;
+}
+"""
+
+BLOOM_VERT_SHADER = """#version 120
+attribute vec2 pos;
+attribute vec2 note_times;
+attribute vec3 note_info;
+
+uniform mat4 u_projection;
+uniform float u_time;
+uniform float u_scroll_speed;
+uniform float u_guide_line_y;
+uniform float u_window_start;
+uniform float u_window_end;
+uniform float u_bloom_radius;
+uniform vec3 u_colors[128];
+uniform vec2 u_pitch_layout[128];
+
+varying vec3 v_bloom_color;
+varying vec2 v_bloom_uv;
+varying float v_note_h;
+varying vec2 v_quad_uv;
+
+void main() {
+    float on_time = note_times.x;
+    float off_time = note_times.y;
+
+    if (off_time < u_window_start || on_time > u_window_end) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
+
+    int pitch = int(note_info.x + 0.5);
+    int track = int(note_info.z + 0.5);
+
+    float note_duration = max(off_time - on_time, 0.0001);
+    float note_h = max(2.0, note_duration * u_scroll_speed);
+    float note_y = u_guide_line_y + (u_time - on_time) * u_scroll_speed;
+
+    vec2 layout = u_pitch_layout[pitch];
+    float pad_x = u_bloom_radius * 1.7;
+    float pad_y = min(max(u_bloom_radius * 1.9, 12.0), note_h * 0.34 + u_bloom_radius * 0.62);
+    vec2 expanded_scale = vec2(layout.y + 2.0 * pad_x, note_h + 2.0 * pad_y);
+    vec2 expanded_offset = vec2(layout.x - pad_x, note_y - note_h - pad_y);
+    vec2 final_pos = pos * expanded_scale + expanded_offset;
+
+    gl_Position = u_projection * vec4(final_pos, 0.0, 1.0);
+
+    v_bloom_uv = vec2(
+        (pos.x * expanded_scale.x - pad_x) / max(layout.y, 1.0),
+        (pos.y * expanded_scale.y - pad_y) / max(note_h, 1.0)
+    );
+    v_note_h = note_h;
+    v_quad_uv = pos;
+
+    int color_idx = int(mod(float(track), 128.0));
+    v_bloom_color = u_colors[color_idx] * 1.18;
+}
+"""
+
+BLOOM_FRAG_SHADER = """#version 120
+varying vec3 v_bloom_color;
+varying vec2 v_bloom_uv;
+varying float v_note_h;
+varying vec2 v_quad_uv;
+
+uniform float u_bloom_strength;
+
+void main() {
+    vec2 outside = max(max(-v_bloom_uv, v_bloom_uv - vec2(1.0, 1.0)), vec2(0.0, 0.0));
+    vec2 halo_scale = vec2(0.62, 1.18);
+    float outside_dist = length(outside * halo_scale);
+    float halo = pow(clamp(1.0 - outside_dist * 0.82, 0.0, 1.0), 1.32);
+
+    float inside_mask = step(0.0, v_bloom_uv.x) * step(v_bloom_uv.x, 1.0) *
+                        step(0.0, v_bloom_uv.y) * step(v_bloom_uv.y, 1.0);
+    float center = 1.0 - max(abs(v_bloom_uv.x - 0.5) * 0.88, abs(v_bloom_uv.y - 0.5) * 1.02);
+    float core = pow(clamp(center, 0.0, 1.0), 2.2) * inside_mask;
+
+    float top_strip = clamp(1.0 - abs(v_bloom_uv.y) * 1.20, 0.0, 1.0) * inside_mask;
+    float top_end = pow(clamp(1.0 - max(-(v_bloom_uv.y + 0.02), 0.0) * 2.45, 0.0, 1.0), 1.75);
+    float bottom_end = pow(clamp(1.0 - max(v_bloom_uv.y - 1.10, 0.0) * 1.45, 0.0, 1.0), 1.30);
+    float end_fade = top_end * bottom_end;
+    float quad_edge = min(min(v_quad_uv.x, 1.0 - v_quad_uv.x), min(v_quad_uv.y, 1.0 - v_quad_uv.y));
+    float quad_edge_fade = smoothstep(0.0, 0.16, quad_edge);
+    float note_boost = clamp(v_note_h / 150.0, 0.0, 0.28);
+    float alpha = (halo * 0.34 + core * 0.06 + top_strip * 0.05) * end_fade * quad_edge_fade * (0.84 + note_boost) * u_bloom_strength;
+
+    if (alpha <= 0.001) {
+        discard;
+    }
+
+    vec3 color = v_bloom_color * (0.58 + halo * 0.24 + core * 0.08);
+    gl_FragColor = vec4(color, alpha);
 }
 """
 
@@ -226,6 +330,65 @@ void main() {
 }
 """
 
+KEYBOARD_BLOOM_VERT_SHADER = """#version 120
+attribute vec2 pos;
+attribute vec4 instance_rect;
+attribute float instance_is_pressed;
+attribute vec3 instance_color;
+
+uniform mat4 u_projection;
+uniform float u_keyboard_y;
+
+varying vec2 v_uv;
+varying float v_is_pressed;
+varying vec3 v_color;
+
+void main() {
+    vec2 final_pos = pos * instance_rect.zw + instance_rect.xy;
+    final_pos.y += u_keyboard_y;
+    gl_Position = u_projection * vec4(final_pos, 0.0, 1.0);
+    v_uv = vec2(pos.x, pos.y);
+    v_is_pressed = instance_is_pressed;
+    v_color = instance_color;
+}
+"""
+
+KEYBOARD_BLOOM_FRAG_SHADER = """#version 120
+varying vec2 v_uv;
+varying float v_is_pressed;
+varying vec3 v_color;
+
+uniform bool u_is_white_key;
+uniform float u_bloom_strength;
+
+void main() {
+    float light_strength = max(max(v_color.r, v_color.g), v_color.b);
+    if (light_strength <= 0.001 || u_bloom_strength <= 0.001) {
+        discard;
+    }
+
+    float width_shape = 1.0 - abs(v_uv.x - 0.5) * (u_is_white_key ? 1.05 : 1.35);
+    float height_shape = 1.0 - abs(v_uv.y - 0.44) * (u_is_white_key ? 1.55 : 1.85);
+    float core = pow(clamp(min(width_shape, height_shape), 0.0, 1.0), 2.0);
+
+    vec2 centered = abs(v_uv - vec2(0.5, 0.42));
+    vec2 halo_scale = u_is_white_key ? vec2(0.78, 1.18) : vec2(0.92, 1.35);
+    float halo = pow(clamp(1.0 - length(centered * halo_scale) * 1.55, 0.0, 1.0), 1.55);
+
+    float top_lift = pow(clamp(1.0 - max(v_uv.y - 0.15, 0.0) * 1.2, 0.0, 1.0), 1.25);
+    float edge_fade = smoothstep(0.0, 0.14, min(min(v_uv.x, 1.0 - v_uv.x), min(v_uv.y, 1.0 - v_uv.y)));
+    float pressed_boost = v_is_pressed > 0.5 ? 1.0 : 0.68;
+    float alpha = (halo * 0.42 + core * 0.14) * top_lift * edge_fade * pressed_boost * u_bloom_strength;
+
+    if (alpha <= 0.001) {
+        discard;
+    }
+
+    vec3 color = v_color * (0.70 + halo * 0.24 + core * 0.10);
+    gl_FragColor = vec4(color, alpha);
+}
+"""
+
 class PianoRoll:
     def __init__(self, width, height, config):
         self.width = width
@@ -234,7 +397,9 @@ class PianoRoll:
         self.screen = None
         
         self.shader = 0
+        self.bloom_shader = 0
         self.vao = 0
+        self.bloom_vao = 0
         self.vbo_vertices = 0
         self.vbo_stream_data = 0
         self.note_texture = 0
@@ -243,6 +408,14 @@ class PianoRoll:
         self.u_note_edge_texture_loc = -1
         self.u_is_white_key_notes_loc = -1
         self.u_glow_strength_loc = -1
+        self.u_bloom_time_loc = -1
+        self.u_bloom_scroll_speed_loc = -1
+        self.u_bloom_pitch_layout_loc = -1
+        self.u_bloom_colors_loc = -1
+        self.u_bloom_window_start_loc = -1
+        self.u_bloom_window_end_loc = -1
+        self.u_bloom_radius_loc = -1
+        self.u_bloom_strength_loc = -1
         
         self.all_notes_gpu = None
         self.data_queue = queue.Queue(maxsize=2)
@@ -265,7 +438,19 @@ class PianoRoll:
         self.note_width = float(vis_cfg.get('note_width', 10.0))
         self.show_guide_line = bool(vis_cfg.get('show_guide_line', True))
         self.show_glow = bool(vis_cfg.get('show_glow', False))
+        self.show_bloom = bool(vis_cfg.get('show_bloom', False))
         self.glow_strength = 1.0 if self.show_glow else 0.0
+        self.bloom_base_strength = 1.0
+        self.bloom_strength = self.bloom_base_strength if self.show_bloom else 0.0
+        self.bloom_radius = 26.0
+        self.bloom_min_strength = 0.26
+        self.bloom_response_reference = 1400.0
+        self.bloom_response_curve = 0.78
+        self.bloom_response_scale = 1.35
+        self.bloom_emergency_strength = 0.15
+        self.bloom_emergency_threshold = 4200.0
+        self.bloom_emergency_full_threshold = 6500.0
+        self.last_bloom_update_time = time.perf_counter()
         self.show_key_press_glow = bool(vis_cfg.get('show_key_press_glow', True))
         self.show_key_light_fade = bool(vis_cfg.get('show_key_light_fade', False))
         self.glow_fade_duration = 0.1
@@ -294,8 +479,11 @@ class PianoRoll:
         self.keyboard_texture_info = {}
         
         self.keyboard_shader = 0
+        self.keyboard_bloom_shader = 0
         self.keyboard_vao_white = 0
         self.keyboard_vao_black = 0
+        self.keyboard_bloom_vao_white = 0
+        self.keyboard_bloom_vao_black = 0
         self.keyboard_vbo_quad = 0
         self.keyboard_vbo_white_keys = 0
         self.keyboard_vbo_black_keys = 0
@@ -304,6 +492,8 @@ class PianoRoll:
         self.white_key_pitch_map = {}
         self.black_key_pitch_map = {}
         self.u_is_white_key_loc = -1
+        self.u_keyboard_bloom_is_white_key_loc = -1
+        self.u_keyboard_bloom_strength_loc = -1
         
         self.active_pitches_last_frame = set()
         self.last_visible_notes = None
@@ -322,6 +512,7 @@ class PianoRoll:
         self.glow_options_panel_rect = None
         self.glow_options_checkbox_rect = None
         self.key_light_fade_checkbox_rect = None
+        self.bloom_checkbox_rect = None
         self.glow_options_expanded = False
         self.color_button_size = 32
         self.controls_panel_expanded = False
@@ -358,6 +549,7 @@ class PianoRoll:
     def _save_visualizer_config(self):
         vis_cfg = self.config.setdefault('visualizer', {})
         vis_cfg['show_glow'] = bool(self.show_glow)
+        vis_cfg['show_bloom'] = bool(self.show_bloom)
         vis_cfg['show_key_press_glow'] = bool(self.show_key_press_glow)
         vis_cfg['show_key_light_fade'] = bool(self.show_key_light_fade)
         vis_cfg['seconds_before_cursor'] = float(self.window_seconds)
@@ -381,6 +573,8 @@ class PianoRoll:
             yield ("glow_checkbox", self.glow_options_checkbox_rect, "Toggle glow on key press")
         if self.glow_options_expanded and self.key_light_fade_checkbox_rect:
             yield ("key_fade_checkbox", self.key_light_fade_checkbox_rect, "Toggle fade key lighting")
+        if self.glow_options_expanded and self.bloom_checkbox_rect:
+            yield ("bloom_checkbox", self.bloom_checkbox_rect, "Toggle note bloom")
 
     def _update_hover_ui_state(self):
         if self.overlay_font is None:
@@ -649,6 +843,15 @@ class PianoRoll:
             )
         except Exception as err:
             print("Note shader compilation failed:\n", err); raise
+
+        try:
+            self.bloom_shader = compileProgram(
+                compileShader(BLOOM_VERT_SHADER, GL_VERTEX_SHADER),
+                compileShader(BLOOM_FRAG_SHADER, GL_FRAGMENT_SHADER)
+            )
+        except Exception as err:
+            print("Bloom shader compilation failed:\n", err)
+            self.bloom_shader = 0
         
         if self.show_keyboard:
             try:
@@ -658,6 +861,15 @@ class PianoRoll:
                 )
             except Exception as err:
                 print("Keyboard shader compilation failed:\n", err); self.show_keyboard = False
+            if self.show_keyboard:
+                try:
+                    self.keyboard_bloom_shader = compileProgram(
+                        compileShader(KEYBOARD_BLOOM_VERT_SHADER, GL_VERTEX_SHADER),
+                        compileShader(KEYBOARD_BLOOM_FRAG_SHADER, GL_FRAGMENT_SHADER)
+                    )
+                except Exception as err:
+                    print("Keyboard bloom shader compilation failed:\n", err)
+                    self.keyboard_bloom_shader = 0
 
         self.vao = glGenVertexArrays(1)
         glBindVertexArray(self.vao)
@@ -684,6 +896,27 @@ class PianoRoll:
         glEnableVertexAttribArray(note_info_loc)
         glVertexAttribPointer(note_info_loc, 3, GL_UNSIGNED_BYTE, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(8))
         glVertexAttribDivisor(note_info_loc, 1)
+
+        if self.bloom_shader:
+            bloom_pos_loc = glGetAttribLocation(self.bloom_shader, "pos")
+            bloom_note_times_loc = glGetAttribLocation(self.bloom_shader, "note_times")
+            bloom_note_info_loc = glGetAttribLocation(self.bloom_shader, "note_info")
+
+            self.bloom_vao = glGenVertexArrays(1)
+            glBindVertexArray(self.bloom_vao)
+
+            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_vertices)
+            glEnableVertexAttribArray(bloom_pos_loc)
+            glVertexAttribPointer(bloom_pos_loc, 2, GL_FLOAT, GL_FALSE, 0, None)
+
+            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
+            glEnableVertexAttribArray(bloom_note_times_loc)
+            glVertexAttribPointer(bloom_note_times_loc, 2, GL_FLOAT, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(0))
+            glVertexAttribDivisor(bloom_note_times_loc, 1)
+
+            glEnableVertexAttribArray(bloom_note_info_loc)
+            glVertexAttribPointer(bloom_note_info_loc, 3, GL_UNSIGNED_BYTE, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(8))
+            glVertexAttribDivisor(bloom_note_info_loc, 1)
 
         if self.show_keyboard:
             glUseProgram(self.keyboard_shader)
@@ -722,6 +955,30 @@ class PianoRoll:
             glEnableVertexAttribArray(kb_rect_loc); glVertexAttribPointer(kb_rect_loc, 4, GL_FLOAT, GL_FALSE, instance_stride, ctypes.c_void_p(0)); glVertexAttribDivisor(kb_rect_loc, 1)
             glEnableVertexAttribArray(kb_pressed_loc); glVertexAttribPointer(kb_pressed_loc, 1, GL_FLOAT, GL_FALSE, instance_stride, ctypes.c_void_p(16)); glVertexAttribDivisor(kb_pressed_loc, 1)
             glEnableVertexAttribArray(kb_color_loc); glVertexAttribPointer(kb_color_loc, 3, GL_FLOAT, GL_FALSE, instance_stride, ctypes.c_void_p(20)); glVertexAttribDivisor(kb_color_loc, 1)
+
+            if self.keyboard_bloom_shader:
+                bloom_pos_loc = glGetAttribLocation(self.keyboard_bloom_shader, "pos")
+                bloom_rect_loc = glGetAttribLocation(self.keyboard_bloom_shader, "instance_rect")
+                bloom_pressed_loc = glGetAttribLocation(self.keyboard_bloom_shader, "instance_is_pressed")
+                bloom_color_loc = glGetAttribLocation(self.keyboard_bloom_shader, "instance_color")
+
+                self.keyboard_bloom_vao_white = glGenVertexArrays(1)
+                glBindVertexArray(self.keyboard_bloom_vao_white)
+                glBindBuffer(GL_ARRAY_BUFFER, self.keyboard_vbo_quad)
+                glEnableVertexAttribArray(bloom_pos_loc); glVertexAttribPointer(bloom_pos_loc, 2, GL_FLOAT, GL_FALSE, 0, None)
+                glBindBuffer(GL_ARRAY_BUFFER, self.keyboard_vbo_white_keys)
+                glEnableVertexAttribArray(bloom_rect_loc); glVertexAttribPointer(bloom_rect_loc, 4, GL_FLOAT, GL_FALSE, instance_stride, ctypes.c_void_p(0)); glVertexAttribDivisor(bloom_rect_loc, 1)
+                glEnableVertexAttribArray(bloom_pressed_loc); glVertexAttribPointer(bloom_pressed_loc, 1, GL_FLOAT, GL_FALSE, instance_stride, ctypes.c_void_p(16)); glVertexAttribDivisor(bloom_pressed_loc, 1)
+                glEnableVertexAttribArray(bloom_color_loc); glVertexAttribPointer(bloom_color_loc, 3, GL_FLOAT, GL_FALSE, instance_stride, ctypes.c_void_p(20)); glVertexAttribDivisor(bloom_color_loc, 1)
+
+                self.keyboard_bloom_vao_black = glGenVertexArrays(1)
+                glBindVertexArray(self.keyboard_bloom_vao_black)
+                glBindBuffer(GL_ARRAY_BUFFER, self.keyboard_vbo_quad)
+                glEnableVertexAttribArray(bloom_pos_loc); glVertexAttribPointer(bloom_pos_loc, 2, GL_FLOAT, GL_FALSE, 0, None)
+                glBindBuffer(GL_ARRAY_BUFFER, self.keyboard_vbo_black_keys)
+                glEnableVertexAttribArray(bloom_rect_loc); glVertexAttribPointer(bloom_rect_loc, 4, GL_FLOAT, GL_FALSE, instance_stride, ctypes.c_void_p(0)); glVertexAttribDivisor(bloom_rect_loc, 1)
+                glEnableVertexAttribArray(bloom_pressed_loc); glVertexAttribPointer(bloom_pressed_loc, 1, GL_FLOAT, GL_FALSE, instance_stride, ctypes.c_void_p(16)); glVertexAttribDivisor(bloom_pressed_loc, 1)
+                glEnableVertexAttribArray(bloom_color_loc); glVertexAttribPointer(bloom_color_loc, 3, GL_FLOAT, GL_FALSE, instance_stride, ctypes.c_void_p(20)); glVertexAttribDivisor(bloom_color_loc, 1)
 
             glBindBuffer(GL_ARRAY_BUFFER, 0)
             glBindVertexArray(0)
@@ -764,8 +1021,35 @@ class PianoRoll:
         if self.u_glow_strength_loc != -1:
             glUniform1f(self.u_glow_strength_loc, self.glow_strength)
 
+        if self.bloom_shader:
+            glUseProgram(self.bloom_shader)
+            glUniformMatrix4fv(glGetUniformLocation(self.bloom_shader, "u_projection"), 1, GL_FALSE, self.projection_matrix.T)
+            self.u_bloom_time_loc = glGetUniformLocation(self.bloom_shader, "u_time")
+            self.u_bloom_scroll_speed_loc = glGetUniformLocation(self.bloom_shader, "u_scroll_speed")
+            self.u_bloom_pitch_layout_loc = glGetUniformLocation(self.bloom_shader, "u_pitch_layout")
+            self.u_bloom_colors_loc = glGetUniformLocation(self.bloom_shader, "u_colors")
+            self.u_bloom_window_start_loc = glGetUniformLocation(self.bloom_shader, "u_window_start")
+            self.u_bloom_window_end_loc = glGetUniformLocation(self.bloom_shader, "u_window_end")
+            self.u_bloom_radius_loc = glGetUniformLocation(self.bloom_shader, "u_bloom_radius")
+            self.u_bloom_strength_loc = glGetUniformLocation(self.bloom_shader, "u_bloom_strength")
+            glUniform1f(self.u_bloom_scroll_speed_loc, self.scroll_speed)
+            glUniform1f(glGetUniformLocation(self.bloom_shader, "u_guide_line_y"), self._get_guide_line_y())
+            glUniform2fv(self.u_bloom_pitch_layout_loc, 128, self.pitch_layout_data)
+            if self.u_bloom_window_start_loc != -1:
+                glUniform1f(self.u_bloom_window_start_loc, 0.0)
+            if self.u_bloom_window_end_loc != -1:
+                glUniform1f(self.u_bloom_window_end_loc, 0.0)
+            if self.u_bloom_radius_loc != -1:
+                glUniform1f(self.u_bloom_radius_loc, self.bloom_radius)
+            if self.u_bloom_strength_loc != -1:
+                glUniform1f(self.u_bloom_strength_loc, self.bloom_strength)
+
         self.channel_colors = self._load_colors_from_xml()
+        glUseProgram(self.shader)
         glUniform3fv(self.u_colors_loc, 128, self.channel_colors)
+        if self.bloom_shader and self.u_bloom_colors_loc != -1:
+            glUseProgram(self.bloom_shader)
+            glUniform3fv(self.u_bloom_colors_loc, 128, self.channel_colors)
         
         if self.show_keyboard:
             glUseProgram(self.keyboard_shader)
@@ -776,6 +1060,17 @@ class PianoRoll:
             keyboard_glow_loc = glGetUniformLocation(self.keyboard_shader, "u_glow_strength")
             if keyboard_glow_loc != -1:
                 glUniform1f(keyboard_glow_loc, self.glow_strength)
+            if self.keyboard_bloom_shader:
+                glUseProgram(self.keyboard_bloom_shader)
+                glUniformMatrix4fv(glGetUniformLocation(self.keyboard_bloom_shader, "u_projection"), 1, GL_FALSE, self.projection_matrix.T)
+                glUniform1f(glGetUniformLocation(self.keyboard_bloom_shader, "u_keyboard_y"), self.height - self.keyboard_texture_info['white_key']['scaled_height'])
+                self.u_keyboard_bloom_is_white_key_loc = glGetUniformLocation(self.keyboard_bloom_shader, "u_is_white_key")
+                self.u_keyboard_bloom_strength_loc = glGetUniformLocation(self.keyboard_bloom_shader, "u_bloom_strength")
+                if self.u_keyboard_bloom_strength_loc != -1:
+                    glUniform1f(
+                        self.u_keyboard_bloom_strength_loc,
+                        (self.bloom_base_strength if self.show_bloom else 0.0) * 0.82
+                    )
 
         glUseProgram(0)
         
@@ -802,7 +1097,7 @@ class PianoRoll:
             18
         )
         panel_width = 190
-        panel_height = 82
+        panel_height = 106
         self.glow_options_panel_rect = pygame.Rect(
             self.glow_options_button_rect.x - (panel_width - self.glow_options_button_rect.width),
             self.glow_options_button_rect.y + self.glow_options_button_rect.height + 6,
@@ -818,6 +1113,12 @@ class PianoRoll:
         self.key_light_fade_checkbox_rect = pygame.Rect(
             self.glow_options_panel_rect.x + 10,
             self.glow_options_panel_rect.y + 52,
+            16,
+            16
+        )
+        self.bloom_checkbox_rect = pygame.Rect(
+            self.glow_options_panel_rect.x + 10,
+            self.glow_options_panel_rect.y + 76,
             16,
             16
         )
@@ -854,8 +1155,8 @@ class PianoRoll:
         self.all_notes_gpu = data['all_notes_gpu']
         self.render_notes_array = data['render_notes_array']
         self.render_on_times = data['render_on_times']
-        
-        self.notes_to_draw = len(self.render_notes_array)
+        self.notes_to_draw = 0
+        self.last_visible_notes = np.empty(0, dtype=GPU_NOTE_DTYPE)
         
         self.force_data_update.set()
         print("MIDI data active on GPU thread.")
@@ -898,20 +1199,19 @@ class PianoRoll:
                     visible_slice = visible_slice[:self.streaming_vbo_capacity]
                     visible_count = self.streaming_vbo_capacity
                 
-                if visible_count > 0:
-                    visible_slice_contiguous = np.ascontiguousarray(visible_slice)
-                    
-                    try:
-                        self.data_queue.put((visible_slice_contiguous, visible_count), block=True, timeout=0.1)
-                    except queue.Full:
-                        print("Piano roll queue is full, frame skipped. This may indicate rendering lag.")
+                visible_slice_contiguous = np.ascontiguousarray(visible_slice)
+
+                try:
+                    self.data_queue.put((visible_slice_contiguous, visible_count), block=True, timeout=0.1)
+                except queue.Full:
+                    print("Piano roll queue is full, frame skipped. This may indicate rendering lag.")
             
             time.sleep(0.005) # Yield
 
     def draw(self, current_time):
         """Draw the latest buffer provided by the data thread."""
         self._upload_pending_midi_data()
-        if self.show_key_press_glow or self.show_key_light_fade:
+        if self.show_glow and (self.show_key_press_glow or self.show_key_light_fade):
             self._update_glow_trails(current_time)
         else:
             self.glow_trails.clear()
@@ -923,12 +1223,12 @@ class PianoRoll:
             queue_data = self.data_queue.get_nowait()
             visible_notes, count = queue_data
             self.last_visible_notes = visible_notes
-            
+            self.notes_to_draw = count
+
             glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
             glBufferData(GL_ARRAY_BUFFER, self.streaming_vbo_capacity * self.note_size_bytes, None, GL_DYNAMIC_DRAW)
-            glBufferSubData(GL_ARRAY_BUFFER, 0, visible_notes.nbytes, visible_notes)
-            
-            self.notes_to_draw = count
+            if count > 0:
+                glBufferSubData(GL_ARRAY_BUFFER, 0, visible_notes.nbytes, visible_notes)
             
         except queue.Empty:
             pass
@@ -959,11 +1259,17 @@ class PianoRoll:
             glUseProgram(0)
             glBindBuffer(GL_ARRAY_BUFFER, 0)
 
+            if self.show_bloom and self.bloom_shader:
+                self._update_bloom_compensation()
+                self._draw_note_bloom(current_time, window_start, window_end)
+
         if self.show_glow and self.show_key_press_glow:
             self._draw_active_note_glow_overlay(current_time)
 
         if self.show_keyboard and self.keyboard_layout:
             self._draw_keyboard_opengl(current_time)
+            if self.show_bloom and self.keyboard_bloom_shader:
+                self._draw_keyboard_bloom()
 
         if self.show_guide_line:
             glDisable(GL_DEPTH_TEST)
@@ -1080,6 +1386,57 @@ class PianoRoll:
         glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
+    def _draw_note_bloom(self, current_time, window_start, window_end):
+        glDisable(GL_DEPTH_TEST)
+        glDepthMask(GL_FALSE)
+        glUseProgram(self.bloom_shader)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE)
+
+        glUniform1f(self.u_bloom_time_loc, current_time)
+        glUniform1f(self.u_bloom_scroll_speed_loc, self.scroll_speed)
+        glUniform1f(glGetUniformLocation(self.bloom_shader, "u_guide_line_y"), self._get_guide_line_y())
+        glUniform1f(self.u_bloom_window_start_loc, window_start)
+        glUniform1f(self.u_bloom_window_end_loc, window_end)
+        if self.u_bloom_radius_loc != -1:
+            glUniform1f(self.u_bloom_radius_loc, self.bloom_radius)
+        if self.u_bloom_strength_loc != -1:
+            glUniform1f(self.u_bloom_strength_loc, self.bloom_strength)
+
+        glBindVertexArray(self.bloom_vao)
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 6, self.notes_to_draw)
+        glBindVertexArray(0)
+
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glUseProgram(0)
+        glDepthMask(GL_TRUE)
+
+    def _update_bloom_compensation(self):
+        now = time.perf_counter()
+        dt = max(0.0, min(0.25, now - self.last_bloom_update_time))
+        self.last_bloom_update_time = now
+
+        if not self.show_bloom:
+            self.bloom_strength = 0.0
+            return
+
+        visible_count = max(0.0, float(self.notes_to_draw))
+        load = visible_count / self.bloom_response_reference
+        response = 1.0 / (1.0 + pow(load, self.bloom_response_curve) * self.bloom_response_scale)
+        target_strength = self.bloom_base_strength * (self.bloom_min_strength + (1.0 - self.bloom_min_strength) * response)
+
+        if visible_count > self.bloom_emergency_threshold:
+            emergency_t = (visible_count - self.bloom_emergency_threshold) / max(
+                1.0,
+                self.bloom_emergency_full_threshold - self.bloom_emergency_threshold
+            )
+            emergency_t = np.clip(emergency_t, 0.0, 1.0)
+            emergency_t = 1.0 - pow(1.0 - emergency_t, 2.4)
+            emergency_target = self.bloom_base_strength * self.bloom_emergency_strength
+            target_strength = target_strength + (emergency_target - target_strength) * emergency_t
+
+        smooth = 1.0 - np.exp(-dt * 4.2)
+        self.bloom_strength += (target_strength - self.bloom_strength) * smooth
+
     def _get_trail_fade(self, current_time, pitch):
         trail = self.glow_trails.get(pitch)
         if not trail:
@@ -1127,7 +1484,7 @@ class PianoRoll:
                         'on_time': on_time,
                     }
 
-        if self.show_key_light_fade:
+        if self.show_glow and self.show_key_light_fade:
             for pitch, trail in self.glow_trails.items():
                 if pitch in active_pitch_colors:
                     continue
@@ -1208,6 +1565,38 @@ class PianoRoll:
         glBindVertexArray(0)
         glUseProgram(0)
 
+    def _draw_keyboard_bloom(self):
+        if self.keyboard_bloom_shader == 0:
+            return
+
+        glDisable(GL_DEPTH_TEST)
+        glDepthMask(GL_FALSE)
+        glUseProgram(self.keyboard_bloom_shader)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE)
+
+        keyboard_height = self.keyboard_texture_info['white_key']['scaled_height']
+        keyboard_y = self.height - keyboard_height
+        glUniform1f(glGetUniformLocation(self.keyboard_bloom_shader, "u_keyboard_y"), keyboard_y)
+        if self.u_keyboard_bloom_strength_loc != -1:
+            glUniform1f(
+                self.u_keyboard_bloom_strength_loc,
+                (self.bloom_base_strength if self.show_bloom else 0.0) * 0.82
+            )
+
+        glUniform1i(self.u_keyboard_bloom_is_white_key_loc, 1)
+        glBindVertexArray(self.keyboard_bloom_vao_white)
+        glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, len(self.white_key_instance_data))
+
+        if len(self.black_key_instance_data) > 0:
+            glUniform1i(self.u_keyboard_bloom_is_white_key_loc, 0)
+            glBindVertexArray(self.keyboard_bloom_vao_black)
+            glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, len(self.black_key_instance_data))
+
+        glBindVertexArray(0)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glUseProgram(0)
+        glDepthMask(GL_TRUE)
+
     def _init_slider_geometry(self):
         padding = 16
         panel_width, panel_height = self.controls_panel_size
@@ -1268,6 +1657,16 @@ class PianoRoll:
                     self.glow_trails.clear()
                 self._save_visualizer_config()
                 return
+            if self.glow_options_expanded and self.bloom_checkbox_rect and self.bloom_checkbox_rect.collidepoint(event.pos):
+                self.show_bloom = not self.show_bloom
+                self.bloom_strength = self.bloom_base_strength if self.show_bloom else 0.0
+                self.last_bloom_update_time = time.perf_counter()
+                if self.bloom_shader and self.u_bloom_strength_loc != -1:
+                    glUseProgram(self.bloom_shader)
+                    glUniform1f(self.u_bloom_strength_loc, self.bloom_strength)
+                    glUseProgram(0)
+                self._save_visualizer_config()
+                return
             if self.glow_button_rect and self.glow_button_rect.collidepoint(event.pos):
                 self.toggle_glow()
                 return
@@ -1296,6 +1695,10 @@ class PianoRoll:
         glUseProgram(self.shader)
         glUniform3fv(self.u_colors_loc, 128, self.channel_colors)
         glUseProgram(0)
+        if self.bloom_shader and self.u_bloom_colors_loc != -1:
+            glUseProgram(self.bloom_shader)
+            glUniform3fv(self.u_bloom_colors_loc, 128, self.channel_colors)
+            glUseProgram(0)
         print("Colors randomized!")
 
     def toggle_glow(self):
@@ -1580,6 +1983,7 @@ class PianoRoll:
 
             self._draw_text_overlay("Glow on key press", px + 32, py + 30)
             self._draw_text_overlay("Fade key lighting", px + 32, py + 54)
+            self._draw_text_overlay("Bloom notes", px + 32, py + 78)
 
             if self.glow_options_checkbox_rect:
                 cbx, cby, cbw, cbh = (
@@ -1635,6 +2039,33 @@ class PianoRoll:
                     glEnd()
                 self._draw_hover_highlight(self.key_light_fade_checkbox_rect, self._get_hover_alpha("key_fade_checkbox"))
 
+            if self.bloom_checkbox_rect:
+                cbx, cby, cbw, cbh = (
+                    self.bloom_checkbox_rect.x,
+                    self.bloom_checkbox_rect.y,
+                    self.bloom_checkbox_rect.width,
+                    self.bloom_checkbox_rect.height,
+                )
+                glColor4f(0.12, 0.12, 0.16, 0.92)
+                glBegin(GL_QUADS)
+                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
+                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
+                glEnd()
+                glColor4f(0.72, 0.74, 0.80, 0.95)
+                glLineWidth(1.0)
+                glBegin(GL_LINE_LOOP)
+                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
+                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
+                glEnd()
+                if self.show_bloom:
+                    glColor4f(0.95, 0.78, 0.24, 0.95)
+                    glLineWidth(2.0)
+                    glBegin(GL_LINES)
+                    glVertex2f(cbx + 3, cby + 9); glVertex2f(cbx + 7, cby + 13)
+                    glVertex2f(cbx + 7, cby + 13); glVertex2f(cbx + 13, cby + 4)
+                    glEnd()
+                self._draw_hover_highlight(self.bloom_checkbox_rect, self._get_hover_alpha("bloom_checkbox"))
+
         self._draw_hover_tooltip()
         
         glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
@@ -1647,12 +2078,20 @@ class PianoRoll:
         self._text_texture_cache.clear()
 
         glDeleteProgram(self.shader)
+        if self.bloom_shader:
+            glDeleteProgram(self.bloom_shader)
         glDeleteVertexArrays(1, [self.vao])
+        if self.bloom_vao:
+            glDeleteVertexArrays(1, [self.bloom_vao])
         glDeleteBuffers(2, [self.vbo_vertices, self.vbo_stream_data])
         
         if self.show_keyboard:
             glDeleteProgram(self.keyboard_shader)
+            if self.keyboard_bloom_shader:
+                glDeleteProgram(self.keyboard_bloom_shader)
             glDeleteVertexArrays(2, [self.keyboard_vao_white, self.keyboard_vao_black])
+            if self.keyboard_bloom_vao_white or self.keyboard_bloom_vao_black:
+                glDeleteVertexArrays(2, [self.keyboard_bloom_vao_white, self.keyboard_bloom_vao_black])
             glDeleteBuffers(3, [self.keyboard_vbo_quad, self.keyboard_vbo_white_keys, self.keyboard_vbo_black_keys])
             glDeleteTextures(list(self.keyboard_textures.values()))
 

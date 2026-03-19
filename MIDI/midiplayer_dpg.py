@@ -123,6 +123,13 @@ class DpgMidiPlayerApp:
         self.last_cpu_sample_time = 0.0
         self.last_cpu_percent = 0.0
         self.pending_soundfont_callback = None
+        self.loading_total_events = 0
+        self.loading_started_at = 0.0
+        self.pending_directory_callback = None
+        self.library_file_labels = []
+        self.library_file_map = {}
+        self.last_library_click_label = None
+        self.last_library_click_time = 0.0
 
         self.all_backend_labels = {
             "bassmidi": "BASSMIDI (Buffered)",
@@ -137,6 +144,8 @@ class DpgMidiPlayerApp:
         self.available_resolutions = self._build_resolution_list()
 
         self._build_ui()
+        self._refresh_library_directory_ui()
+        self.refresh_library_files()
         self._bind_theme()
         self._initialize_process_monitoring()
         self._prepare_startup_screen()
@@ -144,6 +153,9 @@ class DpgMidiPlayerApp:
 
     def _gui_cfg(self):
         return CONFIG["gui"]
+
+    def _library_cfg(self):
+        return CONFIG["library"]
 
     def _color_tuple(self, key):
         color = self._gui_cfg()[key]
@@ -261,6 +273,167 @@ class DpgMidiPlayerApp:
             labels["local"] = self.all_backend_labels["local"]
         return labels
 
+    def _get_library_directories(self):
+        dirs = []
+        seen = set()
+        for directory in self._library_cfg().get("midi_directories", []):
+            if not directory:
+                continue
+            norm = os.path.normcase(os.path.abspath(directory))
+            if norm in seen or not os.path.isdir(directory):
+                continue
+            seen.add(norm)
+            dirs.append(os.path.abspath(directory))
+        return dirs
+
+    def _save_library_directories(self, directories):
+        self._library_cfg()["midi_directories"] = directories
+        save_config(CONFIG)
+
+    def _format_library_file_label(self, root_dir, full_path):
+        root_name = os.path.basename(root_dir.rstrip("\\/")) or root_dir
+        rel_path = os.path.relpath(full_path, root_dir)
+        return f"{root_name} | {rel_path}"
+
+    def _refresh_library_directory_ui(self):
+        directories = self._get_library_directories()
+        if dpg.does_item_exist("library_directory_combo"):
+            combo_items = directories if directories else ["No folders configured"]
+            current_value = combo_items[0]
+            dpg.configure_item("library_directory_combo", items=combo_items)
+            dpg.set_value("library_directory_combo", current_value)
+
+    def refresh_library_files(self, sender=None, app_data=None):
+        directories = self._get_library_directories()
+        search_text = ""
+        if dpg.does_item_exist("library_search_input"):
+            search_text = dpg.get_value("library_search_input").strip().lower()
+
+        entries = []
+        for root_dir in directories:
+            try:
+                for current_root, _, filenames in os.walk(root_dir):
+                    for filename in filenames:
+                        lower_name = filename.lower()
+                        if not (lower_name.endswith(".mid") or lower_name.endswith(".midi")):
+                            continue
+                        full_path = os.path.join(current_root, filename)
+                        label = self._format_library_file_label(root_dir, full_path)
+                        if search_text and search_text not in label.lower():
+                            continue
+                        entries.append((label, full_path))
+            except Exception as e:
+                print(f"Failed to scan MIDI library directory '{root_dir}': {e}")
+
+        entries.sort(key=lambda item: item[0].lower())
+        self.library_file_labels = [label for label, _ in entries]
+        self.library_file_map = {label: path for label, path in entries}
+
+        if dpg.does_item_exist("library_file_list"):
+            items = self.library_file_labels if self.library_file_labels else ["No MIDI files found"]
+            dpg.configure_item("library_file_list", items=items)
+            dpg.set_value("library_file_list", items[0])
+
+        if dpg.does_item_exist("library_count_text"):
+            dpg.set_value("library_count_text", f"Files: {len(self.library_file_labels):,}")
+
+    def _add_library_directory(self, directory):
+        if not directory:
+            return
+        directory = os.path.abspath(os.path.expanduser(directory))
+        if not os.path.isdir(directory):
+            self._message_error("Invalid Folder", f"Folder not found:\n{directory}")
+            return
+        directories = self._get_library_directories()
+        norm = os.path.normcase(directory)
+        if any(os.path.normcase(existing) == norm for existing in directories):
+            self._message_warning("Already Added", "That MIDI folder is already in the library.")
+            return
+        directories.append(directory)
+        directories.sort(key=lambda item: item.lower())
+        self._save_library_directories(directories)
+        if dpg.does_item_exist("library_path_input"):
+            dpg.set_value("library_path_input", "")
+        self._refresh_library_directory_ui()
+        self.refresh_library_files()
+
+    def add_library_directory_from_input(self, sender=None, app_data=None):
+        if not dpg.does_item_exist("library_path_input"):
+            return
+        self._add_library_directory(dpg.get_value("library_path_input"))
+
+    def _open_directory_dialog(self, callback):
+        self.pending_directory_callback = callback
+        dpg.show_item("library_directory_dialog")
+
+    def _on_directory_dialog_selected(self, sender, app_data):
+        directory = None
+        if isinstance(app_data, dict):
+            directory = app_data.get("file_path_name")
+            if not directory:
+                current_path = app_data.get("current_path")
+                current_filter = app_data.get("current_filter", "")
+                if current_path:
+                    directory = os.path.join(current_path, current_filter) if current_filter and current_filter != ".*" else current_path
+        callback = self.pending_directory_callback
+        self.pending_directory_callback = None
+        dpg.configure_item("library_directory_dialog", show=False)
+        if callback and directory:
+            self._queue_ui(callback, directory)
+
+    def _on_directory_dialog_cancel(self):
+        self.pending_directory_callback = None
+
+    def show_library_window(self, sender=None, app_data=None):
+        self._refresh_library_directory_ui()
+        self.refresh_library_files()
+        dpg.configure_item("library_window", show=True)
+
+    def browse_library_directory(self, sender=None, app_data=None):
+        self._open_directory_dialog(self._add_library_directory)
+
+    def remove_selected_library_directory(self, sender=None, app_data=None):
+        if not dpg.does_item_exist("library_directory_combo"):
+            return
+        selected = dpg.get_value("library_directory_combo")
+        directories = self._get_library_directories()
+        if selected not in directories:
+            return
+        directories = [directory for directory in directories if directory != selected]
+        self._save_library_directories(directories)
+        self._refresh_library_directory_ui()
+        self.refresh_library_files()
+
+    def load_selected_library_file(self, sender=None, app_data=None):
+        if not dpg.does_item_exist("library_file_list"):
+            return
+        selected_label = dpg.get_value("library_file_list")
+        filepath = self.library_file_map.get(selected_label)
+        if not filepath:
+            return
+        dpg.configure_item("library_window", show=False)
+        self.load_file(filepath)
+
+    def on_library_file_selected(self, sender, app_data):
+        selected_label = app_data
+        if selected_label not in self.library_file_map:
+            self.last_library_click_label = None
+            self.last_library_click_time = 0.0
+            return
+
+        now = time.monotonic()
+        if (
+            selected_label == self.last_library_click_label
+            and (now - self.last_library_click_time) <= 0.35
+        ):
+            self.last_library_click_label = None
+            self.last_library_click_time = 0.0
+            self.load_selected_library_file()
+            return
+
+        self.last_library_click_label = selected_label
+        self.last_library_click_time = now
+
     def _get_combo_label_for_mode(self, mode):
         return self.backend_labels.get(mode, self.backend_labels["path"])
 
@@ -305,6 +478,17 @@ class DpgMidiPlayerApp:
         dpg.configure_item("startup_warning", color=(225, 132, 104) if warning_text else (196, 198, 204))
         dpg.configure_item("startup_bass_button", enabled=bool(self.controller.bass_engine_cls))
         dpg.set_value("backend_hint_text", self._build_audio_hint_text())
+        viewport_w = dpg.get_viewport_client_width() or 900
+        viewport_h = dpg.get_viewport_client_height() or 700
+        startup_w = 560
+        startup_h = 360
+        dpg.set_item_pos(
+            "startup_window",
+            [
+                max(20, int((viewport_w - startup_w) * 0.5)),
+                max(20, int((viewport_h - startup_h) * 0.5)),
+            ],
+        )
         dpg.configure_item("startup_window", show=True)
 
     def _finalize_startup_choice(self, mode, resolution):
@@ -429,30 +613,28 @@ class DpgMidiPlayerApp:
 
         with dpg.window(tag="main_window", label="LWMP", no_title_bar=True, no_scrollbar=True, no_scroll_with_mouse=True):
             with dpg.group(tag="app_shell"):
-                with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp, borders_innerV=False):
-                    dpg.add_table_column(init_width_or_weight=1.15)
-                    dpg.add_table_column(init_width_or_weight=1.0)
-                    with dpg.table_row():
-                        with dpg.table_cell():
-                            dpg.add_text("Lightweight MIDI Player", tag="title_text")
-                            dpg.add_text(
-                                "DearPyGUI shell for playback, parsing, and piano roll control.",
-                                tag="subtitle_text",
-                            )
-                        with dpg.table_cell():
-                            with dpg.group(horizontal=True):
-                                dpg.add_button(tag="load_button", label="Load MIDI", callback=self.on_load_unload, width=118, height=30)
-                                dpg.add_button(tag="play_button", label="Play", callback=self.toggle_play_pause, enabled=False, show=False, width=90, height=30)
-                                dpg.add_button(tag="stop_button", label="Stop", callback=self.stop_playback, enabled=False, show=False, width=90, height=30)
-                                dpg.add_button(
-                                    tag="piano_roll_button",
-                                    label="Piano Roll",
-                                    callback=self.show_piano_roll_dialog,
-                                    enabled=False,
-                                    show=False,
-                                    width=114,
-                                    height=30,
-                                )
+                with dpg.group(horizontal=True):
+                    dpg.add_text("Lightweight MIDI Player", tag="title_text")
+                    dpg.add_spacer(width=18)
+                    dpg.add_button(
+                        tag="library_button",
+                        label="MIDI Library",
+                        callback=self.show_library_window,
+                        width=112,
+                        height=30,
+                    )
+                    dpg.add_button(tag="load_button", label="Load MIDI", callback=self.on_load_unload, width=118, height=30)
+                    dpg.add_button(tag="play_button", label="Play", callback=self.toggle_play_pause, enabled=False, show=False, width=90, height=30)
+                    dpg.add_button(tag="stop_button", label="Stop", callback=self.stop_playback, enabled=False, show=False, width=90, height=30)
+                    dpg.add_button(
+                        tag="piano_roll_button",
+                        label="Piano Roll",
+                        callback=self.show_piano_roll_dialog,
+                        enabled=False,
+                        show=False,
+                        width=114,
+                        height=30,
+                    )
 
                 dpg.add_separator()
 
@@ -469,6 +651,15 @@ class DpgMidiPlayerApp:
                                 wrap=470,
                                 color=(196, 198, 204),
                             )
+                            with dpg.group(tag="parse_progress_group", show=False):
+                                dpg.add_text("Parsing progress", color=(160, 166, 178))
+                                dpg.add_progress_bar(
+                                    tag="parse_progress_bar",
+                                    default_value=0.0,
+                                    width=-1,
+                                    overlay="0%",
+                                )
+                                dpg.add_text("", tag="parse_progress_text", wrap=470, color=(160, 166, 178))
                             with dpg.group(horizontal=True):
                                 dpg.add_text("Position", color=(160, 166, 178))
                                 dpg.add_text("00:00 / 00:00", tag="time_text")
@@ -625,181 +816,240 @@ class DpgMidiPlayerApp:
                         height=30,
                     )
 
-            with dpg.window(
-                tag="loading_window",
-                label="Loading MIDI",
-                modal=True,
-                show=False,
-                no_resize=True,
-                no_collapse=True,
-                width=420,
-                height=120,
-            ):
-                dpg.add_text("Initializing...", tag="loading_label")
-                dpg.add_progress_bar(tag="loading_progress", default_value=0.0, width=-1, overlay="0%")
+        with dpg.window(
+            tag="loading_window",
+            label="Loading MIDI",
+            modal=True,
+            show=False,
+            no_resize=True,
+            no_collapse=True,
+            width=420,
+            height=120,
+        ):
+            dpg.add_text("Initializing...", tag="loading_label")
+            dpg.add_progress_bar(tag="loading_progress", default_value=0.0, width=-1, overlay="0%")
 
-            with dpg.file_dialog(
-                tag="midi_file_dialog",
-                show=False,
-                modal=True,
-                directory_selector=False,
-                width=760,
-                height=460,
-                callback=self._on_midi_dialog_selected,
-            ):
-                dpg.add_file_extension(".mid", color=(120, 200, 255, 255))
-                dpg.add_file_extension(".*")
+        with dpg.file_dialog(
+            tag="midi_file_dialog",
+            show=False,
+            modal=True,
+            directory_selector=False,
+            width=760,
+            height=460,
+            callback=self._on_midi_dialog_selected,
+        ):
+            dpg.add_file_extension(".mid", color=(120, 200, 255, 255))
+            dpg.add_file_extension(".*")
 
-            with dpg.file_dialog(
-                tag="soundfont_file_dialog",
-                show=False,
-                modal=True,
-                directory_selector=False,
-                width=760,
-                height=460,
-                callback=self._on_soundfont_dialog_selected,
-                cancel_callback=lambda: self._on_soundfont_dialog_cancel(),
-            ):
-                dpg.add_file_extension(".sf2", color=(120, 200, 255, 255))
-                dpg.add_file_extension(".sfz", color=(120, 200, 255, 255))
-                dpg.add_file_extension(".*")
+        with dpg.file_dialog(
+            tag="soundfont_file_dialog",
+            show=False,
+            modal=True,
+            directory_selector=False,
+            width=760,
+            height=460,
+            callback=self._on_soundfont_dialog_selected,
+            cancel_callback=lambda: self._on_soundfont_dialog_cancel(),
+        ):
+            dpg.add_file_extension(".sf2", color=(120, 200, 255, 255))
+            dpg.add_file_extension(".sfz", color=(120, 200, 255, 255))
+            dpg.add_file_extension(".*")
 
-            with dpg.window(
-                tag="message_window",
-                label="Message",
-                modal=True,
-                show=False,
-                no_resize=True,
-                no_collapse=True,
-                width=460,
-                height=180,
-            ):
-                dpg.add_text("", tag="message_title", color=(223, 177, 103))
-                dpg.add_spacer(height=8)
-                dpg.add_text("", tag="message_body", wrap=420)
-                dpg.add_spacer(height=12)
-                dpg.add_button(
-                    label="OK",
-                    width=100,
-                    height=30,
-                    callback=lambda: dpg.configure_item("message_window", show=False),
+        with dpg.file_dialog(
+            tag="library_directory_dialog",
+            show=False,
+            modal=True,
+            directory_selector=True,
+            width=760,
+            height=460,
+            callback=self._on_directory_dialog_selected,
+            cancel_callback=lambda: self._on_directory_dialog_cancel(),
+        ):
+            dpg.add_file_extension(".*")
+
+        with dpg.window(
+            tag="message_window",
+            label="Message",
+            modal=True,
+            show=False,
+            no_resize=True,
+            no_collapse=True,
+            width=460,
+            height=180,
+        ):
+            dpg.add_text("", tag="message_title", color=(223, 177, 103))
+            dpg.add_spacer(height=8)
+            dpg.add_text("", tag="message_body", wrap=420)
+            dpg.add_spacer(height=12)
+            dpg.add_button(
+                label="OK",
+                width=100,
+                height=30,
+                callback=lambda: dpg.configure_item("message_window", show=False),
+            )
+
+        with dpg.window(
+            tag="library_window",
+            label="MIDI Library",
+            modal=False,
+            show=False,
+            no_collapse=True,
+            width=720,
+            height=520,
+        ):
+            dpg.add_text("Library Folders", color=(223, 177, 103))
+            with dpg.group(horizontal=True):
+                dpg.add_input_text(
+                    tag="library_path_input",
+                    hint="Add a MIDI folder path",
+                    width=-70,
+                    on_enter=True,
+                    callback=self.add_library_directory_from_input,
                 )
+                dpg.add_button(label="Add", width=56, height=28, callback=self.add_library_directory_from_input)
+            dpg.add_combo(
+                items=["No folders configured"],
+                default_value="No folders configured",
+                tag="library_directory_combo",
+                width=-1,
+            )
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Remove Folder", width=120, height=28, callback=self.remove_selected_library_directory)
+                dpg.add_button(label="Refresh Files", width=110, height=28, callback=self.refresh_library_files)
+                dpg.add_text("Files: 0", tag="library_count_text", color=(160, 166, 178))
+            dpg.add_separator()
+            dpg.add_text("MIDI Files", color=(223, 177, 103))
+            dpg.add_input_text(
+                tag="library_search_input",
+                hint="Search MIDI library",
+                width=-1,
+                callback=self.refresh_library_files,
+            )
+            dpg.add_listbox(
+                tag="library_file_list",
+                items=["No MIDI files found"],
+                width=-1,
+                num_items=14,
+                callback=self.on_library_file_selected,
+            )
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Load Selected", width=140, height=30, callback=self.load_selected_library_file)
 
-            with dpg.window(
-                tag="piano_roll_window",
-                label="Piano Roll Settings",
-                modal=True,
-                show=False,
-                no_resize=True,
-                no_collapse=True,
-                width=320,
-                height=220,
-            ):
-                dpg.add_text("Select Resolution")
-                dpg.add_combo(
-                    items=[f"{w} x {h}" for w, h in self.available_resolutions],
-                    default_value=f"{self.recommended_piano_roll_res[0]} x {self.recommended_piano_roll_res[1]}",
-                    tag="piano_roll_resolution",
-                    width=220,
-                )
-                dpg.add_button(label="Launch Piano Roll", callback=self.launch_selected_piano_roll)
-                dpg.add_button(label="Close", callback=lambda: dpg.configure_item("piano_roll_window", show=False))
+        with dpg.window(
+            tag="piano_roll_window",
+            label="Piano Roll Settings",
+            modal=True,
+            show=False,
+            no_resize=True,
+            no_collapse=True,
+            width=320,
+            height=220,
+        ):
+            dpg.add_text("Select Resolution")
+            dpg.add_combo(
+                items=[f"{w} x {h}" for w, h in self.available_resolutions],
+                default_value=f"{self.recommended_piano_roll_res[0]} x {self.recommended_piano_roll_res[1]}",
+                tag="piano_roll_resolution",
+                width=220,
+            )
+            dpg.add_button(label="Launch Piano Roll", callback=self.launch_selected_piano_roll)
+            dpg.add_button(label="Close", callback=lambda: dpg.configure_item("piano_roll_window", show=False))
 
-            with dpg.window(
-                tag="customize_window",
-                label="Customize UI",
-                modal=True,
-                show=False,
-                no_resize=True,
-                no_collapse=True,
-                width=640,
-                height=620,
-            ):
-                dpg.add_text("Visibility", color=(223, 177, 103))
-                with dpg.group(horizontal=True):
-                    dpg.add_checkbox(label="Subtitle", tag="custom_show_subtitle")
-                    dpg.add_checkbox(label="Audio Panel", tag="custom_show_audio_panel")
-                    dpg.add_checkbox(label="Performance", tag="custom_show_performance_panel")
-                with dpg.group(horizontal=True):
-                    dpg.add_checkbox(label="Status Line", tag="custom_show_status_line")
-                    dpg.add_checkbox(label="Backend Hint", tag="custom_show_backend_hint")
-                    dpg.add_checkbox(label="NPS Graph", tag="custom_show_nps_graph")
-                    dpg.add_checkbox(label="CPU Graph", tag="custom_show_cpu_graph")
+        with dpg.window(
+            tag="customize_window",
+            label="Customize UI",
+            modal=True,
+            show=False,
+            no_resize=True,
+            no_collapse=True,
+            width=640,
+            height=620,
+        ):
+            dpg.add_text("Visibility", color=(223, 177, 103))
+            with dpg.group(horizontal=True):
+                dpg.add_checkbox(label="Subtitle", tag="custom_show_subtitle")
+                dpg.add_checkbox(label="Audio Panel", tag="custom_show_audio_panel")
+                dpg.add_checkbox(label="Performance", tag="custom_show_performance_panel")
+            with dpg.group(horizontal=True):
+                dpg.add_checkbox(label="Status Line", tag="custom_show_status_line")
+                dpg.add_checkbox(label="Backend Hint", tag="custom_show_backend_hint")
+                dpg.add_checkbox(label="NPS Graph", tag="custom_show_nps_graph")
+                dpg.add_checkbox(label="CPU Graph", tag="custom_show_cpu_graph")
 
-                dpg.add_separator()
-                dpg.add_text("Master Theme Color", color=(223, 177, 103))
-                dpg.add_color_edit(label="Theme Seed", tag="custom_theme_seed", no_alpha=True, width=-1)
-                dpg.add_button(label="Generate Palette From Theme Color", callback=self.apply_theme_seed, width=-1, height=32)
+            dpg.add_separator()
+            dpg.add_text("Master Theme Color", color=(223, 177, 103))
+            dpg.add_color_edit(label="Theme Seed", tag="custom_theme_seed", no_alpha=True, width=-1)
+            dpg.add_button(label="Generate Palette From Theme Color", callback=self.apply_theme_seed, width=-1, height=32)
 
-                dpg.add_separator()
-                dpg.add_text("Colors", color=(223, 177, 103))
-                with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp):
-                    dpg.add_table_column(init_width_or_weight=1.0)
-                    dpg.add_table_column(init_width_or_weight=1.0)
-                    with dpg.table_row():
-                        with dpg.table_cell():
-                            dpg.add_color_edit(label="Window BG", tag="custom_window_bg", no_alpha=True, width=-1)
-                            dpg.add_color_edit(label="Child BG", tag="custom_child_bg", no_alpha=True, width=-1)
-                            dpg.add_color_edit(label="Frame BG", tag="custom_frame_bg", no_alpha=True, width=-1)
-                            dpg.add_color_edit(label="Frame Hover", tag="custom_frame_bg_hovered", no_alpha=True, width=-1)
-                            dpg.add_color_edit(label="Frame Active", tag="custom_frame_bg_active", no_alpha=True, width=-1)
-                            dpg.add_color_edit(label="Button", tag="custom_button", no_alpha=True, width=-1)
-                        with dpg.table_cell():
-                            dpg.add_color_edit(label="Button Hover", tag="custom_button_hovered", no_alpha=True, width=-1)
-                            dpg.add_color_edit(label="Button Active", tag="custom_button_active", no_alpha=True, width=-1)
-                            dpg.add_color_edit(label="Accent Text", tag="custom_accent_text", no_alpha=True, width=-1)
-                            dpg.add_color_edit(label="Muted Text", tag="custom_muted_text", no_alpha=True, width=-1)
-                            dpg.add_color_edit(label="Body Text", tag="custom_body_text", no_alpha=True, width=-1)
+            dpg.add_separator()
+            dpg.add_text("Colors", color=(223, 177, 103))
+            with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp):
+                dpg.add_table_column(init_width_or_weight=1.0)
+                dpg.add_table_column(init_width_or_weight=1.0)
+                with dpg.table_row():
+                    with dpg.table_cell():
+                        dpg.add_color_edit(label="Window BG", tag="custom_window_bg", no_alpha=True, width=-1)
+                        dpg.add_color_edit(label="Child BG", tag="custom_child_bg", no_alpha=True, width=-1)
+                        dpg.add_color_edit(label="Frame BG", tag="custom_frame_bg", no_alpha=True, width=-1)
+                        dpg.add_color_edit(label="Frame Hover", tag="custom_frame_bg_hovered", no_alpha=True, width=-1)
+                        dpg.add_color_edit(label="Frame Active", tag="custom_frame_bg_active", no_alpha=True, width=-1)
+                        dpg.add_color_edit(label="Button", tag="custom_button", no_alpha=True, width=-1)
+                    with dpg.table_cell():
+                        dpg.add_color_edit(label="Button Hover", tag="custom_button_hovered", no_alpha=True, width=-1)
+                        dpg.add_color_edit(label="Button Active", tag="custom_button_active", no_alpha=True, width=-1)
+                        dpg.add_color_edit(label="Accent Text", tag="custom_accent_text", no_alpha=True, width=-1)
+                        dpg.add_color_edit(label="Muted Text", tag="custom_muted_text", no_alpha=True, width=-1)
+                        dpg.add_color_edit(label="Body Text", tag="custom_body_text", no_alpha=True, width=-1)
 
-                dpg.add_separator()
-                with dpg.group(horizontal=True):
-                    dpg.add_button(label="Save", callback=self.save_customize_settings, width=140, height=32)
-                    dpg.add_button(label="Close", callback=lambda: dpg.configure_item("customize_window", show=False), width=140, height=32)
+            dpg.add_separator()
+            with dpg.group(horizontal=True):
+                dpg.add_button(label="Save", callback=self.save_customize_settings, width=140, height=32)
+                dpg.add_button(label="Close", callback=lambda: dpg.configure_item("customize_window", show=False), width=140, height=32)
 
-            with dpg.window(
-                tag="startup_window",
-                label="Startup Setup",
-                modal=True,
-                show=False,
-                no_resize=True,
-                no_collapse=True,
-                no_close=True,
-                width=560,
-                height=360,
-            ):
-                dpg.add_text("Choose Audio Mode", color=(223, 177, 103))
-                dpg.add_spacer(height=4)
-                dpg.add_text(
-                    "Select the backend before loading a MIDI. You can still change it later from the Audio panel.",
-                    wrap=520,
-                    color=(196, 198, 204),
-                )
-                dpg.add_spacer(height=10)
-                dpg.add_text("", tag="startup_summary", wrap=520, color=(160, 196, 255))
-                dpg.add_spacer(height=10)
-                dpg.add_text("", tag="startup_warning", wrap=520)
-                dpg.add_spacer(height=14)
-                dpg.add_button(
-                    tag="startup_bass_button",
-                    label="Use BASSMIDI (Buffered)",
-                    callback=self.use_bassmidi_startup,
-                    width=-1,
-                    height=34,
-                )
-                dpg.add_spacer(height=6)
-                dpg.add_button(
-                    label="Use Recommended Settings",
-                    callback=self.use_recommended_startup,
-                    width=-1,
-                    height=34,
-                )
-                dpg.add_spacer(height=6)
-                dpg.add_button(
-                    label="Use Defaults (System PATH, 720p)",
-                    callback=self.use_default_startup,
-                    width=-1,
-                    height=34,
-                )
+        with dpg.window(
+            tag="startup_window",
+            label="Startup Setup",
+            modal=True,
+            show=False,
+            no_resize=True,
+            no_collapse=True,
+            no_close=True,
+            width=560,
+            height=360,
+        ):
+            dpg.add_text("Choose Audio Mode", color=(223, 177, 103))
+            dpg.add_spacer(height=4)
+            dpg.add_text(
+                "Select the backend before loading a MIDI. You can still change it later from the Audio panel.",
+                wrap=520,
+                color=(196, 198, 204),
+            )
+            dpg.add_spacer(height=10)
+            dpg.add_text("", tag="startup_summary", wrap=520, color=(160, 196, 255))
+            dpg.add_spacer(height=10)
+            dpg.add_text("", tag="startup_warning", wrap=520)
+            dpg.add_spacer(height=14)
+            dpg.add_button(
+                tag="startup_bass_button",
+                label="Use BASSMIDI (Buffered)",
+                callback=self.use_bassmidi_startup,
+                width=-1,
+                height=34,
+            )
+            dpg.add_spacer(height=6)
+            dpg.add_button(
+                label="Use Recommended Settings",
+                callback=self.use_recommended_startup,
+                width=-1,
+                height=34,
+            )
+            dpg.add_spacer(height=6)
+            dpg.add_button(
+                label="Use Defaults (System PATH, 720p)",
+                callback=self.use_default_startup,
+                width=-1,
+                height=34,
+            )
 
         dpg.setup_dearpygui()
         dpg.show_viewport()
@@ -879,6 +1129,23 @@ class DpgMidiPlayerApp:
         if dpg.does_item_exist("message_window"):
             dpg.configure_item("message_window", label=title, show=True)
 
+    def _set_parse_progress_visible(self, visible):
+        if dpg.does_item_exist("parse_progress_group"):
+            dpg.configure_item("parse_progress_group", show=bool(visible))
+
+    def _update_parse_progress(self, fraction, overlay, detail):
+        if dpg.does_item_exist("parse_progress_bar"):
+            dpg.set_value("parse_progress_bar", max(0.0, min(float(fraction), 1.0)))
+            dpg.configure_item("parse_progress_bar", overlay=str(overlay))
+        if dpg.does_item_exist("parse_progress_text"):
+            dpg.set_value("parse_progress_text", detail)
+
+    def _reset_parse_progress(self):
+        self.loading_visible = False
+        self.loading_total_events = 0
+        self._update_parse_progress(0.0, "0%", "")
+        self._set_parse_progress_visible(False)
+
     def _message_info(self, title, text):
         self._show_message_window(title, text)
 
@@ -903,14 +1170,16 @@ class DpgMidiPlayerApp:
     def _on_midi_dialog_selected(self, sender, app_data):
         filepath = self._extract_dialog_path(app_data)
         if filepath:
-            self._begin_load_file(filepath)
+            dpg.configure_item("midi_file_dialog", show=False)
+            self._queue_ui(self._begin_load_file, filepath)
 
     def _on_soundfont_dialog_selected(self, sender, app_data):
         sf_path = self._extract_dialog_path(app_data)
         callback = self.pending_soundfont_callback
         self.pending_soundfont_callback = None
         if callback and sf_path:
-            callback(sf_path)
+            dpg.configure_item("soundfont_file_dialog", show=False)
+            self._queue_ui(callback, sf_path)
 
     def _on_soundfont_dialog_cancel(self):
         callback = self.pending_soundfont_callback
@@ -1137,7 +1406,18 @@ class DpgMidiPlayerApp:
         else:
             self.unload_file()
 
-    def load_file(self):
+    def _prepare_for_new_midi_load(self):
+        if self.piano_roll and self.piano_roll.app_running.is_set():
+            self.was_piano_roll_open_before_unload = True
+            self.piano_roll.app_running.clear()
+            if self.piano_roll_thread and self.piano_roll_thread.is_alive():
+                self.piano_roll_thread.join(0.2)
+            self.piano_roll = None
+            self.piano_roll_thread = None
+        else:
+            self.was_piano_roll_open_before_unload = False
+
+    def load_file(self, filepath=None):
         if not self.startup_ready:
             self._message_warning("Startup Required", "Choose a startup audio mode before loading a MIDI.")
             return
@@ -1147,6 +1427,7 @@ class DpgMidiPlayerApp:
             self.controller.paused = False
             dpg.configure_item("play_button", label="Play")
 
+        self._prepare_for_new_midi_load()
         self.reset_playback_state()
         self.controller.parsed_midi = None
         self.controller.total_song_notes = 0
@@ -1163,17 +1444,25 @@ class DpgMidiPlayerApp:
             self._message_warning("Busy", "Already parsing a file. Please wait.")
             return
 
-        self._open_midi_file_dialog()
+        if filepath:
+            self._begin_load_file(filepath)
+        else:
+            self._open_midi_file_dialog()
 
     def _begin_load_file(self, filepath):
         self._update_now_playing_header(os.path.basename(filepath))
         dpg.set_value("status_text", f"Parsing {os.path.basename(filepath)}...")
         dpg.configure_item("load_button", enabled=False)
-        dpg.set_value("loading_label", "Initializing...")
-        dpg.set_value("loading_progress", 0.0)
-        dpg.configure_item("loading_progress", overlay="0%")
-        dpg.configure_item("loading_window", show=True)
+        self.loading_total_events = 0
+        self.loading_started_at = time.monotonic()
+        self._set_parse_progress_visible(True)
+        self._update_parse_progress(0.0, "Counting...", "Counting events...")
         self.loading_visible = True
+        self._queue_ui(self._start_parse_job, filepath)
+
+    def _start_parse_job(self, filepath):
+        if not self.loading_visible:
+            return
 
         try:
             self.controller.start_parse_job(
@@ -1184,8 +1473,7 @@ class DpgMidiPlayerApp:
             )
         except Exception as e:
             self.controller.clear_parse_job()
-            self.loading_visible = False
-            dpg.configure_item("loading_window", show=False)
+            self._reset_parse_progress()
             self._message_error("Error", f"Failed to start parser: {e}")
             self.pending_midi_name = None
             self._update_now_playing_header()
@@ -1193,12 +1481,17 @@ class DpgMidiPlayerApp:
             dpg.configure_item("load_button", enabled=True)
 
     def _poll_parser(self):
+        if self.loading_visible and self.loading_total_events <= 0:
+            pulse = (time.monotonic() - self.loading_started_at) % 1.0
+            pulse_value = 0.15 + (0.7 * pulse)
+            self._update_parse_progress(pulse_value, "Counting...", "Counting events...")
         try:
             for status, payload in self.controller.poll_parser_messages():
                 event = self.controller.handle_parser_message(status, payload, start_padding=3.0, end_padding=3.0)
                 if event["kind"] == "total_events":
+                    self.loading_total_events = int(event["total_events"] or 0)
                     if self.loading_visible:
-                        dpg.set_value("loading_label", f"Found {event['total_events']:,} events. Parsing...")
+                        self._update_parse_progress(0.0, "0.0%", f"Found {event['total_events']:,} events. Parsing...")
                 elif event["kind"] == "progress":
                     if self.loading_visible:
                         progress_payload = event["payload"]
@@ -1207,15 +1500,16 @@ class DpgMidiPlayerApp:
                             total = progress_payload.get("total", 1)
                             eta = progress_payload.get("eta", 0)
                             fraction = (current / total) if total > 0 else 0.0
-                            dpg.set_value("loading_progress", fraction)
-                            dpg.configure_item("loading_progress", overlay=f"{fraction * 100:.1f}%")
                             eta_str = f"ETA: {eta:.1f}s" if eta > 0 else "Calculating..."
-                            dpg.set_value("loading_label", f"Parsing... {current:,} / {total:,} events ({eta_str})")
+                            self._update_parse_progress(
+                                fraction,
+                                f"{fraction * 100:.1f}%",
+                                f"Parsing... {current:,} / {total:,} events ({eta_str})",
+                            )
                         else:
-                            dpg.set_value("loading_label", str(progress_payload))
+                            self._update_parse_progress(0.0, "Working...", str(progress_payload))
                 elif event["kind"] == "success":
-                    self.loading_visible = False
-                    dpg.configure_item("loading_window", show=False)
+                    self._reset_parse_progress()
                     self._update_now_playing_header()
                     dpg.set_value("status_text", "Ready to play.")
                     dpg.set_value("time_text", f"00:00 / {self.format_time(self.controller.total_song_duration)}")
@@ -1232,8 +1526,7 @@ class DpgMidiPlayerApp:
                     self.was_piano_roll_open_before_unload = False
                     return
                 else:
-                    self.loading_visible = False
-                    dpg.configure_item("loading_window", show=False)
+                    self._reset_parse_progress()
                     self._message_error("Parse Error", f"Could not load MIDI file: {event['payload']}")
                     self.pending_midi_name = None
                     self._update_now_playing_header()
@@ -1241,8 +1534,7 @@ class DpgMidiPlayerApp:
                     dpg.configure_item("load_button", enabled=True)
                     return
         except Exception as e:
-            self.loading_visible = False
-            dpg.configure_item("loading_window", show=False)
+            self._reset_parse_progress()
             self.controller.clear_parse_job()
             self._message_error("Error", f"Error checking parser status: {e}")
             self.pending_midi_name = None
@@ -1314,6 +1606,7 @@ class DpgMidiPlayerApp:
                 self.playback_thread.join(0.1)
 
         self.controller.unload_midi()
+        self._reset_parse_progress()
         self.reset_playback_state()
         self.pending_midi_name = None
         self._update_now_playing_header()
@@ -1665,6 +1958,17 @@ class DpgMidiPlayerApp:
         if self.piano_roll and self.piano_roll.app_running.is_set():
             self._message_info("Piano Roll", "Piano Roll is already running.")
             return
+        viewport_w = dpg.get_viewport_client_width() or 900
+        viewport_h = dpg.get_viewport_client_height() or 700
+        panel_w = 320
+        panel_h = 220
+        dpg.set_item_pos(
+            "piano_roll_window",
+            [
+                max(20, int((viewport_w - panel_w) * 0.5)),
+                max(20, int((viewport_h - panel_h) * 0.5)),
+            ],
+        )
         dpg.configure_item("piano_roll_window", show=True)
 
     def launch_selected_piano_roll(self):
@@ -1719,7 +2023,8 @@ class DpgMidiPlayerApp:
                     )
                     last_caption_update_time = now
 
-                clock.tick(0)
+                target_fps = 120 if self.controller.playing else 60
+                clock.tick(target_fps)
         except Exception as e:
             traceback.print_exc()
             self._queue_ui(dpg.set_value, "status_text", f"Piano Roll Error: {e}")
