@@ -16,12 +16,16 @@ Just launch build.bat, and all dependencies and compilation happens automaticall
 
 ### For Linux (tested, cython compilation broken as of now!):
 1. Download and install all dependencies:  
-`pip install --no-warn-script-location numpy cython setuptools pyopengl pyopengl_accelerate pygame dearpygui`
+`pip install --no-warn-script-location numpy cython setuptools pyopengl pyopengl_accelerate pygame dearpygui`  
+*If you get an error for externally-managed-environment, include* `--break-system-packages`
 
-2. Compile required Cython files:  
+2. Clone git of repository:  
+`git clone https://github.com/mappazinho/LWMP.git`
+
+4. Compile required Cython files:  
 `python setup.py build_ext --inplace`
 
-3. Launch LWMP:  
+5. Launch LWMP:  
 `python MIDI/midiplayer_dpg.py`
 
 Requires Python 3.11+ for building!
