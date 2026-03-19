@@ -14,7 +14,7 @@ Lightweight MIDI Player for heavy MIDI files/Black MIDI, made with Python and Cy
 ### For Windows
 Just launch build.bat, and all dependencies and compilation happens automatically.  
 
-### For Linux (not tested as of now):
+### For Linux (tested, cython compilation broken as of now!):
 1. Download and install all dependencies:  
 `pip install --no-warn-script-location numpy cython setuptools pyopengl pyopengl_accelerate pygame dearpygui`
 
