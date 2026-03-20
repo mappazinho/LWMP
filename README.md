@@ -1,4 +1,6 @@
 # LWMP
+<img width="1366" height="768" alt="image" src="https://github.com/user-attachments/assets/6bb51848-ef3c-4f3a-bf90-a42beda99e09" />
+
 Lightweight MIDI Player for heavy MIDI files/Black MIDI, made with Python and Cython.
 
 ### Features:
