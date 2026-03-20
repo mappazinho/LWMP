@@ -62,6 +62,7 @@ cdef enum:
     BASS_MIDI_EVENTS_ASYNC = 0x40000000
     
     BASS_UNICODE = 0x80000000
+    BASS_ATTRIB_FREQ = 1
     BASS_ATTRIB_VOL = 2
     BASS_ATTRIB_MIDI_VOICES = 0x12003
 
@@ -154,6 +155,11 @@ cdef class BassMidiEngine:
     cdef public bint buffering_enabled
     cdef public bint debug_mode
     cdef public float volume_level
+    cdef public float playback_speed
+    cdef public int normal_voice_limit
+    cdef public int emergency_voice_limit
+    cdef public int emergency_velocity
+    cdef public bint emergency_recovery_enabled
     
     cdef public HSTREAM midi_stream
     cdef public HSTREAM decode_stream
@@ -174,6 +180,11 @@ cdef class BassMidiEngine:
         self.buffering_enabled = buffering
         self.debug_mode = debug
         self.volume_level = 1.0
+        self.playback_speed = 1.0
+        self.normal_voice_limit = 512
+        self.emergency_voice_limit = 96
+        self.emergency_velocity = 100
+        self.emergency_recovery_enabled = False
         self.midi_stream = 0
         self.decode_stream = 0
         self.playback_stream = 0
@@ -261,18 +272,20 @@ cdef class BassMidiEngine:
             flags = BASS_STREAM_DECODE | BASS_SAMPLE_FLOAT | BASS_MIDI_SINCINTER
             self.decode_stream = self.f.MIDI_StreamCreate(16, flags, 44100)
             if not self.decode_stream: raise RuntimeError(f"Decode Stream Create Failed: {self.f.ErrorGetCode()}")
-            self.f.ChannelSetAttribute(self.decode_stream, BASS_ATTRIB_MIDI_VOICES, 512.0)
+            self.f.ChannelSetAttribute(self.decode_stream, BASS_ATTRIB_MIDI_VOICES, <float>self.normal_voice_limit)
             
             self.playback_stream = self.f.StreamCreate(44100, 2, BASS_SAMPLE_FLOAT, <void*>STREAMPROC_PUSH, NULL)
             if not self.playback_stream: raise RuntimeError(f"Playback Stream Create Failed: {self.f.ErrorGetCode()}")
             self.f.ChannelSetAttribute(self.playback_stream, BASS_ATTRIB_VOL, self.volume_level)
+            self.f.ChannelSetAttribute(self.playback_stream, BASS_ATTRIB_FREQ, 44100.0 * self.playback_speed)
             self.midi_stream = self.playback_stream 
         else:
             flags = BASS_STREAM_AUTOFREE | BASS_SAMPLE_FLOAT | BASS_MIDI_SINCINTER | BASS_MIDI_EVENTS_ASYNC
             self.midi_stream = self.f.MIDI_StreamCreate(16, flags, 44100)
             if not self.midi_stream: raise RuntimeError(f"MIDI Stream Create Failed: {self.f.ErrorGetCode()}")
-            self.f.ChannelSetAttribute(self.midi_stream, BASS_ATTRIB_MIDI_VOICES, 512.0)
+            self.f.ChannelSetAttribute(self.midi_stream, BASS_ATTRIB_MIDI_VOICES, <float>self.normal_voice_limit)
             self.f.ChannelSetAttribute(self.midi_stream, BASS_ATTRIB_VOL, self.volume_level)
+            self.f.ChannelSetAttribute(self.midi_stream, BASS_ATTRIB_FREQ, 44100.0 * self.playback_speed)
 
         if soundfont_path:
             self.load_soundfont(self.decode_stream if self.buffering_enabled else self.midi_stream, soundfont_path)
@@ -393,6 +406,16 @@ cdef class BassMidiEngine:
     cpdef play(self):
         if self.midi_stream: self.f.ChannelPlay(self.midi_stream, False)
 
+    cpdef set_speed(self, float speed):
+        if speed < 0.1:
+            speed = 0.1
+        elif speed > 4.0:
+            speed = 4.0
+        self.playback_speed = speed
+        cdef HSTREAM target = self.playback_stream if self.buffering_enabled else self.midi_stream
+        if target:
+            self.f.ChannelSetAttribute(target, BASS_ATTRIB_FREQ, 44100.0 * speed)
+
     cpdef stop(self):
         if self.midi_stream:
             self.f.ChannelStop(self.midi_stream)
@@ -405,9 +428,18 @@ cdef class BassMidiEngine:
         self.send_all_notes_off()
 
     cpdef set_voices(self, int voices):
+        self.normal_voice_limit = voices
         cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
+        cdef int effective_voices = self.emergency_voice_limit if self.emergency_recovery_enabled else self.normal_voice_limit
         if target:
-             self.f.ChannelSetAttribute(target, BASS_ATTRIB_MIDI_VOICES, <float>voices)
+             self.f.ChannelSetAttribute(target, BASS_ATTRIB_MIDI_VOICES, <float>effective_voices)
+
+    cpdef set_emergency_recovery(self, bint enabled):
+        self.emergency_recovery_enabled = enabled
+        cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
+        cdef int effective_voices = self.emergency_voice_limit if enabled else self.normal_voice_limit
+        if target:
+            self.f.ChannelSetAttribute(target, BASS_ATTRIB_MIDI_VOICES, <float>effective_voices)
 
     cpdef load_soundfont(self, HSTREAM stream, str path):
         if self.debug_mode: print(f"[Cython] load_soundfont called for path: {path}")
@@ -474,6 +506,11 @@ cdef class BassMidiEngine:
         cdef uint8_t raw_cc[3]
         
         if cmd == 0x90 or cmd == 0x80:
+            if cmd == 0x90 and self.buffering_enabled and self.emergency_recovery_enabled:
+                d1 = param & 0xFF
+                d2 = (param >> 8) & 0xFF
+                if d2 > 0:
+                    param = d1 | (<uint32_t>self.emergency_velocity << 8)
             ok = self.f.MIDI_StreamEvent(target, chan, BASS_MIDI_EVENT_NOTE, param)
         elif cmd == 0xE0:
             d1 = param & 0xFF

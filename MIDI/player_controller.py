@@ -28,6 +28,8 @@ class PlayerController:
         self.parsed_midi = None
         self.total_song_notes = 0
         self.total_song_duration = 0.0
+        self.max_nps = 0
+        self.max_nps_spikes = []
         self.active_midi_backend = None
 
         self.playing = False
@@ -40,6 +42,7 @@ class PlayerController:
         self.current_lag = 0.0
         self.buffered_playback_start_offset = 0.0
         self.current_playback_time_for_threads = 0.0
+        self.playback_speed = 1.0
 
         self.nps_event_timestamps = deque()
         self.last_nps_graph_update_time = 0.0
@@ -199,7 +202,59 @@ class PlayerController:
 
         self.total_song_notes = len(self.parsed_midi.note_events_for_playback)
         self.total_song_duration = self.parsed_midi.total_duration_sec
+        self.max_nps, self.max_nps_spikes = self._compute_nps_stats(self.parsed_midi.note_events_for_playback)
         return self.parsed_midi
+
+    def _compute_nps_stats(self, note_events, top_k=5, min_separation=0.75):
+        if note_events is None or len(note_events) == 0:
+            return 0, []
+
+        on_times = note_events["on_time"]
+        left = 0
+        max_count = 0
+        counts = [0] * len(on_times)
+
+        for right in range(len(on_times)):
+            while on_times[right] - on_times[left] > 1.0:
+                left += 1
+            window_count = right - left + 1
+            counts[right] = window_count
+            if window_count > max_count:
+                max_count = window_count
+
+        candidates = []
+        i = 0
+        n = len(counts)
+        while i < n:
+            plateau_start = i
+            plateau_value = counts[i]
+            while i + 1 < n and counts[i + 1] == plateau_value:
+                i += 1
+            plateau_end = i
+
+            left_value = counts[plateau_start - 1] if plateau_start > 0 else -1
+            right_value = counts[plateau_end + 1] if plateau_end + 1 < n else -1
+            is_peak = (plateau_value > left_value and plateau_value >= right_value) or (
+                plateau_value >= left_value and plateau_value > right_value
+            )
+            if is_peak and plateau_value > 0:
+                center_index = (plateau_start + plateau_end) // 2
+                candidates.append((float(on_times[center_index]), int(plateau_value)))
+            i += 1
+
+        if not candidates:
+            max_index = max(range(len(counts)), key=lambda idx: counts[idx])
+            candidates = [(float(on_times[max_index]), int(counts[max_index]))]
+
+        selected = []
+        for spike_time, spike_value in sorted(candidates, key=lambda item: (-item[1], item[0])):
+            if all(abs(spike_time - existing_time) >= min_separation for existing_time, _ in selected):
+                selected.append((spike_time, spike_value))
+                if len(selected) >= top_k:
+                    break
+
+        selected.sort(key=lambda item: item[0])
+        return max_count, selected
 
     def handle_parser_message(self, status, payload, start_padding=3.0, end_padding=3.0):
         if status == "total_events":
@@ -239,7 +294,7 @@ class PlayerController:
             self.reset_playback_state()
         self.playing = True
         self.paused = False
-        self.playback_start_time = time.monotonic() - current_time
+        self.playback_start_time = time.monotonic() - (current_time / max(self.playback_speed, 0.01))
         self.total_paused_duration = 0.0
         self.paused_at_time = 0.0
 
@@ -272,6 +327,8 @@ class PlayerController:
         self.parsed_midi = None
         self.total_song_notes = 0
         self.total_song_duration = 0.0
+        self.max_nps = 0
+        self.max_nps_spikes = []
 
     def begin_seek(self):
         self.is_seeking = True
@@ -333,13 +390,31 @@ class PlayerController:
             return self.buffered_playback_start_offset
 
         if self.playing and not self.paused:
-            ideal_time = time.monotonic() - self.playback_start_time - self.total_paused_duration
+            ideal_time = (time.monotonic() - self.playback_start_time - self.total_paused_duration) * self.playback_speed
             return ideal_time - self.current_lag
         if self.playing and self.paused:
             if self.paused_at_time > 0:
-                return self.paused_at_time - self.playback_start_time - self.total_paused_duration
+                return (self.paused_at_time - self.playback_start_time - self.total_paused_duration) * self.playback_speed
             return self.last_processed_event_time
         return self.current_playback_time_for_threads
+
+    def set_playback_speed(self, speed):
+        new_speed = max(0.1, min(float(speed), 4.0))
+        current_time = self.get_current_playback_time()
+        self.playback_speed = new_speed
+
+        if self.active_midi_backend and hasattr(self.active_midi_backend, "set_speed"):
+            self.active_midi_backend.set_speed(new_speed)
+
+        if self.active_midi_backend and getattr(self.active_midi_backend, "buffering_enabled", False):
+            return current_time
+
+        now = time.monotonic()
+        if self.playing:
+            self.playback_start_time = now - (current_time / max(self.playback_speed, 0.01)) - self.total_paused_duration
+            if self.paused:
+                self.paused_at_time = now
+        return current_time
 
     def shutdown(self):
         self.playing = False

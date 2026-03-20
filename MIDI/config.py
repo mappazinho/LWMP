@@ -17,6 +17,7 @@ DEFAULT_CONFIG = {
         "show_guide_line": True,
         "show_glow": False,
         "show_bloom": False,
+        "show_spike_bloom": True,
         "show_key_press_glow": True,
         "show_key_light_fade": False,
         "seconds_before_cursor": 3.0,
@@ -29,9 +30,13 @@ DEFAULT_CONFIG = {
     "audio": {
         "midi_backend": "omnimidi",
         "omnimidi_load_preference": "unset",
-        "soundfont_path": None
+        "soundfont_path": None,
+        "volume": 0.5,
+        "voices": 512,
+        "speed": 1.0
     },
     "gui": {
+        "startup_completed": False,
         "show_subtitle": True,
         "show_audio_panel": True,
         "show_performance_panel": True,

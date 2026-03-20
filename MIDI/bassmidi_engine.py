@@ -16,6 +16,7 @@ BASS_DEVICE_FREQ = 1024
 BASS_STREAM_AUTOFREE = 0x40000
 BASS_STREAM_DECODE = 0x200000
 BASS_SAMPLE_FLOAT = 0x100
+BASS_ATTRIB_FREQ = 1
 BASS_ATTRIB_VOL = 2
 BASS_ATTRIB_MIDI_VOICES = 0x12003
 BASS_MIDI_DECAYEND = 0x1000
@@ -140,6 +141,11 @@ class BassMidiEngine:
         self.debug_mode = bool(debug)
         self.total_bytes_pushed = 0
         self.volume_level = 1.0
+        self.playback_speed = 1.0
+        self.normal_voice_limit = 512
+        self.emergency_voice_limit = 96
+        self.emergency_velocity = 100
+        self.emergency_recovery_enabled = False
         self.soundfont_preset = -1
         self.soundfont_bank = 0
         
@@ -169,6 +175,7 @@ class BassMidiEngine:
             if not self.playback_stream:
                 print(f"Playback Stream Create Failed: {bass.BASS_ErrorGetCode()}")
                 return
+            bass.BASS_ChannelSetAttribute(self.decode_stream, BASS_ATTRIB_MIDI_VOICES, ctypes.c_float(float(self.normal_voice_limit)))
             bass.BASS_ChannelSetAttribute(self.playback_stream, BASS_ATTRIB_VOL, ctypes.c_float(self.volume_level))
             
             self.midi_stream = self.playback_stream
@@ -178,6 +185,7 @@ class BassMidiEngine:
             if not self.midi_stream:
                 print(f"MIDI Stream Create Failed: {bass.BASS_ErrorGetCode()}")
                 return
+            bass.BASS_ChannelSetAttribute(self.midi_stream, BASS_ATTRIB_MIDI_VOICES, ctypes.c_float(float(self.normal_voice_limit)))
             bass.BASS_ChannelSetAttribute(self.midi_stream, BASS_ATTRIB_VOL, ctypes.c_float(self.volume_level))
 
         target = self.decode_stream if self.buffering_enabled else self.midi_stream
@@ -235,6 +243,11 @@ class BassMidiEngine:
         cmd = status & 0xF0
         
         if cmd == 0x90 or cmd == 0x80:
+            if cmd == 0x90 and self.buffering_enabled and self.emergency_recovery_enabled:
+                pitch = param & 0xFF
+                velocity = (param >> 8) & 0xFF
+                if velocity > 0:
+                    param = pitch | (int(self.emergency_velocity) << 8)
             bassmidi.BASS_MIDI_StreamEvent(target, chan, BASS_MIDI_EVENT_NOTE, param)
         elif cmd == 0xE0:
             d1 = param & 0xFF
@@ -346,7 +359,26 @@ class BassMidiEngine:
         if target:
             bass.BASS_ChannelSetAttribute(target, BASS_ATTRIB_VOL, ctypes.c_float(self.volume_level))
 
+    def set_speed(self, speed):
+        self.playback_speed = max(0.1, min(float(speed), 4.0))
+        target = self.playback_stream if self.buffering_enabled else self.midi_stream
+        if target:
+            bass.BASS_ChannelSetAttribute(
+                target,
+                BASS_ATTRIB_FREQ,
+                ctypes.c_float(44100.0 * self.playback_speed),
+            )
+
     def set_voices(self, voices):
+        self.normal_voice_limit = int(voices)
         target = self.decode_stream if self.buffering_enabled else self.midi_stream
         if target:
-            bass.BASS_ChannelSetAttribute(target, BASS_ATTRIB_MIDI_VOICES, ctypes.c_float(float(voices)))
+            effective = self.emergency_voice_limit if self.emergency_recovery_enabled else self.normal_voice_limit
+            bass.BASS_ChannelSetAttribute(target, BASS_ATTRIB_MIDI_VOICES, ctypes.c_float(float(effective)))
+
+    def set_emergency_recovery(self, enabled):
+        self.emergency_recovery_enabled = bool(enabled)
+        target = self.decode_stream if self.buffering_enabled else self.midi_stream
+        if target:
+            effective = self.emergency_voice_limit if self.emergency_recovery_enabled else self.normal_voice_limit
+            bass.BASS_ChannelSetAttribute(target, BASS_ATTRIB_MIDI_VOICES, ctypes.c_float(float(effective)))

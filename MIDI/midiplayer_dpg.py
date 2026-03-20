@@ -148,7 +148,12 @@ class DpgMidiPlayerApp:
         self.refresh_library_files()
         self._bind_theme()
         self._initialize_process_monitoring()
-        self._prepare_startup_screen()
+        self._prepare_recommendation_info()
+        if CONFIG["gui"].get("startup_completed", False):
+            self.startup_ready = True
+            self.initialize_audio_backend()
+        else:
+            self._prepare_startup_screen()
         atexit.register(self.cleanup)
 
     def _gui_cfg(self):
@@ -389,6 +394,25 @@ class DpgMidiPlayerApp:
         self.refresh_library_files()
         dpg.configure_item("library_window", show=True)
 
+    def _build_nps_spikes_text(self):
+        spikes = getattr(self.controller, "max_nps_spikes", [])
+        if not spikes:
+            return "No spikes detected."
+        return "\n".join(
+            f"{idx + 1}. {self.format_time(spike_time)} - {self.format_nps(spike_value)}"
+            for idx, (spike_time, spike_value) in enumerate(spikes)
+        )
+
+    def _refresh_nps_spikes_window(self):
+        if dpg.does_item_exist("nps_spikes_summary"):
+            dpg.set_value("nps_spikes_summary", f"Max NPS: {self.format_nps(self.controller.max_nps)}")
+        if dpg.does_item_exist("nps_spikes_text"):
+            dpg.set_value("nps_spikes_text", self._build_nps_spikes_text())
+
+    def show_nps_spikes_window(self, sender=None, app_data=None):
+        self._refresh_nps_spikes_window()
+        dpg.configure_item("nps_spikes_window", show=True)
+
     def browse_library_directory(self, sender=None, app_data=None):
         self._open_directory_dialog(self._add_library_directory)
 
@@ -462,6 +486,28 @@ class DpgMidiPlayerApp:
             f"Recommended Res:   {res_w} x {res_h} (for Piano Roll)"
         )
 
+    def _build_status_recommendation_text(self):
+        recommended_mode_label = self.all_backend_labels[self.recommended_mode]
+        res_w, res_h = self.recommended_piano_roll_res
+        note_limit = self.recommended_note_limit / 1_000_000
+        try:
+            vm = psutil.virtual_memory()
+            free_ram_gb = vm.available / (1024 ** 3)
+        except Exception:
+            free_ram_gb = 0.0
+        cpu_threads = os.cpu_count() or 0
+        return (
+            f"Recommended Backend: {recommended_mode_label}\n"
+            f"Recommended Note Capacity: {note_limit:.1f} Million notes (based on free RAM)\n"
+            f"Recommended Piano Roll Resolution: {res_w} x {res_h}\n"
+            f"System CPU Threads: {cpu_threads} | Free RAM: {free_ram_gb:.1f} GB"
+        )
+
+    def _prepare_recommendation_info(self):
+        self.recommended_note_limit = self._detect_recommended_note_limit()
+        if dpg.does_item_exist("status_info_text"):
+            dpg.set_value("status_info_text", self._build_status_recommendation_text())
+
     def _build_startup_warning(self):
         warnings = []
         if not self.has_bundled_omnimidi:
@@ -471,7 +517,7 @@ class DpgMidiPlayerApp:
         return "\n".join(warnings)
 
     def _prepare_startup_screen(self):
-        self.recommended_note_limit = self._detect_recommended_note_limit()
+        self._prepare_recommendation_info()
         dpg.set_value("startup_summary", self._build_startup_summary())
         warning_text = self._build_startup_warning()
         dpg.set_value("startup_warning", warning_text if warning_text else " ")
@@ -495,12 +541,15 @@ class DpgMidiPlayerApp:
         selected_mode = self._normalize_backend_mode(mode)
         self.recommended_piano_roll_res = resolution
         CONFIG["audio"]["omnimidi_load_preference"] = selected_mode
+        CONFIG["gui"]["startup_completed"] = True
         save_config(CONFIG)
         self.controller.config["audio"]["omnimidi_load_preference"] = selected_mode
+        self.controller.config["gui"]["startup_completed"] = True
+        self._prepare_recommendation_info()
         dpg.set_value("backend_combo", self._get_combo_label_for_mode(selected_mode))
         dpg.configure_item("startup_window", show=False)
-        self.initialize_audio_backend()
         self.startup_ready = True
+        self.initialize_audio_backend()
 
     def use_bassmidi_startup(self):
         self._finalize_startup_choice("bassmidi", self.recommended_piano_roll_res)
@@ -624,6 +673,14 @@ class DpgMidiPlayerApp:
                         height=30,
                     )
                     dpg.add_button(tag="load_button", label="Load MIDI", callback=self.on_load_unload, width=118, height=30)
+                    dpg.add_button(
+                        tag="nps_spikes_button",
+                        label="NPS Spikes",
+                        callback=self.show_nps_spikes_window,
+                        width=100,
+                        height=30,
+                        show=False,
+                    )
                     dpg.add_button(tag="play_button", label="Play", callback=self.toggle_play_pause, enabled=False, show=False, width=90, height=30)
                     dpg.add_button(tag="stop_button", label="Stop", callback=self.stop_playback, enabled=False, show=False, width=90, height=30)
                     dpg.add_button(
@@ -652,7 +709,7 @@ class DpgMidiPlayerApp:
                                 color=(196, 198, 204),
                             )
                             with dpg.group(tag="parse_progress_group", show=False):
-                                dpg.add_text("Parsing progress", color=(160, 166, 178))
+                                dpg.add_text("Parsing progress", tag="parse_progress_title", color=(160, 166, 178))
                                 dpg.add_progress_bar(
                                     tag="parse_progress_bar",
                                     default_value=0.0,
@@ -676,6 +733,8 @@ class DpgMidiPlayerApp:
                                 width=-1,
                                 format="%.3f",
                             )
+                            dpg.add_spacer(height=6)
+                            dpg.add_text("", tag="status_info_text", wrap=470, color=(160, 166, 178))
 
                             with dpg.item_handler_registry(tag="seek_handler"):
                                 dpg.add_item_activated_handler(callback=self.on_seek_start)
@@ -698,22 +757,34 @@ class DpgMidiPlayerApp:
                             dpg.add_button(label="Change SoundFont", callback=self.change_soundfont, width=-1, height=28)
                             dpg.add_text("Synth Controls", color=(160, 166, 178))
                             dpg.add_slider_float(
-                                label="Volume",
+                                label="",
                                 tag="volume_slider",
                                 min_value=0.0,
                                 max_value=1.0,
-                                default_value=0.5,
+                                default_value=float(CONFIG["audio"].get("volume", 0.5)),
                                 width=-1,
+                                format="Volume: %.2f",
                                 callback=self.on_volume_change,
                             )
                             dpg.add_slider_int(
-                                label="Max Voices",
+                                label="",
                                 tag="voices_slider",
                                 min_value=1,
                                 max_value=2000,
-                                default_value=512,
+                                default_value=int(CONFIG["audio"].get("voices", 512)),
                                 width=-1,
+                                format="Voices: %d",
                                 callback=self.on_voice_limit_change,
+                            )
+                            dpg.add_slider_float(
+                                label="",
+                                tag="speed_slider",
+                                min_value=0.25,
+                                max_value=2.0,
+                                default_value=float(CONFIG["audio"].get("speed", 1.0)),
+                                width=-1,
+                                format="Speed: %.2fx",
+                                callback=self.on_speed_change,
                             )
 
                 dpg.add_separator()
@@ -736,9 +807,14 @@ class DpgMidiPlayerApp:
                                     dpg.add_text("CPU", color=(160, 166, 178))
                                     dpg.add_text("0.0%", tag="cpu_text")
                             with dpg.table_cell():
-                                with dpg.group(horizontal=True):
-                                    dpg.add_text("Runtime", color=(160, 166, 178))
-                                    dpg.add_text("Slowdown: 0.0%", tag="slowdown_text")
+                                dpg.add_text("Runtime", color=(160, 166, 178))
+                                dpg.add_text("Slowdown: 0.0%", tag="slowdown_text")
+                                dpg.add_progress_bar(
+                                    tag="buffer_progress",
+                                    default_value=0.0,
+                                    width=-1,
+                                    overlay="Buffer: 0.0s / 60.0s",
+                                )
 
                     plot_x = list(range(100))
                     with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp, borders_innerV=True):
@@ -936,6 +1012,21 @@ class DpgMidiPlayerApp:
                 dpg.add_button(label="Load Selected", width=140, height=30, callback=self.load_selected_library_file)
 
         with dpg.window(
+            tag="nps_spikes_window",
+            label="NPS Spikes",
+            modal=False,
+            show=False,
+            no_collapse=True,
+            width=460,
+            height=320,
+        ):
+            dpg.add_text("Top Parsed NPS Spikes", color=(223, 177, 103))
+            dpg.add_spacer(height=6)
+            dpg.add_text("", tag="nps_spikes_summary", color=(196, 198, 204), wrap=420)
+            dpg.add_spacer(height=8)
+            dpg.add_text("", tag="nps_spikes_text", color=(160, 166, 178), wrap=420)
+
+        with dpg.window(
             tag="piano_roll_window",
             label="Piano Roll Settings",
             modal=True,
@@ -978,7 +1069,8 @@ class DpgMidiPlayerApp:
 
             dpg.add_separator()
             dpg.add_text("Master Theme Color", color=(223, 177, 103))
-            dpg.add_color_edit(label="Theme Seed", tag="custom_theme_seed", no_alpha=True, width=-1)
+            dpg.add_text("Theme Seed", color=(160, 166, 178))
+            dpg.add_color_edit(label="", tag="custom_theme_seed", no_alpha=True, width=-1)
             dpg.add_button(label="Generate Palette From Theme Color", callback=self.apply_theme_seed, width=-1, height=32)
 
             dpg.add_separator()
@@ -988,18 +1080,29 @@ class DpgMidiPlayerApp:
                 dpg.add_table_column(init_width_or_weight=1.0)
                 with dpg.table_row():
                     with dpg.table_cell():
-                        dpg.add_color_edit(label="Window BG", tag="custom_window_bg", no_alpha=True, width=-1)
-                        dpg.add_color_edit(label="Child BG", tag="custom_child_bg", no_alpha=True, width=-1)
-                        dpg.add_color_edit(label="Frame BG", tag="custom_frame_bg", no_alpha=True, width=-1)
-                        dpg.add_color_edit(label="Frame Hover", tag="custom_frame_bg_hovered", no_alpha=True, width=-1)
-                        dpg.add_color_edit(label="Frame Active", tag="custom_frame_bg_active", no_alpha=True, width=-1)
-                        dpg.add_color_edit(label="Button", tag="custom_button", no_alpha=True, width=-1)
+                        dpg.add_text("Window BG", color=(160, 166, 178))
+                        dpg.add_color_edit(label="", tag="custom_window_bg", no_alpha=True, width=-1)
+                        dpg.add_text("Child BG", color=(160, 166, 178))
+                        dpg.add_color_edit(label="", tag="custom_child_bg", no_alpha=True, width=-1)
+                        dpg.add_text("Frame BG", color=(160, 166, 178))
+                        dpg.add_color_edit(label="", tag="custom_frame_bg", no_alpha=True, width=-1)
+                        dpg.add_text("Frame Hover", color=(160, 166, 178))
+                        dpg.add_color_edit(label="", tag="custom_frame_bg_hovered", no_alpha=True, width=-1)
+                        dpg.add_text("Frame Active", color=(160, 166, 178))
+                        dpg.add_color_edit(label="", tag="custom_frame_bg_active", no_alpha=True, width=-1)
+                        dpg.add_text("Button", color=(160, 166, 178))
+                        dpg.add_color_edit(label="", tag="custom_button", no_alpha=True, width=-1)
                     with dpg.table_cell():
-                        dpg.add_color_edit(label="Button Hover", tag="custom_button_hovered", no_alpha=True, width=-1)
-                        dpg.add_color_edit(label="Button Active", tag="custom_button_active", no_alpha=True, width=-1)
-                        dpg.add_color_edit(label="Accent Text", tag="custom_accent_text", no_alpha=True, width=-1)
-                        dpg.add_color_edit(label="Muted Text", tag="custom_muted_text", no_alpha=True, width=-1)
-                        dpg.add_color_edit(label="Body Text", tag="custom_body_text", no_alpha=True, width=-1)
+                        dpg.add_text("Button Hover", color=(160, 166, 178))
+                        dpg.add_color_edit(label="", tag="custom_button_hovered", no_alpha=True, width=-1)
+                        dpg.add_text("Button Active", color=(160, 166, 178))
+                        dpg.add_color_edit(label="", tag="custom_button_active", no_alpha=True, width=-1)
+                        dpg.add_text("Accent Text", color=(160, 166, 178))
+                        dpg.add_color_edit(label="", tag="custom_accent_text", no_alpha=True, width=-1)
+                        dpg.add_text("Muted Text", color=(160, 166, 178))
+                        dpg.add_color_edit(label="", tag="custom_muted_text", no_alpha=True, width=-1)
+                        dpg.add_text("Body Text", color=(160, 166, 178))
+                        dpg.add_color_edit(label="", tag="custom_body_text", no_alpha=True, width=-1)
 
             dpg.add_separator()
             with dpg.group(horizontal=True):
@@ -1133,7 +1236,9 @@ class DpgMidiPlayerApp:
         if dpg.does_item_exist("parse_progress_group"):
             dpg.configure_item("parse_progress_group", show=bool(visible))
 
-    def _update_parse_progress(self, fraction, overlay, detail):
+    def _update_parse_progress(self, fraction, overlay, detail, title="Parsing progress"):
+        if dpg.does_item_exist("parse_progress_title"):
+            dpg.set_value("parse_progress_title", title)
         if dpg.does_item_exist("parse_progress_bar"):
             dpg.set_value("parse_progress_bar", max(0.0, min(float(fraction), 1.0)))
             dpg.configure_item("parse_progress_bar", overlay=str(overlay))
@@ -1143,7 +1248,7 @@ class DpgMidiPlayerApp:
     def _reset_parse_progress(self):
         self.loading_visible = False
         self.loading_total_events = 0
-        self._update_parse_progress(0.0, "0%", "")
+        self._update_parse_progress(0.0, "0%", "", title="Parsing progress")
         self._set_parse_progress_visible(False)
 
     def _message_info(self, title, text):
@@ -1225,9 +1330,11 @@ class DpgMidiPlayerApp:
     def _refresh_transport_button_state(self):
         has_midi = self.controller.parsed_midi is not None
         if has_midi:
+            dpg.show_item("nps_spikes_button")
             dpg.show_item("play_button")
             dpg.show_item("stop_button")
             dpg.show_item("piano_roll_button")
+            dpg.enable_item("nps_spikes_button")
             dpg.enable_item("play_button")
             dpg.enable_item("stop_button")
             if PianoRoll is not None:
@@ -1235,9 +1342,11 @@ class DpgMidiPlayerApp:
             else:
                 dpg.disable_item("piano_roll_button")
         else:
+            dpg.hide_item("nps_spikes_button")
             dpg.hide_item("play_button")
             dpg.hide_item("stop_button")
             dpg.hide_item("piano_roll_button")
+            dpg.disable_item("nps_spikes_button")
             dpg.disable_item("play_button")
             dpg.disable_item("stop_button")
             dpg.disable_item("piano_roll_button")
@@ -1314,6 +1423,9 @@ class DpgMidiPlayerApp:
             return str(n)
         return f"{n/1_000_000:.1f}M".replace(".0M", "M")
 
+    def _build_midi_info_text(self):
+        return f"Max NPS: {self.format_nps(self.controller.max_nps)}"
+
     def set_status(self, text):
         dpg.set_value("status_text", text)
         dpg.set_value("backend_hint_text", self._build_audio_hint_text())
@@ -1339,6 +1451,7 @@ class DpgMidiPlayerApp:
             pick_soundfont=None,
             launch_sweep=self._launch_audio_sweep,
         )
+        self.controller.set_playback_speed(dpg.get_value("speed_slider"))
         dpg.set_value("backend_hint_text", self._build_audio_hint_text())
         self._refresh_soundfont_text()
         self._refresh_transport_button_state()
@@ -1387,6 +1500,8 @@ class DpgMidiPlayerApp:
         self._open_soundfont_dialog(_after_pick)
 
     def on_volume_change(self, sender, app_data):
+        CONFIG["audio"]["volume"] = float(app_data)
+        save_config(CONFIG)
         if self.controller.active_midi_backend and hasattr(self.controller.active_midi_backend, "set_volume"):
             try:
                 self.controller.active_midi_backend.set_volume(float(app_data))
@@ -1394,11 +1509,19 @@ class DpgMidiPlayerApp:
                 print(f"Failed to set volume: {e}")
 
     def on_voice_limit_change(self, sender, app_data):
+        CONFIG["audio"]["voices"] = int(app_data)
+        save_config(CONFIG)
         if self.controller.active_midi_backend and hasattr(self.controller.active_midi_backend, "set_voices"):
             try:
                 self.controller.active_midi_backend.set_voices(int(app_data))
             except Exception as e:
                 print(f"Failed to set voices: {e}")
+
+    def on_speed_change(self, sender, app_data):
+        CONFIG["audio"]["speed"] = float(app_data)
+        save_config(CONFIG)
+        with self.playback_lock:
+            self.controller.set_playback_speed(float(app_data))
 
     def on_load_unload(self):
         if self.controller.parsed_midi is None:
@@ -1514,6 +1637,14 @@ class DpgMidiPlayerApp:
                     dpg.set_value("status_text", "Ready to play.")
                     dpg.set_value("time_text", f"00:00 / {self.format_time(self.controller.total_song_duration)}")
                     dpg.set_value("note_count_value", f"0 / {self.controller.total_song_notes:,}")
+                    self._set_parse_progress_visible(True)
+                    self._update_parse_progress(
+                        1.0,
+                        "Parsed",
+                        self._build_midi_info_text(),
+                        title="MIDI Info",
+                    )
+                    self._refresh_nps_spikes_window()
                     dpg.set_value("seek_slider", 0.0)
                     dpg.configure_item("seek_slider", enabled=True, max_value=float(self.controller.total_song_duration))
                     dpg.configure_item("play_button", label="Play")
@@ -1613,6 +1744,9 @@ class DpgMidiPlayerApp:
         dpg.set_value("status_text", "No file loaded.")
         dpg.set_value("time_text", "00:00 / 00:00")
         dpg.set_value("note_count_value", "0 / 0")
+        self._refresh_nps_spikes_window()
+        if dpg.does_item_exist("nps_spikes_window"):
+            dpg.configure_item("nps_spikes_window", show=False)
         dpg.set_value("seek_slider", 0.0)
         dpg.configure_item("seek_slider", enabled=False, max_value=100.0)
         dpg.configure_item("play_button", label="Play")
@@ -1642,6 +1776,8 @@ class DpgMidiPlayerApp:
         dpg.set_value("nps_text", "0")
         dpg.set_value("cpu_text", "0.0%")
         dpg.set_value("slowdown_text", "Slowdown: 0.0%")
+        dpg.set_value("buffer_progress", 0.0)
+        dpg.configure_item("buffer_progress", overlay="Buffer: 0.0s / 60.0s")
 
     def reset_playback_state(self):
         self.controller.reset_playback_state()
@@ -1739,6 +1875,7 @@ class DpgMidiPlayerApp:
             start_time = self.get_current_playback_time()
             self.controller.active_midi_backend.set_current_time(start_time)
             has_started_playback = False
+            emergency_recovery = False
 
             while self.controller.playing:
                 if not self.controller.playing:
@@ -1751,6 +1888,9 @@ class DpgMidiPlayerApp:
                         self.controller.seek_request_time = None
 
                 if requested_time is not None:
+                    if emergency_recovery and hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
+                        self.controller.active_midi_backend.set_emergency_recovery(False)
+                        emergency_recovery = False
                     self.controller.active_midi_backend.stop()
                     self.controller.active_midi_backend.set_current_time(requested_time)
                     self.controller.buffered_playback_start_offset = requested_time
@@ -1760,6 +1900,9 @@ class DpgMidiPlayerApp:
                 is_active = self.controller.active_midi_backend.is_active()
 
                 if self.controller.paused:
+                    if emergency_recovery and hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
+                        self.controller.active_midi_backend.set_emergency_recovery(False)
+                        emergency_recovery = False
                     self.controller.active_midi_backend.pause()
                     if buffer_lvl >= 60.0:
                         time.sleep(0.1)
@@ -1769,6 +1912,9 @@ class DpgMidiPlayerApp:
 
                 if not has_started_playback:
                     if buffer_lvl > 4.0:
+                        if emergency_recovery and hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
+                            self.controller.active_midi_backend.set_emergency_recovery(False)
+                            emergency_recovery = False
                         self._queue_ui(dpg.set_value, "status_text", "Playing...")
                         self.controller.active_midi_backend.play()
                         has_started_playback = True
@@ -1776,12 +1922,20 @@ class DpgMidiPlayerApp:
                         self._queue_ui(dpg.set_value, "status_text", f"Prerendering... {buffer_lvl:.1f}s / 4.0s")
                 else:
                     if buffer_lvl < 0.2:
-                        self.controller.active_midi_backend.pause()
-                        self._queue_ui(dpg.set_value, "status_text", "Buffering...")
-                        has_started_playback = False
-                    elif not self.controller.paused and not is_active and buffer_lvl > 2.0:
-                        self.controller.active_midi_backend.play()
-                        self._queue_ui(dpg.set_value, "status_text", "Playing...")
+                        if not emergency_recovery and hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
+                            self.controller.active_midi_backend.set_emergency_recovery(True)
+                            emergency_recovery = True
+                        if not self.controller.paused and not is_active and buffer_lvl > 0.02:
+                            self.controller.active_midi_backend.play()
+                        self._queue_ui(dpg.set_value, "status_text", "Recovering buffer...")
+                    else:
+                        if emergency_recovery and buffer_lvl >= 4.0 and hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
+                            self.controller.active_midi_backend.set_emergency_recovery(False)
+                            emergency_recovery = False
+                            self._queue_ui(dpg.set_value, "status_text", "Playing...")
+                        if not self.controller.paused and not is_active and buffer_lvl > 2.0:
+                            self.controller.active_midi_backend.play()
+                            self._queue_ui(dpg.set_value, "status_text", "Playing...")
 
                 if buffer_lvl >= 60.0:
                     time.sleep(0.1)
@@ -1792,6 +1946,14 @@ class DpgMidiPlayerApp:
             print(f"Buffered playback error: {e}")
             traceback.print_exc()
         finally:
+            if (
+                self.controller.active_midi_backend
+                and hasattr(self.controller.active_midi_backend, "set_emergency_recovery")
+            ):
+                try:
+                    self.controller.active_midi_backend.set_emergency_recovery(False)
+                except Exception:
+                    pass
             self._queue_ui(self.playback_finished)
 
     def play_music_thread_realtime(self):
@@ -1859,7 +2021,7 @@ class DpgMidiPlayerApp:
                     note_event_index = bisect.bisect_left(note_events["on_time"], requested_time)
                     pitch_bend_index = bisect.bisect_left(pitch_bend_events, (requested_time, -float("inf"), -float("inf")))
                     control_change_index = bisect.bisect_left(control_change_events, (requested_time, -float("inf"), -float("inf"), -float("inf")))
-                    self.controller.playback_start_time = time.monotonic() - requested_time
+                    self.controller.playback_start_time = time.monotonic() - (requested_time / max(self.controller.playback_speed, 0.01))
                     self.controller.total_paused_duration = 0.0
                     self.controller.paused_at_time = 0.0
                     self.controller.notes_played_count = note_event_index
@@ -1883,9 +2045,9 @@ class DpgMidiPlayerApp:
                 with self.playback_lock:
                     self.controller.last_processed_event_time = event_time_sec
 
-                target_wall_time = self.controller.playback_start_time + event_time_sec + self.controller.total_paused_duration
+                target_wall_time = self.controller.playback_start_time + (event_time_sec / max(self.controller.playback_speed, 0.01)) + self.controller.total_paused_duration
                 sleep_duration = target_wall_time - time.monotonic()
-                self.controller.current_lag = max(0, -sleep_duration)
+                self.controller.current_lag = max(0, -sleep_duration) * self.controller.playback_speed
                 if sleep_duration > 0:
                     time.sleep(sleep_duration)
 
@@ -1982,6 +2144,7 @@ class DpgMidiPlayerApp:
             return
         self.last_piano_roll_res = (width, height)
         self.piano_roll = PianoRoll(width, height, CONFIG)
+        self.piano_roll.set_nps_spikes(getattr(self.controller, "max_nps_spikes", []))
         self.piano_roll_thread = threading.Thread(target=self.run_piano_roll, daemon=True)
         self.piano_roll_thread.start()
 
@@ -2120,9 +2283,14 @@ class DpgMidiPlayerApp:
             if is_buffered:
                 try:
                     buf_lvl = self.controller.active_midi_backend.get_buffer_level()
-                    dpg.set_value("slowdown_text", f"Buffer: {buf_lvl:.1f}s")
+                    clamped_buf = max(0.0, min(float(buf_lvl), 60.0))
+                    dpg.set_value("slowdown_text", "Buffered playback")
+                    dpg.set_value("buffer_progress", clamped_buf / 60.0)
+                    dpg.configure_item("buffer_progress", overlay=f"Buffer: {buf_lvl:.1f}s / 60.0s")
                 except Exception:
-                    dpg.set_value("slowdown_text", "Buffer: N/A")
+                    dpg.set_value("slowdown_text", "Buffered playback")
+                    dpg.set_value("buffer_progress", 0.0)
+                    dpg.configure_item("buffer_progress", overlay="Buffer: N/A")
             else:
                 if self.controller.playing and not self.controller.paused:
                     delta_lag = self.controller.current_lag - self.controller.last_lag_value
@@ -2134,6 +2302,8 @@ class DpgMidiPlayerApp:
 
                 self.controller.last_lag_value = self.controller.current_lag
                 dpg.set_value("slowdown_text", f"Slowdown: {self.controller.slowdown_percentage:.1f}%")
+                dpg.set_value("buffer_progress", 0.0)
+                dpg.configure_item("buffer_progress", overlay="Buffer: N/A")
 
     def cleanup(self):
         if self._cleaned_up:

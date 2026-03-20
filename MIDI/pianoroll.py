@@ -389,6 +389,111 @@ void main() {
 }
 """
 
+SCREEN_BLOOM_VERT_SHADER = """#version 120
+attribute vec2 pos;
+varying vec2 v_uv;
+
+void main() {
+    gl_Position = vec4(pos, 0.0, 1.0);
+    v_uv = pos * 0.5 + 0.5;
+}
+"""
+
+BLOOM_EXTRACT_FRAG_SHADER = """#version 120
+varying vec2 v_uv;
+
+uniform sampler2D u_scene_texture;
+uniform vec2 u_texel_size;
+
+vec3 extract_bright(vec3 color) {
+    float peak = max(max(color.r, color.g), color.b);
+    float gate = smoothstep(0.48, 0.92, peak);
+    return color * gate * gate;
+}
+
+void main() {
+    vec2 t = u_texel_size;
+    vec3 bright = vec3(0.0);
+
+    bright += extract_bright(texture2D(u_scene_texture, v_uv).rgb) * 0.20;
+    bright += extract_bright(texture2D(u_scene_texture, v_uv + vec2( t.x * 1.5, 0.0)).rgb) * 0.14;
+    bright += extract_bright(texture2D(u_scene_texture, v_uv + vec2(-t.x * 1.5, 0.0)).rgb) * 0.14;
+    bright += extract_bright(texture2D(u_scene_texture, v_uv + vec2(0.0,  t.y * 1.5)).rgb) * 0.14;
+    bright += extract_bright(texture2D(u_scene_texture, v_uv + vec2(0.0, -t.y * 1.5)).rgb) * 0.14;
+    bright += extract_bright(texture2D(u_scene_texture, v_uv + vec2( t.x * 2.5,  t.y * 2.5)).rgb) * 0.08;
+    bright += extract_bright(texture2D(u_scene_texture, v_uv + vec2(-t.x * 2.5,  t.y * 2.5)).rgb) * 0.08;
+    bright += extract_bright(texture2D(u_scene_texture, v_uv + vec2( t.x * 2.5, -t.y * 2.5)).rgb) * 0.08;
+    bright += extract_bright(texture2D(u_scene_texture, v_uv + vec2(-t.x * 2.5, -t.y * 2.5)).rgb) * 0.08;
+
+    gl_FragColor = vec4(bright, 1.0);
+}
+"""
+
+SCREEN_BLOOM_BLUR_FRAG_SHADER = """#version 120
+varying vec2 v_uv;
+
+uniform sampler2D u_source_texture;
+uniform vec2 u_texel_size;
+uniform vec2 u_direction;
+
+void main() {
+    vec2 step_vec = u_texel_size * u_direction * 1.85;
+    vec3 color = texture2D(u_source_texture, v_uv).rgb * 0.160000;
+
+    color += texture2D(u_source_texture, v_uv + step_vec * 1.250000).rgb * 0.230000;
+    color += texture2D(u_source_texture, v_uv - step_vec * 1.250000).rgb * 0.230000;
+
+    color += texture2D(u_source_texture, v_uv + step_vec * 2.900000).rgb * 0.120000;
+    color += texture2D(u_source_texture, v_uv - step_vec * 2.900000).rgb * 0.120000;
+
+    color += texture2D(u_source_texture, v_uv + step_vec * 5.100000).rgb * 0.060000;
+    color += texture2D(u_source_texture, v_uv - step_vec * 5.100000).rgb * 0.060000;
+
+    color += texture2D(u_source_texture, v_uv + step_vec * 7.600000).rgb * 0.025000;
+    color += texture2D(u_source_texture, v_uv - step_vec * 7.600000).rgb * 0.025000;
+
+    gl_FragColor = vec4(color, 1.0);
+}
+"""
+
+SCREEN_BLOOM_FRAG_SHADER = """#version 120
+varying vec2 v_uv;
+
+uniform sampler2D u_scene_texture;
+uniform sampler2D u_bloom_texture;
+uniform vec2 u_texel_size;
+uniform float u_bloom_strength;
+
+void main() {
+    vec3 base = texture2D(u_scene_texture, v_uv).rgb;
+    vec2 t = u_texel_size;
+
+    vec3 bloom = texture2D(u_bloom_texture, v_uv).rgb * 0.34;
+    bloom += texture2D(u_bloom_texture, v_uv + vec2( t.x * 0.9, 0.0)).rgb * 0.11;
+    bloom += texture2D(u_bloom_texture, v_uv + vec2(-t.x * 0.9, 0.0)).rgb * 0.11;
+    bloom += texture2D(u_bloom_texture, v_uv + vec2(0.0,  t.y * 0.9)).rgb * 0.11;
+    bloom += texture2D(u_bloom_texture, v_uv + vec2(0.0, -t.y * 0.9)).rgb * 0.11;
+
+    bloom += texture2D(u_bloom_texture, v_uv + vec2( t.x * 2.1,  t.y * 2.1)).rgb * 0.09;
+    bloom += texture2D(u_bloom_texture, v_uv + vec2(-t.x * 2.1,  t.y * 2.1)).rgb * 0.09;
+    bloom += texture2D(u_bloom_texture, v_uv + vec2( t.x * 2.1, -t.y * 2.1)).rgb * 0.09;
+    bloom += texture2D(u_bloom_texture, v_uv + vec2(-t.x * 2.1, -t.y * 2.1)).rgb * 0.09;
+
+    bloom += texture2D(u_bloom_texture, v_uv + vec2( t.x * 4.9, 0.0)).rgb * 0.08;
+    bloom += texture2D(u_bloom_texture, v_uv + vec2(-t.x * 4.9, 0.0)).rgb * 0.08;
+    bloom += texture2D(u_bloom_texture, v_uv + vec2(0.0,  t.y * 4.9)).rgb * 0.08;
+    bloom += texture2D(u_bloom_texture, v_uv + vec2(0.0, -t.y * 4.9)).rgb * 0.08;
+
+    bloom += texture2D(u_bloom_texture, v_uv + vec2( t.x * 7.8,  t.y * 7.8)).rgb * 0.05;
+    bloom += texture2D(u_bloom_texture, v_uv + vec2(-t.x * 7.8,  t.y * 7.8)).rgb * 0.05;
+    bloom += texture2D(u_bloom_texture, v_uv + vec2( t.x * 7.8, -t.y * 7.8)).rgb * 0.05;
+    bloom += texture2D(u_bloom_texture, v_uv + vec2(-t.x * 7.8, -t.y * 7.8)).rgb * 0.05;
+
+    vec3 final_color = base + bloom * u_bloom_strength * 1.52;
+    gl_FragColor = vec4(final_color, 1.0);
+}
+"""
+
 class PianoRoll:
     def __init__(self, width, height, config):
         self.width = width
@@ -416,6 +521,25 @@ class PianoRoll:
         self.u_bloom_window_end_loc = -1
         self.u_bloom_radius_loc = -1
         self.u_bloom_strength_loc = -1
+        self.screen_bloom_shader = 0
+        self.bloom_extract_shader = 0
+        self.bloom_blur_shader = 0
+        self.screen_bloom_vao = 0
+        self.screen_bloom_vbo = 0
+        self.scene_fbo = 0
+        self.scene_color_texture = 0
+        self.scene_depth_rbo = 0
+        self.bloom_fbo = 0
+        self.bloom_blur_fbo = 0
+        self.bloom_texture = 0
+        self.bloom_blur_texture = 0
+        self.bloom_width = 0
+        self.bloom_height = 0
+        self.u_screen_bloom_texel_size_loc = -1
+        self.u_screen_bloom_strength_loc = -1
+        self.u_bloom_extract_texel_size_loc = -1
+        self.u_bloom_blur_texel_size_loc = -1
+        self.u_bloom_blur_direction_loc = -1
         
         self.all_notes_gpu = None
         self.data_queue = queue.Queue(maxsize=2)
@@ -439,21 +563,28 @@ class PianoRoll:
         self.show_guide_line = bool(vis_cfg.get('show_guide_line', True))
         self.show_glow = bool(vis_cfg.get('show_glow', False))
         self.show_bloom = bool(vis_cfg.get('show_bloom', False))
+        self.show_spike_bloom = bool(vis_cfg.get('show_spike_bloom', True))
         self.glow_strength = 1.0 if self.show_glow else 0.0
-        self.bloom_base_strength = 1.0
+        self.bloom_base_strength = 0.25
         self.bloom_strength = self.bloom_base_strength if self.show_bloom else 0.0
         self.bloom_radius = 26.0
-        self.bloom_min_strength = 0.26
-        self.bloom_response_reference = 1400.0
-        self.bloom_response_curve = 0.78
-        self.bloom_response_scale = 1.35
-        self.bloom_emergency_strength = 0.15
-        self.bloom_emergency_threshold = 4200.0
-        self.bloom_emergency_full_threshold = 6500.0
+        self.bloom_min_strength = 0.15
+        self.bloom_response_reference = 900.0
+        self.bloom_response_curve = 1.18
+        self.bloom_response_scale = 1.95
+        self.bloom_emergency_strength = 0.04
+        self.bloom_emergency_threshold = 2400.0
+        self.bloom_emergency_full_threshold = 4000.0
         self.last_bloom_update_time = time.perf_counter()
         self.show_key_press_glow = bool(vis_cfg.get('show_key_press_glow', True))
         self.show_key_light_fade = bool(vis_cfg.get('show_key_light_fade', False))
         self.glow_fade_duration = 0.1
+        self.nps_spikes = []
+        self._spike_rank_map = {}
+        self.spike_bloom_rise_duration = 1.75
+        self.spike_bloom_fall_duration = 1.75
+        self.spike_bloom_min_boost = 0.14
+        self.spike_bloom_max_boost = 0.48
         
         self.slider_min = 0.2
         self.slider_max = 5.0
@@ -513,6 +644,7 @@ class PianoRoll:
         self.glow_options_checkbox_rect = None
         self.key_light_fade_checkbox_rect = None
         self.bloom_checkbox_rect = None
+        self.spike_bloom_checkbox_rect = None
         self.glow_options_expanded = False
         self.color_button_size = 32
         self.controls_panel_expanded = False
@@ -550,6 +682,7 @@ class PianoRoll:
         vis_cfg = self.config.setdefault('visualizer', {})
         vis_cfg['show_glow'] = bool(self.show_glow)
         vis_cfg['show_bloom'] = bool(self.show_bloom)
+        vis_cfg['show_spike_bloom'] = bool(self.show_spike_bloom)
         vis_cfg['show_key_press_glow'] = bool(self.show_key_press_glow)
         vis_cfg['show_key_light_fade'] = bool(self.show_key_light_fade)
         vis_cfg['seconds_before_cursor'] = float(self.window_seconds)
@@ -558,23 +691,139 @@ class PianoRoll:
         vis_cfg['streaming_vbo_capacity'] = int(self.streaming_vbo_capacity)
         save_config(self.config)
 
+    def _init_scene_bloom_resources(self):
+        if not self.screen_bloom_shader:
+            return
+
+        self.scene_fbo = glGenFramebuffers(1)
+        glBindFramebuffer(GL_FRAMEBUFFER, self.scene_fbo)
+
+        self.scene_color_texture = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, self.scene_color_texture)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA,
+            self.width,
+            self.height,
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            None,
+        )
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.scene_color_texture, 0)
+
+        self.scene_depth_rbo = glGenRenderbuffers(1)
+        glBindRenderbuffer(GL_RENDERBUFFER, self.scene_depth_rbo)
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, self.width, self.height)
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, self.scene_depth_rbo)
+
+        status = glCheckFramebufferStatus(GL_FRAMEBUFFER)
+        if status != GL_FRAMEBUFFER_COMPLETE:
+            print(f"Scene bloom framebuffer incomplete: {status}")
+            if self.scene_depth_rbo:
+                glDeleteRenderbuffers(1, [self.scene_depth_rbo])
+                self.scene_depth_rbo = 0
+            if self.scene_color_texture:
+                glDeleteTextures(1, [self.scene_color_texture])
+                self.scene_color_texture = 0
+            if self.scene_fbo:
+                glDeleteFramebuffers(1, [self.scene_fbo])
+                self.scene_fbo = 0
+
+        self.bloom_width = max(1, (self.width * 3) // 4)
+        self.bloom_height = max(1, (self.height * 3) // 4)
+        self.bloom_fbo = glGenFramebuffers(1)
+        glBindFramebuffer(GL_FRAMEBUFFER, self.bloom_fbo)
+
+        self.bloom_texture = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, self.bloom_texture)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA,
+            self.bloom_width,
+            self.bloom_height,
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            None,
+        )
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.bloom_texture, 0)
+
+        bloom_status = glCheckFramebufferStatus(GL_FRAMEBUFFER)
+        if bloom_status != GL_FRAMEBUFFER_COMPLETE:
+            print(f"Bloom extract framebuffer incomplete: {bloom_status}")
+            if self.bloom_texture:
+                glDeleteTextures(1, [self.bloom_texture])
+                self.bloom_texture = 0
+            if self.bloom_fbo:
+                glDeleteFramebuffers(1, [self.bloom_fbo])
+                self.bloom_fbo = 0
+
+        self.bloom_blur_fbo = glGenFramebuffers(1)
+        glBindFramebuffer(GL_FRAMEBUFFER, self.bloom_blur_fbo)
+
+        self.bloom_blur_texture = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, self.bloom_blur_texture)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glTexImage2D(
+            GL_TEXTURE_2D,
+            0,
+            GL_RGBA,
+            self.bloom_width,
+            self.bloom_height,
+            0,
+            GL_RGBA,
+            GL_UNSIGNED_BYTE,
+            None,
+        )
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.bloom_blur_texture, 0)
+
+        blur_status = glCheckFramebufferStatus(GL_FRAMEBUFFER)
+        if blur_status != GL_FRAMEBUFFER_COMPLETE:
+            print(f"Bloom blur framebuffer incomplete: {blur_status}")
+            if self.bloom_blur_texture:
+                glDeleteTextures(1, [self.bloom_blur_texture])
+                self.bloom_blur_texture = 0
+            if self.bloom_blur_fbo:
+                glDeleteFramebuffers(1, [self.bloom_blur_fbo])
+                self.bloom_blur_fbo = 0
+
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        glBindRenderbuffer(GL_RENDERBUFFER, 0)
+
     def _iter_hover_targets(self):
         if (not self.controls_panel_expanded) and self.controls_toggle_rect:
             yield ("controls_toggle", self.controls_toggle_rect, "Open control panel")
         if self.controls_panel_expanded and self.controls_close_rect:
             yield ("controls_close", self.controls_close_rect, "Close control panel")
         if self.glow_button_rect:
-            yield ("glow_button", self.glow_button_rect, "Toggle glow mode")
+            yield ("glow_button", self.glow_button_rect, "Toggle lighting mode")
         if self.glow_options_button_rect:
-            yield ("glow_options", self.glow_options_button_rect, "Glow options")
+            yield ("glow_options", self.glow_options_button_rect, "Lighting options")
         if self.color_button_rect:
             yield ("color_button", self.color_button_rect, "Randomize note colors")
         if self.glow_options_expanded and self.glow_options_checkbox_rect:
             yield ("glow_checkbox", self.glow_options_checkbox_rect, "Toggle glow on key press")
         if self.glow_options_expanded and self.key_light_fade_checkbox_rect:
-            yield ("key_fade_checkbox", self.key_light_fade_checkbox_rect, "Toggle fade key lighting")
+            yield ("key_fade_checkbox", self.key_light_fade_checkbox_rect, "Toggle light fadingg")
         if self.glow_options_expanded and self.bloom_checkbox_rect:
-            yield ("bloom_checkbox", self.bloom_checkbox_rect, "Toggle note bloom")
+            yield ("bloom_checkbox", self.bloom_checkbox_rect, "Toggle scene bloom")
+        if self.glow_options_expanded and self.spike_bloom_checkbox_rect:
+            yield ("spike_bloom_checkbox", self.spike_bloom_checkbox_rect, "Dynamically adjust bloom according to NPS")
 
     def _update_hover_ui_state(self):
         if self.overlay_font is None:
@@ -852,6 +1101,33 @@ class PianoRoll:
         except Exception as err:
             print("Bloom shader compilation failed:\n", err)
             self.bloom_shader = 0
+
+        try:
+            self.screen_bloom_shader = compileProgram(
+                compileShader(SCREEN_BLOOM_VERT_SHADER, GL_VERTEX_SHADER),
+                compileShader(SCREEN_BLOOM_FRAG_SHADER, GL_FRAGMENT_SHADER)
+            )
+        except Exception as err:
+            print("Screen bloom shader compilation failed:\n", err)
+            self.screen_bloom_shader = 0
+
+        try:
+            self.bloom_extract_shader = compileProgram(
+                compileShader(SCREEN_BLOOM_VERT_SHADER, GL_VERTEX_SHADER),
+                compileShader(BLOOM_EXTRACT_FRAG_SHADER, GL_FRAGMENT_SHADER)
+            )
+        except Exception as err:
+            print("Bloom extract shader compilation failed:\n", err)
+            self.bloom_extract_shader = 0
+
+        try:
+            self.bloom_blur_shader = compileProgram(
+                compileShader(SCREEN_BLOOM_VERT_SHADER, GL_VERTEX_SHADER),
+                compileShader(SCREEN_BLOOM_BLUR_FRAG_SHADER, GL_FRAGMENT_SHADER)
+            )
+        except Exception as err:
+            print("Bloom blur shader compilation failed:\n", err)
+            self.bloom_blur_shader = 0
         
         if self.show_keyboard:
             try:
@@ -917,6 +1193,24 @@ class PianoRoll:
             glEnableVertexAttribArray(bloom_note_info_loc)
             glVertexAttribPointer(bloom_note_info_loc, 3, GL_UNSIGNED_BYTE, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(8))
             glVertexAttribDivisor(bloom_note_info_loc, 1)
+
+        if self.screen_bloom_shader:
+            screen_pos_loc = glGetAttribLocation(self.screen_bloom_shader, "pos")
+            self.screen_bloom_vao = glGenVertexArrays(1)
+            glBindVertexArray(self.screen_bloom_vao)
+            self.screen_bloom_vbo = glGenBuffers(1)
+            glBindBuffer(GL_ARRAY_BUFFER, self.screen_bloom_vbo)
+            screen_quad = np.array([
+                [-1.0, -1.0],
+                [ 1.0, -1.0],
+                [ 1.0,  1.0],
+                [ 1.0,  1.0],
+                [-1.0,  1.0],
+                [-1.0, -1.0],
+            ], dtype=np.float32)
+            glBufferData(GL_ARRAY_BUFFER, screen_quad.nbytes, screen_quad, GL_STATIC_DRAW)
+            glEnableVertexAttribArray(screen_pos_loc)
+            glVertexAttribPointer(screen_pos_loc, 2, GL_FLOAT, GL_FALSE, 0, None)
 
         if self.show_keyboard:
             glUseProgram(self.keyboard_shader)
@@ -1044,6 +1338,47 @@ class PianoRoll:
             if self.u_bloom_strength_loc != -1:
                 glUniform1f(self.u_bloom_strength_loc, self.bloom_strength)
 
+        if self.screen_bloom_shader:
+            glUseProgram(self.screen_bloom_shader)
+            glUniform1i(glGetUniformLocation(self.screen_bloom_shader, "u_scene_texture"), 0)
+            glUniform1i(glGetUniformLocation(self.screen_bloom_shader, "u_bloom_texture"), 1)
+            self.u_screen_bloom_texel_size_loc = glGetUniformLocation(self.screen_bloom_shader, "u_texel_size")
+            self.u_screen_bloom_strength_loc = glGetUniformLocation(self.screen_bloom_shader, "u_bloom_strength")
+            if self.u_screen_bloom_texel_size_loc != -1:
+                glUniform2f(self.u_screen_bloom_texel_size_loc, 1.0 / float(max(1, self.width // 2)), 1.0 / float(max(1, self.height // 2)))
+            if self.u_screen_bloom_strength_loc != -1:
+                glUniform1f(self.u_screen_bloom_strength_loc, self.bloom_strength)
+
+        if self.bloom_extract_shader:
+            glUseProgram(self.bloom_extract_shader)
+            glUniform1i(glGetUniformLocation(self.bloom_extract_shader, "u_scene_texture"), 0)
+            self.u_bloom_extract_texel_size_loc = glGetUniformLocation(self.bloom_extract_shader, "u_texel_size")
+            if self.u_bloom_extract_texel_size_loc != -1:
+                glUniform2f(self.u_bloom_extract_texel_size_loc, 1.0 / float(self.width), 1.0 / float(self.height))
+
+        if self.bloom_blur_shader:
+            glUseProgram(self.bloom_blur_shader)
+            glUniform1i(glGetUniformLocation(self.bloom_blur_shader, "u_source_texture"), 0)
+            self.u_bloom_blur_texel_size_loc = glGetUniformLocation(self.bloom_blur_shader, "u_texel_size")
+            self.u_bloom_blur_direction_loc = glGetUniformLocation(self.bloom_blur_shader, "u_direction")
+
+        self._init_scene_bloom_resources()
+
+        if self.screen_bloom_shader and self.u_screen_bloom_texel_size_loc != -1:
+            glUseProgram(self.screen_bloom_shader)
+            glUniform2f(
+                self.u_screen_bloom_texel_size_loc,
+                1.0 / float(max(1, self.bloom_width)),
+                1.0 / float(max(1, self.bloom_height)),
+            )
+        if self.bloom_blur_shader and self.u_bloom_blur_texel_size_loc != -1:
+            glUseProgram(self.bloom_blur_shader)
+            glUniform2f(
+                self.u_bloom_blur_texel_size_loc,
+                1.0 / float(max(1, self.bloom_width)),
+                1.0 / float(max(1, self.bloom_height)),
+            )
+
         self.channel_colors = self._load_colors_from_xml()
         glUseProgram(self.shader)
         glUniform3fv(self.u_colors_loc, 128, self.channel_colors)
@@ -1097,7 +1432,7 @@ class PianoRoll:
             18
         )
         panel_width = 190
-        panel_height = 106
+        panel_height = 130
         self.glow_options_panel_rect = pygame.Rect(
             self.glow_options_button_rect.x - (panel_width - self.glow_options_button_rect.width),
             self.glow_options_button_rect.y + self.glow_options_button_rect.height + 6,
@@ -1119,6 +1454,12 @@ class PianoRoll:
         self.bloom_checkbox_rect = pygame.Rect(
             self.glow_options_panel_rect.x + 10,
             self.glow_options_panel_rect.y + 76,
+            16,
+            16
+        )
+        self.spike_bloom_checkbox_rect = pygame.Rect(
+            self.glow_options_panel_rect.x + 10,
+            self.glow_options_panel_rect.y + 100,
             16,
             16
         )
@@ -1160,6 +1501,67 @@ class PianoRoll:
         
         self.force_data_update.set()
         print("MIDI data active on GPU thread.")
+
+    def set_nps_spikes(self, spikes):
+        self.nps_spikes = list(spikes or [])
+        self._rebuild_spike_rank_map()
+
+    def _rebuild_spike_rank_map(self):
+        self._spike_rank_map = {}
+        if not self.nps_spikes:
+            return
+
+        ranked = sorted(self.nps_spikes, key=lambda item: (item[1], item[0]))
+        count = len(ranked)
+        for idx, (spike_time, spike_value) in enumerate(ranked):
+            if count <= 1:
+                norm = 1.0
+            else:
+                norm = idx / float(count - 1)
+            weighted_norm = pow(norm, 1.35)
+            amplitude = self.spike_bloom_min_boost + (self.spike_bloom_max_boost - self.spike_bloom_min_boost) * weighted_norm
+            self._spike_rank_map[(float(spike_time), int(spike_value))] = amplitude
+
+    def _smoothstep(self, edge0, edge1, x):
+        if edge0 == edge1:
+            return 1.0 if x >= edge1 else 0.0
+        t = np.clip((x - edge0) / (edge1 - edge0), 0.0, 1.0)
+        return t * t * (3.0 - 2.0 * t)
+
+    def _ease_in_spike(self, t):
+        t = float(np.clip(t, 0.0, 1.0))
+        return pow(t, 2.35)
+
+    def _ease_out_spike(self, t):
+        t = float(np.clip(t, 0.0, 1.0))
+        return pow(1.0 - t, 1.85)
+
+    def _compute_spike_bloom_boost(self, current_time):
+        if not self.show_bloom or not self.show_spike_bloom or not self.nps_spikes:
+            return 0.0
+
+        strongest = 0.0
+        for spike_time, spike_value in self.nps_spikes:
+            spike_time = float(spike_time)
+            amplitude = self._spike_rank_map.get(
+                (float(spike_time), int(spike_value)),
+                self.spike_bloom_min_boost,
+            )
+
+            if current_time < spike_time - self.spike_bloom_rise_duration:
+                continue
+            if current_time <= spike_time:
+                rise_t = (current_time - (spike_time - self.spike_bloom_rise_duration)) / max(0.001, self.spike_bloom_rise_duration)
+                weight = self._ease_in_spike(rise_t)
+            elif current_time <= spike_time + self.spike_bloom_fall_duration:
+                fall_t = (current_time - spike_time) / max(0.001, self.spike_bloom_fall_duration)
+                weight = self._ease_out_spike(fall_t)
+            else:
+                continue
+
+            strongest = max(strongest, amplitude * weight)
+
+        return strongest
     
     def _data_streamer_thread(self):
         """Background thread for slicing visible notes."""
@@ -1216,9 +1618,6 @@ class PianoRoll:
         else:
             self.glow_trails.clear()
 
-        glClearColor(0.05, 0.05, 0.08, 1.0)
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
-        
         try:
             queue_data = self.data_queue.get_nowait()
             visible_notes, count = queue_data
@@ -1233,13 +1632,33 @@ class PianoRoll:
         except queue.Empty:
             pass
 
+        if self.show_bloom and self.screen_bloom_shader and self.scene_fbo:
+            glBindFramebuffer(GL_FRAMEBUFFER, self.scene_fbo)
+            glViewport(0, 0, self.width, self.height)
+            self._render_scene_content(current_time)
+            glBindFramebuffer(GL_FRAMEBUFFER, 0)
+            self._render_bloom_extract()
+            self._render_bloom_blur()
+            glViewport(0, 0, self.width, self.height)
+            self._draw_scene_bloom_composite()
+        else:
+            self._render_scene_content(current_time)
+
+        self._draw_slider_overlay()
+
+        pygame.display.flip()
+
+    def _render_scene_content(self, current_time):
+        glClearColor(0.05, 0.05, 0.08, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+
         if self.notes_to_draw > 0 and self.render_notes_array is not None:
             window_start = current_time - self.seconds_before_cursor
             window_end = current_time + self.seconds_after_cursor
-            
+
             glEnable(GL_DEPTH_TEST)
             glUseProgram(self.shader)
-            
+
             glUniform1f(self.u_time_loc, current_time)
             glUniform1f(self.u_scroll_speed_loc, self.scroll_speed)
             glUniform1f(glGetUniformLocation(self.shader, "u_guide_line_y"), self._get_guide_line_y())
@@ -1254,22 +1673,16 @@ class PianoRoll:
             glBindVertexArray(self.vao)
             glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
             glDrawArraysInstanced(GL_TRIANGLES, 0, 6, self.notes_to_draw)
-            
+
             glBindVertexArray(0)
             glUseProgram(0)
             glBindBuffer(GL_ARRAY_BUFFER, 0)
-
-            if self.show_bloom and self.bloom_shader:
-                self._update_bloom_compensation()
-                self._draw_note_bloom(current_time, window_start, window_end)
 
         if self.show_glow and self.show_key_press_glow:
             self._draw_active_note_glow_overlay(current_time)
 
         if self.show_keyboard and self.keyboard_layout:
             self._draw_keyboard_opengl(current_time)
-            if self.show_bloom and self.keyboard_bloom_shader:
-                self._draw_keyboard_bloom()
 
         if self.show_guide_line:
             glDisable(GL_DEPTH_TEST)
@@ -1281,9 +1694,84 @@ class PianoRoll:
             glBegin(GL_LINES);glVertex2f(0, guide_y);glVertex2f(self.width, guide_y);glEnd()
             glPopMatrix();glMatrixMode(GL_PROJECTION);glPopMatrix();glMatrixMode(GL_MODELVIEW)
 
-        self._draw_slider_overlay()
+    def _draw_scene_bloom_composite(self):
+        glDisable(GL_DEPTH_TEST)
+        glDepthMask(GL_FALSE)
+        glDisable(GL_BLEND)
+        glUseProgram(self.screen_bloom_shader)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self.scene_color_texture)
+        glActiveTexture(GL_TEXTURE1)
+        glBindTexture(GL_TEXTURE_2D, self.bloom_texture)
+        if self.u_screen_bloom_strength_loc != -1:
+            bloom_strength = self.bloom_strength + self._compute_spike_bloom_boost(self.get_current_time() if self.get_current_time else 0.0)
+            glUniform1f(self.u_screen_bloom_strength_loc, bloom_strength)
+        glBindVertexArray(self.screen_bloom_vao)
+        glDrawArrays(GL_TRIANGLES, 0, 6)
+        glBindVertexArray(0)
+        glUseProgram(0)
+        glEnable(GL_BLEND)
+        glDepthMask(GL_TRUE)
 
-        pygame.display.flip()
+    def _render_bloom_extract(self):
+        if not self.bloom_extract_shader or not self.bloom_fbo:
+            return
+        glBindFramebuffer(GL_FRAMEBUFFER, self.bloom_fbo)
+        glViewport(0, 0, self.bloom_width, self.bloom_height)
+        glDisable(GL_DEPTH_TEST)
+        glDepthMask(GL_FALSE)
+        glDisable(GL_BLEND)
+        glClearColor(0.0, 0.0, 0.0, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT)
+        glUseProgram(self.bloom_extract_shader)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self.scene_color_texture)
+        glBindVertexArray(self.screen_bloom_vao)
+        glDrawArrays(GL_TRIANGLES, 0, 6)
+        glBindVertexArray(0)
+        glUseProgram(0)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glEnable(GL_BLEND)
+        glDepthMask(GL_TRUE)
+
+    def _render_bloom_blur(self):
+        if (
+            not self.bloom_blur_shader
+            or not self.bloom_fbo
+            or not self.bloom_blur_fbo
+            or not self.bloom_texture
+            or not self.bloom_blur_texture
+        ):
+            return
+
+        glViewport(0, 0, self.bloom_width, self.bloom_height)
+        glDisable(GL_DEPTH_TEST)
+        glDepthMask(GL_FALSE)
+        glDisable(GL_BLEND)
+        glUseProgram(self.bloom_blur_shader)
+        glBindVertexArray(self.screen_bloom_vao)
+
+        glBindFramebuffer(GL_FRAMEBUFFER, self.bloom_blur_fbo)
+        glClearColor(0.0, 0.0, 0.0, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT)
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self.bloom_texture)
+        if self.u_bloom_blur_direction_loc != -1:
+            glUniform2f(self.u_bloom_blur_direction_loc, 1.0, 0.0)
+        glDrawArrays(GL_TRIANGLES, 0, 6)
+
+        glBindFramebuffer(GL_FRAMEBUFFER, self.bloom_fbo)
+        glClear(GL_COLOR_BUFFER_BIT)
+        glBindTexture(GL_TEXTURE_2D, self.bloom_blur_texture)
+        if self.u_bloom_blur_direction_loc != -1:
+            glUniform2f(self.u_bloom_blur_direction_loc, 0.0, 1.0)
+        glDrawArrays(GL_TRIANGLES, 0, 6)
+
+        glBindVertexArray(0)
+        glUseProgram(0)
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glEnable(GL_BLEND)
+        glDepthMask(GL_TRUE)
 
     def _update_glow_trails(self, current_time):
         if self.last_glow_time is not None and current_time + 0.001 < self.last_glow_time:
@@ -1420,9 +1908,11 @@ class PianoRoll:
             return
 
         visible_count = max(0.0, float(self.notes_to_draw))
-        load = visible_count / self.bloom_response_reference
-        response = 1.0 / (1.0 + pow(load, self.bloom_response_curve) * self.bloom_response_scale)
-        target_strength = self.bloom_base_strength * (self.bloom_min_strength + (1.0 - self.bloom_min_strength) * response)
+        normalized_load = visible_count / max(1.0, self.bloom_response_reference)
+        response = np.exp(-self.bloom_response_scale * pow(normalized_load, self.bloom_response_curve))
+        target_strength = self.bloom_base_strength * (
+            self.bloom_min_strength + (0.96 - self.bloom_min_strength) * response
+        )
 
         if visible_count > self.bloom_emergency_threshold:
             emergency_t = (visible_count - self.bloom_emergency_threshold) / max(
@@ -1430,11 +1920,11 @@ class PianoRoll:
                 self.bloom_emergency_full_threshold - self.bloom_emergency_threshold
             )
             emergency_t = np.clip(emergency_t, 0.0, 1.0)
-            emergency_t = 1.0 - pow(1.0 - emergency_t, 2.4)
+            emergency_t = 1.0 - np.exp(-4.8 * emergency_t * emergency_t)
             emergency_target = self.bloom_base_strength * self.bloom_emergency_strength
             target_strength = target_strength + (emergency_target - target_strength) * emergency_t
 
-        smooth = 1.0 - np.exp(-dt * 4.2)
+        smooth = 1.0 - np.exp(-dt * 5.4)
         self.bloom_strength += (target_strength - self.bloom_strength) * smooth
 
     def _get_trail_fade(self, current_time, pitch):
@@ -1665,6 +2155,10 @@ class PianoRoll:
                     glUseProgram(self.bloom_shader)
                     glUniform1f(self.u_bloom_strength_loc, self.bloom_strength)
                     glUseProgram(0)
+                self._save_visualizer_config()
+                return
+            if self.glow_options_expanded and self.spike_bloom_checkbox_rect and self.spike_bloom_checkbox_rect.collidepoint(event.pos):
+                self.show_spike_bloom = not self.show_spike_bloom
                 self._save_visualizer_config()
                 return
             if self.glow_button_rect and self.glow_button_rect.collidepoint(event.pos):
@@ -1983,7 +2477,8 @@ class PianoRoll:
 
             self._draw_text_overlay("Glow on key press", px + 32, py + 30)
             self._draw_text_overlay("Fade key lighting", px + 32, py + 54)
-            self._draw_text_overlay("Bloom notes", px + 32, py + 78)
+            self._draw_text_overlay("Bloom scene", px + 32, py + 78)
+            self._draw_text_overlay("Spike bloom", px + 32, py + 102)
 
             if self.glow_options_checkbox_rect:
                 cbx, cby, cbw, cbh = (
@@ -2066,6 +2561,33 @@ class PianoRoll:
                     glEnd()
                 self._draw_hover_highlight(self.bloom_checkbox_rect, self._get_hover_alpha("bloom_checkbox"))
 
+            if self.spike_bloom_checkbox_rect:
+                cbx, cby, cbw, cbh = (
+                    self.spike_bloom_checkbox_rect.x,
+                    self.spike_bloom_checkbox_rect.y,
+                    self.spike_bloom_checkbox_rect.width,
+                    self.spike_bloom_checkbox_rect.height,
+                )
+                glColor4f(0.12, 0.12, 0.16, 0.92)
+                glBegin(GL_QUADS)
+                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
+                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
+                glEnd()
+                glColor4f(0.72, 0.74, 0.80, 0.95)
+                glLineWidth(1.0)
+                glBegin(GL_LINE_LOOP)
+                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
+                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
+                glEnd()
+                if self.show_spike_bloom:
+                    glColor4f(0.95, 0.78, 0.24, 0.95)
+                    glLineWidth(2.0)
+                    glBegin(GL_LINES)
+                    glVertex2f(cbx + 3, cby + 9); glVertex2f(cbx + 7, cby + 13)
+                    glVertex2f(cbx + 7, cby + 13); glVertex2f(cbx + 13, cby + 4)
+                    glEnd()
+                self._draw_hover_highlight(self.spike_bloom_checkbox_rect, self._get_hover_alpha("spike_bloom_checkbox"))
+
         self._draw_hover_tooltip()
         
         glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
@@ -2080,10 +2602,34 @@ class PianoRoll:
         glDeleteProgram(self.shader)
         if self.bloom_shader:
             glDeleteProgram(self.bloom_shader)
+        if self.screen_bloom_shader:
+            glDeleteProgram(self.screen_bloom_shader)
+        if self.bloom_extract_shader:
+            glDeleteProgram(self.bloom_extract_shader)
+        if self.bloom_blur_shader:
+            glDeleteProgram(self.bloom_blur_shader)
         glDeleteVertexArrays(1, [self.vao])
         if self.bloom_vao:
             glDeleteVertexArrays(1, [self.bloom_vao])
+        if self.screen_bloom_vao:
+            glDeleteVertexArrays(1, [self.screen_bloom_vao])
         glDeleteBuffers(2, [self.vbo_vertices, self.vbo_stream_data])
+        if self.screen_bloom_vbo:
+            glDeleteBuffers(1, [self.screen_bloom_vbo])
+        if self.scene_depth_rbo:
+            glDeleteRenderbuffers(1, [self.scene_depth_rbo])
+        if self.scene_color_texture:
+            glDeleteTextures(1, [self.scene_color_texture])
+        if self.bloom_texture:
+            glDeleteTextures(1, [self.bloom_texture])
+        if self.bloom_blur_texture:
+            glDeleteTextures(1, [self.bloom_blur_texture])
+        if self.scene_fbo:
+            glDeleteFramebuffers(1, [self.scene_fbo])
+        if self.bloom_fbo:
+            glDeleteFramebuffers(1, [self.bloom_fbo])
+        if self.bloom_blur_fbo:
+            glDeleteFramebuffers(1, [self.bloom_blur_fbo])
         
         if self.show_keyboard:
             glDeleteProgram(self.keyboard_shader)
