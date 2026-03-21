@@ -32,6 +32,7 @@ cdef class MidiParser:
     cdef public double total_duration_sec
     cdef public int ticks_per_beat
     cdef public str filename
+    cdef public str preferred_color_mode
     
     # Internal C helper functions
     cdef _get_var_len(self, unsigned char* data, int i, int max_len)

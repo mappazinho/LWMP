@@ -193,6 +193,11 @@ class BassMidiEngine:
         
         print("BassMidiEngine initialized.")
 
+        self.event_buffer = []
+        self.event_count = 0
+        self.current_event_idx = 0
+        self.simulated_time = 0.0
+
     def load_soundfont(self, stream, path):
         if not path or not os.path.exists(path): 
             print("No SoundFont found/provided.")
@@ -233,6 +238,26 @@ class BassMidiEngine:
         
         if not bassmidi.BASS_MIDI_StreamSetFonts(stream, ctypes.byref(font_struct), 1):
             print(f"SetFonts failed: {bass.BASS_ErrorGetCode()}")
+
+    def upload_events(self, times, statuses, params):
+        if not self.buffering_enabled:
+            return
+        self.event_buffer = list(zip(times.tolist(), statuses.tolist(), params.tolist()))
+        self.event_count = len(self.event_buffer)
+        self.current_event_idx = 0
+        self.simulated_time = 0.0
+        self.total_bytes_pushed = 0
+        if self.playback_stream:
+            bass.BASS_ChannelSetPosition(self.playback_stream, 0, BASS_POS_BYTE)
+        if self.decode_stream:
+            bass.BASS_ChannelSetPosition(self.decode_stream, 0, BASS_POS_BYTE)
+
+    def set_current_time(self, seconds):
+        self.simulated_time = float(seconds)
+        idx = 0
+        while idx < self.event_count and self.event_buffer[idx][0] < self.simulated_time:
+            idx += 1
+        self.current_event_idx = idx
 
     def send_raw_event(self, event, param):
         target = self.decode_stream if self.buffering_enabled else self.midi_stream
@@ -352,6 +377,56 @@ class BassMidiEngine:
     
     def test_piano_sweep(self):
         print("Python fallback test_piano_sweep not implemented")
+
+    def render_pcm_chunk(self, seconds):
+        if not self.buffering_enabled or not self.decode_stream or not hasattr(self, "event_buffer"):
+            return b""
+        if seconds <= 0.0:
+            return b""
+
+        target_end = self.simulated_time + float(seconds)
+        chunks = []
+        event_epsilon = 1.0 / 44100.0
+
+        while self.simulated_time < target_end:
+            while self.current_event_idx < self.event_count:
+                event_time, status, param = self.event_buffer[self.current_event_idx]
+                if event_time <= self.simulated_time + event_epsilon:
+                    self.send_raw_event(int(status), int(param))
+                    self.current_event_idx += 1
+                else:
+                    break
+
+            next_event_time = target_end
+            if self.current_event_idx < self.event_count:
+                next_event_time = min(next_event_time, float(self.event_buffer[self.current_event_idx][0]))
+
+            segment_seconds = next_event_time - self.simulated_time
+            if segment_seconds <= 0.0:
+                if target_end - self.simulated_time <= event_epsilon:
+                    break
+                segment_seconds = min(event_epsilon, target_end - self.simulated_time)
+            elif segment_seconds < event_epsilon:
+                segment_seconds = min(event_epsilon, target_end - self.simulated_time)
+
+            bytes_needed = bass.BASS_ChannelSeconds2Bytes(self.decode_stream, segment_seconds)
+            if bytes_needed <= 0:
+                break
+
+            chunk_len = int(bytes_needed)
+            buf = ctypes.create_string_buffer(chunk_len)
+            read = bass.BASS_ChannelGetData(self.decode_stream, buf, chunk_len)
+            if read == 0xFFFFFFFF:
+                break
+            if read == 0:
+                break
+            chunks.append(buf.raw[:read])
+            read_seconds = bass.BASS_ChannelBytes2Seconds(self.decode_stream, read)
+            if read_seconds <= 0.0:
+                break
+            self.simulated_time += read_seconds
+
+        return b"".join(chunks)
 
     def set_volume(self, volume):
         self.volume_level = float(volume)

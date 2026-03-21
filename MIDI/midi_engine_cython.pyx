@@ -5,6 +5,7 @@ from libc.stdint cimport uint8_t, uint32_t, uint64_t, int64_t
 from libc.stddef cimport wchar_t
 from cpython.unicode cimport PyUnicode_AsWideCharString
 from cpython.mem cimport PyMem_Free
+from cpython.bytes cimport PyBytes_FromStringAndSize
 import ctypes
 import os
 import sys
@@ -362,7 +363,12 @@ cdef class BassMidiEngine:
 
             rendered_dur = self.render_forward(chunk_dur)
             if rendered_dur <= 0.0:
-                break
+                if self.current_event_idx < self.event_count:
+                    ev = &self.event_buffer[self.current_event_idx]
+                    if ev.time > self.simulated_time:
+                        rendered_dur = self.queue_silence(chunk_dur)
+                if rendered_dur <= 0.0:
+                    break
             self.simulated_time += rendered_dur
             loops += 1
             
@@ -376,6 +382,46 @@ cdef class BassMidiEngine:
                 break
 
         return self.get_buffer_level()
+
+    cpdef double queue_silence(self, double seconds):
+        if not self.buffering_enabled or not self.playback_stream or seconds <= 0.0:
+            return 0.0
+
+        cdef HSTREAM playback = self.playback_stream
+        cdef QWORD bytes_needed = self.f.ChannelSeconds2Bytes(playback, seconds)
+        if bytes_needed == 0 or bytes_needed == <QWORD>-1:
+            return 0.0
+
+        cdef DWORD chunk_size = 65536
+        cdef char* buf = <char*>malloc(chunk_size)
+        if not buf:
+            return 0.0
+
+        cdef QWORD remaining = bytes_needed
+        cdef DWORD queued_bytes
+        cdef DWORD total_written = 0
+        cdef DWORD to_write
+        cdef DWORD err_val = 0xFFFFFFFF
+
+        try:
+            memset(buf, 0, chunk_size)
+            with nogil:
+                while remaining > 0:
+                    to_write = chunk_size
+                    if remaining < chunk_size:
+                        to_write = <DWORD>remaining
+
+                    queued_bytes = self.f.StreamPutData(playback, buf, to_write)
+                    if queued_bytes == err_val:
+                        break
+
+                    total_written += to_write
+                    remaining -= to_write
+
+            self.total_bytes_pushed += total_written
+            return self.f.ChannelBytes2Seconds(playback, total_written)
+        finally:
+            free(buf)
 
     cpdef set_current_time(self, double seconds):
         self.simulated_time = seconds
@@ -563,6 +609,73 @@ cdef class BassMidiEngine:
             sleep(0.1)
             self.f.MIDI_StreamEvent(sweep_stream, 0, BASS_MIDI_EVENT_NOTE, note)
         self.f.StreamFree(sweep_stream)
+
+    cpdef bytes render_pcm_chunk(self, double seconds):
+        if not self.buffering_enabled or not self.decode_stream or self.event_buffer == NULL or seconds <= 0.0:
+            return b""
+
+        cdef HSTREAM decode = self.decode_stream
+        cdef double target_end = self.simulated_time + seconds
+        cdef double segment_seconds
+        cdef double read_seconds
+        cdef double next_event_time
+        cdef double event_epsilon = 1.0 / 44100.0
+        cdef QWORD bytes_needed
+        cdef DWORD read_bytes
+        cdef DWORD err_val = 0xFFFFFFFF
+        cdef char* buf = NULL
+        cdef bytes out_bytes = b""
+        cdef MiniEvent* ev
+
+        chunks = []
+        while self.simulated_time < target_end:
+            while self.current_event_idx < self.event_count:
+                ev = &self.event_buffer[self.current_event_idx]
+                if ev.time <= self.simulated_time + event_epsilon:
+                    self.send_raw_event(ev.status, ev.param)
+                    self.current_event_idx += 1
+                else:
+                    break
+
+            next_event_time = target_end
+            if self.current_event_idx < self.event_count:
+                ev = &self.event_buffer[self.current_event_idx]
+                if ev.time < next_event_time:
+                    next_event_time = ev.time
+
+            segment_seconds = next_event_time - self.simulated_time
+            if segment_seconds <= 0.0:
+                if target_end - self.simulated_time <= event_epsilon:
+                    break
+                segment_seconds = min(event_epsilon, target_end - self.simulated_time)
+            elif segment_seconds < event_epsilon:
+                segment_seconds = min(event_epsilon, target_end - self.simulated_time)
+
+            bytes_needed = self.f.ChannelSeconds2Bytes(decode, segment_seconds)
+            if bytes_needed == 0 or bytes_needed == <QWORD>-1:
+                break
+
+            buf = <char*>malloc(<size_t>bytes_needed)
+            if buf == NULL:
+                raise MemoryError("Failed to allocate PCM render buffer")
+            try:
+                read_bytes = self.f.ChannelGetData(decode, buf, <DWORD>bytes_needed)
+                if read_bytes == err_val:
+                    break
+                if read_bytes == 0:
+                    break
+                chunks.append(PyBytes_FromStringAndSize(buf, read_bytes))
+                read_seconds = self.f.ChannelBytes2Seconds(decode, read_bytes)
+                if read_seconds <= 0.0:
+                    break
+                self.simulated_time += read_seconds
+            finally:
+                free(buf)
+                buf = NULL
+
+        if chunks:
+            out_bytes = b"".join(chunks)
+        return out_bytes
 
     cpdef double render_forward(self, double seconds):
         if not self.buffering_enabled: return 0.0

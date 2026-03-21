@@ -1,9 +1,13 @@
 import os
+import gc
+import shutil
 import threading
 import time
 import types
 from collections import deque
 from queue import Empty
+
+import numpy as np
 
 
 class PlayerController:
@@ -55,6 +59,13 @@ class PlayerController:
         self.seek_request_time = None
         self.parser_process = None
         self.parser_queue = None
+
+    def _release_parsed_midi_storage(self):
+        temp_dir = getattr(self.parsed_midi, "_backing_temp_dir", None) if self.parsed_midi is not None else None
+        self.parsed_midi = None
+        if temp_dir:
+            gc.collect()
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
     def init_midi_backends(
         self,
@@ -154,9 +165,13 @@ class PlayerController:
         if self.active_midi_backend and hasattr(self.active_midi_backend, "stop"):
             self.active_midi_backend.stop()
 
-    def start_parse_job(self, filepath, queue_factory, process_factory, process_target):
+    def start_parse_job(self, filepath, queue_factory, process_factory, process_target, fallback_event_threshold=0):
         self.parser_queue = queue_factory()
-        self.parser_process = process_factory(target=process_target, args=(filepath, self.parser_queue), daemon=True)
+        self.parser_process = process_factory(
+            target=process_target,
+            args=(filepath, self.parser_queue, int(fallback_event_threshold or 0)),
+            daemon=True,
+        )
         self.parser_process.start()
         return self.parser_process
 
@@ -176,7 +191,24 @@ class PlayerController:
         return messages
 
     def normalize_parsed_payload(self, payload, start_padding=3.0, end_padding=3.0):
+        self._release_parsed_midi_storage()
+        payload = dict(payload)
+        disk_backed_arrays = payload.pop("disk_backed_arrays", None)
+        backing_temp_dir = payload.pop("backing_temp_dir", None)
         self.parsed_midi = types.SimpleNamespace(**payload)
+
+        if disk_backed_arrays:
+            self.parsed_midi.note_data_for_gpu = np.load(
+                disk_backed_arrays["note_data_for_gpu"],
+                mmap_mode="r+",
+                allow_pickle=False,
+            )
+            self.parsed_midi.note_events_for_playback = np.load(
+                disk_backed_arrays["note_events_for_playback"],
+                mmap_mode="r+",
+                allow_pickle=False,
+            )
+            self.parsed_midi._backing_temp_dir = backing_temp_dir
 
         if hasattr(self.parsed_midi, "note_data_for_gpu") and self.parsed_midi.note_data_for_gpu.size > 0:
             self.parsed_midi.note_data_for_gpu["on_time"] += start_padding
@@ -324,7 +356,7 @@ class PlayerController:
     def unload_midi(self):
         self.playing = False
         self.reset_playback_state()
-        self.parsed_midi = None
+        self._release_parsed_midi_storage()
         self.total_song_notes = 0
         self.total_song_duration = 0.0
         self.max_nps = 0

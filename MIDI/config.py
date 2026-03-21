@@ -46,6 +46,7 @@ DEFAULT_CONFIG = {
         "show_cpu_graph": True,
         "theme_seed": [191, 120, 54],
         "window_bg": [22, 24, 29],
+        "pianoroll_bg": [13, 13, 20],
         "child_bg": [28, 31, 37],
         "frame_bg": [36, 39, 46],
         "frame_bg_hovered": [51, 57, 67],
@@ -59,6 +60,17 @@ DEFAULT_CONFIG = {
     },
     "library": {
         "midi_directories": []
+    },
+    "render": {
+        "resolution": "1280 x 720",
+        "framerate": 60,
+        "bitrate": "20M",
+        "audio_bitrate": "320k",
+        "codec": "H.264",
+        "ffmpeg_path": "ffmpeg",
+        "output_path": "",
+        "render_audio": True,
+        "show_stats_overlay": False
     }
 }
 

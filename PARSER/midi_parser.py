@@ -47,11 +47,12 @@ except ImportError:
             self.pitch_bend_events = []
             self.control_change_events = []
             self.total_duration_sec = 0.0
+            self.preferred_color_mode = "track"
 
         def count_total_events(self):
             return 0
 
-        def parse(self, progress_queue=None, total_events=0):
+        def parse(self, progress_queue=None, total_events=0, fallback_event_threshold=0):
             def _log(message):
                 if progress_queue:
                     progress_queue.put(('progress', str(message)))
@@ -65,6 +66,7 @@ except ImportError:
             self.pitch_bend_events = []
             self.control_change_events = []
             self.total_duration_sec = 0.0
+            self.preferred_color_mode = "track"
             
             _log(f"Opening {self.filename}...")
             start_parse_time = time.monotonic()
@@ -89,6 +91,13 @@ except ImportError:
 
                 track_event_streams = []
                 for track_num in range(num_tracks):
+                    if progress_queue and num_tracks > 0:
+                        load_fraction = 0.02 + (0.08 * (track_num / max(1, num_tracks)))
+                        _log({
+                            "fraction": load_fraction,
+                            "overlay": f"{load_fraction * 100:.1f}%",
+                            "detail": f"Loading track {track_num + 1:,} / {num_tracks:,}...",
+                        })
                     track_chunk_id = f.read(4)
                     
                     if not track_chunk_id:
@@ -143,7 +152,12 @@ except ImportError:
                         if evts_per_sec > 0 and total_events > 0:
                             remaining_events = max(0, total_events - total_event_count)
                             eta_seconds = remaining_events / evts_per_sec
+                        parse_fraction = (total_event_count / total_events) if total_events > 0 else 0.0
+                        overall_fraction = 0.10 + (0.75 * parse_fraction)
                         _log({
+                            "fraction": overall_fraction,
+                            "overlay": f"{overall_fraction * 100:.1f}%",
+                            "detail": f"Parsing... {total_event_count:,} / {total_events:,} events (ETA: {eta_seconds:.1f}s)" if total_events > 0 else f"Parsing... {total_event_count:,} events",
                             "current": total_event_count,
                             "total": total_events,
                             "eta": eta_seconds,
@@ -203,19 +217,29 @@ except ImportError:
                     continue
 
             _log("Note matching complete. Finalizing...")
+            if progress_queue:
+                _log({
+                    "fraction": 0.88,
+                    "overlay": "88.0%",
+                    "detail": "Finalizing parsed note data...",
+                })
             
             if temp_gpu_notes:
                 _log(f"Sorting {len(temp_gpu_notes)} notes...")
                 self.note_data_for_gpu = np.array(temp_gpu_notes, dtype=GPU_NOTE_DTYPE)
                 self.note_data_for_gpu.sort(order='on_time')
                 use_channel_colors = (not many_note_tracks) and channel_mask and (channel_mask & (channel_mask - 1))
-                if use_channel_colors:
-                    self.note_data_for_gpu['track'] = self.note_data_for_gpu['padding']
-                self.note_data_for_gpu['padding'] = 0
+                self.preferred_color_mode = "channel" if use_channel_colors else "track"
             else:
                 self.note_data_for_gpu = np.empty((0,), dtype=GPU_NOTE_DTYPE)
                 
             if self.note_events_for_playback_list:
+                if progress_queue:
+                    _log({
+                        "fraction": 0.94,
+                        "overlay": "94.0%",
+                        "detail": "Sorting playback events...",
+                    })
                 _log(f"Sorting {len(self.note_events_for_playback_list)} playback events...")
                 self.note_events_for_playback = np.array(
                     self.note_events_for_playback_list,
@@ -228,6 +252,12 @@ except ImportError:
             self.note_events_for_playback_list.clear() 
             
             self.total_duration_sec = max_off_time
+            if progress_queue:
+                _log({
+                    "fraction": 0.98,
+                    "overlay": "98.0%",
+                    "detail": "Building final MIDI data...",
+                })
 
             end_parse_time = time.monotonic()
             total_parse_time = end_parse_time - start_parse_time

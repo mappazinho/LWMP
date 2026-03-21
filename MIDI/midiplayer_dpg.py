@@ -8,10 +8,14 @@ import math
 import multiprocessing
 import os
 import queue
+import shutil
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import traceback
+import wave
 from collections import deque
 
 import dearpygui.dearpygui as dpg
@@ -68,22 +72,65 @@ except Exception as e:
 
 CONFIG = setup_omnimidi_preference(load_config())
 
+_BUNDLED_FFMPEG_CANDIDATES = [
+    os.path.join(script_dir, "ffmpeg.exe"),
+    os.path.join(script_dir, "ffmpeg"),
+    os.path.join(parent_dir, "ffmpeg.exe"),
+    os.path.join(parent_dir, "ffmpeg"),
+]
 
-def run_parser_process(filepath, result_queue):
+
+def _build_parser_result_payload(parser, use_disk_backing=False, result_queue=None):
+    result_data = {
+        "filename": parser.filename,
+        "ticks_per_beat": parser.ticks_per_beat,
+        "total_duration_sec": parser.total_duration_sec,
+        "pitch_bend_events": parser.pitch_bend_events,
+        "control_change_events": getattr(parser, "control_change_events", []),
+        "preferred_color_mode": getattr(parser, "preferred_color_mode", "track"),
+    }
+    if use_disk_backing:
+        temp_dir = tempfile.mkdtemp(prefix="lwmp_parse_")
+        gpu_path = os.path.join(temp_dir, "note_data_for_gpu.npy")
+        playback_path = os.path.join(temp_dir, "note_events_for_playback.npy")
+        if result_queue is not None:
+            result_queue.put((
+                "progress",
+                {
+                    "fraction": 0.995,
+                    "overlay": "99.5%",
+                    "detail": "Preparing low-memory result transfer...",
+                },
+            ))
+        np.save(gpu_path, parser.note_data_for_gpu, allow_pickle=False)
+        np.save(playback_path, parser.note_events_for_playback, allow_pickle=False)
+        result_data["disk_backed_arrays"] = {
+            "note_data_for_gpu": gpu_path,
+            "note_events_for_playback": playback_path,
+        }
+        result_data["backing_temp_dir"] = temp_dir
+    else:
+        result_data["note_data_for_gpu"] = parser.note_data_for_gpu
+        result_data["note_events_for_playback"] = parser.note_events_for_playback
+    return result_data
+
+
+def run_parser_process(filepath, result_queue, fallback_event_threshold=0):
     try:
         parser = MidiParser(filepath)
         total_events = parser.count_total_events()
         result_queue.put(("total_events", total_events))
-        parser.parse(result_queue, total_events=total_events)
-        result_data = {
-            "filename": parser.filename,
-            "ticks_per_beat": parser.ticks_per_beat,
-            "total_duration_sec": parser.total_duration_sec,
-            "note_data_for_gpu": parser.note_data_for_gpu,
-            "note_events_for_playback": parser.note_events_for_playback,
-            "pitch_bend_events": parser.pitch_bend_events,
-            "control_change_events": getattr(parser, "control_change_events", []),
-        }
+        parser.parse(
+            result_queue,
+            total_events=total_events,
+            fallback_event_threshold=int(fallback_event_threshold or 0),
+        )
+        use_disk_backing = bool(fallback_event_threshold and total_events > int(fallback_event_threshold))
+        result_data = _build_parser_result_payload(
+            parser,
+            use_disk_backing=use_disk_backing,
+            result_queue=result_queue,
+        )
         result_queue.put(("success", result_data))
     except Exception as e:
         traceback.print_exc()
@@ -103,6 +150,8 @@ class DpgMidiPlayerApp:
 
         self.playback_thread = None
         self.audio_sweep_thread = None
+        self.render_thread = None
+        self.render_start_time_monotonic = 0.0
         self.playback_lock = threading.Lock()
         self.process = None
         self.cpu_history = deque([0.0] * 100, maxlen=100)
@@ -162,6 +211,9 @@ class DpgMidiPlayerApp:
     def _library_cfg(self):
         return CONFIG["library"]
 
+    def _render_cfg(self):
+        return CONFIG["render"]
+
     def _color_tuple(self, key):
         color = self._gui_cfg()[key]
         return int(color[0]), int(color[1]), int(color[2])
@@ -184,6 +236,7 @@ class DpgMidiPlayerApp:
         return {
             "theme_seed": seed,
             "window_bg": self._mix_color(dark, seed, 0.08),
+            "pianoroll_bg": self._mix_color([10, 10, 16], seed, 0.06),
             "child_bg": self._mix_color(panel, seed, 0.12),
             "frame_bg": self._mix_color(frame, seed, 0.15),
             "frame_bg_hovered": self._mix_color(frame, seed, 0.28),
@@ -599,6 +652,7 @@ class DpgMidiPlayerApp:
 
         for key in (
             "window_bg",
+            "pianoroll_bg",
             "child_bg",
             "frame_bg",
             "frame_bg_hovered",
@@ -636,6 +690,7 @@ class DpgMidiPlayerApp:
 
         for key in (
             "window_bg",
+            "pianoroll_bg",
             "child_bg",
             "frame_bg",
             "frame_bg_hovered",
@@ -674,14 +729,8 @@ class DpgMidiPlayerApp:
                     )
                     dpg.add_button(tag="load_button", label="Load MIDI", callback=self.on_load_unload, width=118, height=30)
                     dpg.add_button(
-                        tag="nps_spikes_button",
-                        label="NPS Spikes",
-                        callback=self.show_nps_spikes_window,
-                        width=100,
-                        height=30,
-                        show=False,
+                        tag="play_button", label="Play", callback=self.toggle_play_pause, enabled=False, show=False, width=90, height=30
                     )
-                    dpg.add_button(tag="play_button", label="Play", callback=self.toggle_play_pause, enabled=False, show=False, width=90, height=30)
                     dpg.add_button(tag="stop_button", label="Stop", callback=self.stop_playback, enabled=False, show=False, width=90, height=30)
                     dpg.add_button(
                         tag="piano_roll_button",
@@ -690,6 +739,15 @@ class DpgMidiPlayerApp:
                         enabled=False,
                         show=False,
                         width=114,
+                        height=30,
+                    )
+                    dpg.add_button(
+                        tag="render_button",
+                        label="Render Video",
+                        callback=self.show_render_window,
+                        enabled=False,
+                        show=False,
+                        width=118,
                         height=30,
                     )
 
@@ -701,7 +759,21 @@ class DpgMidiPlayerApp:
 
                     with dpg.table_row():
                         with dpg.table_cell():
-                            dpg.add_text("Now Playing", tag="now_playing_text", color=(223, 177, 103), wrap=470)
+                            with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp):
+                                dpg.add_table_column(init_width_or_weight=1.0)
+                                dpg.add_table_column(init_width_or_weight=0.0)
+                                with dpg.table_row():
+                                    with dpg.table_cell():
+                                        dpg.add_text("Now Playing", tag="now_playing_text", color=(223, 177, 103), wrap=470)
+                                    with dpg.table_cell():
+                                        dpg.add_button(
+                                            tag="nps_spikes_button",
+                                            label="NPS Spikes",
+                                            callback=self.show_nps_spikes_window,
+                                            width=100,
+                                            height=28,
+                                            show=False,
+                                        )
                             dpg.add_text(
                                 "Choose a startup mode to initialize audio.",
                                 tag="status_text",
@@ -1047,6 +1119,96 @@ class DpgMidiPlayerApp:
             dpg.add_button(label="Close", callback=lambda: dpg.configure_item("piano_roll_window", show=False))
 
         with dpg.window(
+            tag="render_window",
+            label="Render Video",
+            modal=True,
+            show=False,
+            no_resize=True,
+            no_collapse=True,
+            width=520,
+            height=420,
+        ):
+            dpg.add_text("Video Output", color=(223, 177, 103))
+            dpg.add_text("FFmpeg path", color=(160, 166, 178))
+            dpg.add_input_text(
+                tag="render_ffmpeg_path",
+                default_value=str(self._render_cfg().get("ffmpeg_path", "ffmpeg")),
+                width=-1,
+            )
+            dpg.add_text("Output file", color=(160, 166, 178))
+            dpg.add_input_text(
+                tag="render_output_path",
+                default_value=str(self._render_cfg().get("output_path", "")),
+                width=-1,
+            )
+            dpg.add_spacer(height=4)
+            with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp):
+                dpg.add_table_column(init_width_or_weight=1.0)
+                dpg.add_table_column(init_width_or_weight=1.0)
+                with dpg.table_row():
+                    with dpg.table_cell():
+                        dpg.add_text("Resolution", color=(160, 166, 178))
+                        dpg.add_combo(
+                            tag="render_resolution",
+                            items=[f"{w} x {h}" for w, h in self.available_resolutions],
+                            default_value=str(self._render_cfg().get("resolution", f"{self.recommended_piano_roll_res[0]} x {self.recommended_piano_roll_res[1]}")),
+                            width=-1,
+                        )
+                    with dpg.table_cell():
+                        dpg.add_text("Codec", color=(160, 166, 178))
+                        dpg.add_combo(
+                            tag="render_codec",
+                            items=["H.264", "H.265", "MPEG-4"],
+                            default_value=str(self._render_cfg().get("codec", "H.264")),
+                            width=-1,
+                        )
+                with dpg.table_row():
+                    with dpg.table_cell():
+                        dpg.add_text("Framerate", color=(160, 166, 178))
+                        dpg.add_input_int(
+                            tag="render_framerate",
+                            default_value=int(self._render_cfg().get("framerate", 60)),
+                            step=1,
+                            width=-1,
+                        )
+                    with dpg.table_cell():
+                        dpg.add_text("Bitrate", color=(160, 166, 178))
+                        dpg.add_input_text(
+                            tag="render_bitrate",
+                            default_value=str(self._render_cfg().get("bitrate", "20M")),
+                            width=-1,
+                        )
+                with dpg.table_row():
+                    with dpg.table_cell():
+                        dpg.add_text("Audio Bitrate", color=(160, 166, 178))
+                        dpg.add_combo(
+                            tag="render_audio_bitrate",
+                            items=["128k", "192k", "256k", "320k"],
+                            default_value=str(self._render_cfg().get("audio_bitrate", "320k")),
+                            width=-1,
+                        )
+                    with dpg.table_cell():
+                        dpg.add_spacer(height=1)
+            dpg.add_spacer(height=6)
+            dpg.add_checkbox(
+                tag="render_audio_checkbox",
+                label="Render audio and mux into final video",
+                default_value=bool(self._render_cfg().get("render_audio", True)),
+            )
+            dpg.add_checkbox(
+                tag="render_stats_overlay_checkbox",
+                label="Draw notes passed, NPS, and time in video",
+                default_value=bool(self._render_cfg().get("show_stats_overlay", False)),
+            )
+            dpg.add_spacer(height=8)
+            dpg.add_spacer(height=8)
+            dpg.add_progress_bar(tag="render_progress_bar", default_value=0.0, width=-1, overlay="Idle")
+            dpg.add_text("", tag="render_status_text", wrap=480, color=(196, 198, 204))
+            dpg.add_spacer(height=8)
+            with dpg.group(horizontal=True):
+                dpg.add_button(tag="start_render_button", label="Start Render", callback=self.start_render_video, width=150, height=32)
+
+        with dpg.window(
             tag="customize_window",
             label="Customize UI",
             modal=True,
@@ -1082,6 +1244,8 @@ class DpgMidiPlayerApp:
                     with dpg.table_cell():
                         dpg.add_text("Window BG", color=(160, 166, 178))
                         dpg.add_color_edit(label="", tag="custom_window_bg", no_alpha=True, width=-1)
+                        dpg.add_text("Piano Roll BG", color=(160, 166, 178))
+                        dpg.add_color_edit(label="", tag="custom_pianoroll_bg", no_alpha=True, width=-1)
                         dpg.add_text("Child BG", color=(160, 166, 178))
                         dpg.add_color_edit(label="", tag="custom_child_bg", no_alpha=True, width=-1)
                         dpg.add_text("Frame BG", color=(160, 166, 178))
@@ -1107,7 +1271,6 @@ class DpgMidiPlayerApp:
             dpg.add_separator()
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Save", callback=self.save_customize_settings, width=140, height=32)
-                dpg.add_button(label="Close", callback=lambda: dpg.configure_item("customize_window", show=False), width=140, height=32)
 
         with dpg.window(
             tag="startup_window",
@@ -1327,6 +1490,17 @@ class DpgMidiPlayerApp:
         if dpg.does_item_exist("soundfont_text"):
             dpg.set_value("soundfont_text", self._current_soundfont_label())
 
+    def _center_modal(self, tag, width, height):
+        viewport_w = dpg.get_viewport_client_width() or 900
+        viewport_h = dpg.get_viewport_client_height() or 700
+        dpg.set_item_pos(
+            tag,
+            [
+                max(20, int((viewport_w - width) * 0.5)),
+                max(20, int((viewport_h - height) * 0.5)),
+            ],
+        )
+
     def _refresh_transport_button_state(self):
         has_midi = self.controller.parsed_midi is not None
         if has_midi:
@@ -1334,6 +1508,7 @@ class DpgMidiPlayerApp:
             dpg.show_item("play_button")
             dpg.show_item("stop_button")
             dpg.show_item("piano_roll_button")
+            dpg.show_item("render_button")
             dpg.enable_item("nps_spikes_button")
             dpg.enable_item("play_button")
             dpg.enable_item("stop_button")
@@ -1341,15 +1516,21 @@ class DpgMidiPlayerApp:
                 dpg.enable_item("piano_roll_button")
             else:
                 dpg.disable_item("piano_roll_button")
+            if BassMidiEngine is not None:
+                dpg.enable_item("render_button")
+            else:
+                dpg.disable_item("render_button")
         else:
             dpg.hide_item("nps_spikes_button")
             dpg.hide_item("play_button")
             dpg.hide_item("stop_button")
             dpg.hide_item("piano_roll_button")
+            dpg.hide_item("render_button")
             dpg.disable_item("nps_spikes_button")
             dpg.disable_item("play_button")
             dpg.disable_item("stop_button")
             dpg.disable_item("piano_roll_button")
+            dpg.disable_item("render_button")
 
     def _wait_for_audio_sweep(self, timeout=2.0):
         if self.audio_sweep_thread and self.audio_sweep_thread.is_alive():
@@ -1593,6 +1774,7 @@ class DpgMidiPlayerApp:
                 multiprocessing.Queue,
                 multiprocessing.Process,
                 run_parser_process,
+                fallback_event_threshold=self.recommended_note_limit * 2,
             )
         except Exception as e:
             self.controller.clear_parse_job()
@@ -1619,16 +1801,23 @@ class DpgMidiPlayerApp:
                     if self.loading_visible:
                         progress_payload = event["payload"]
                         if isinstance(progress_payload, dict):
-                            current = progress_payload.get("current", 0)
-                            total = progress_payload.get("total", 1)
-                            eta = progress_payload.get("eta", 0)
-                            fraction = (current / total) if total > 0 else 0.0
-                            eta_str = f"ETA: {eta:.1f}s" if eta > 0 else "Calculating..."
-                            self._update_parse_progress(
-                                fraction,
-                                f"{fraction * 100:.1f}%",
-                                f"Parsing... {current:,} / {total:,} events ({eta_str})",
-                            )
+                            if "fraction" in progress_payload:
+                                self._update_parse_progress(
+                                    progress_payload.get("fraction", 0.0),
+                                    progress_payload.get("overlay", "Working..."),
+                                    progress_payload.get("detail", "Working..."),
+                                )
+                            else:
+                                current = progress_payload.get("current", 0)
+                                total = progress_payload.get("total", 1)
+                                eta = progress_payload.get("eta", 0)
+                                fraction = (current / total) if total > 0 else 0.0
+                                eta_str = f"ETA: {eta:.1f}s" if eta > 0 else "Calculating..."
+                                self._update_parse_progress(
+                                    fraction,
+                                    f"{fraction * 100:.1f}%",
+                                    f"Parsing... {current:,} / {total:,} events ({eta_str})",
+                                )
                         else:
                             self._update_parse_progress(0.0, "Working...", str(progress_payload))
                 elif event["kind"] == "success":
@@ -1876,6 +2065,7 @@ class DpgMidiPlayerApp:
             self.controller.active_midi_backend.set_current_time(start_time)
             has_started_playback = False
             emergency_recovery = False
+            startup_prerender_target = 3.0 if start_time <= 0.001 else 4.0
 
             while self.controller.playing:
                 if not self.controller.playing:
@@ -1895,6 +2085,7 @@ class DpgMidiPlayerApp:
                     self.controller.active_midi_backend.set_current_time(requested_time)
                     self.controller.buffered_playback_start_offset = requested_time
                     has_started_playback = False
+                    startup_prerender_target = 4.0
 
                 buffer_lvl = self.controller.active_midi_backend.fill_buffer(60.0)
                 is_active = self.controller.active_midi_backend.is_active()
@@ -1911,7 +2102,7 @@ class DpgMidiPlayerApp:
                     continue
 
                 if not has_started_playback:
-                    if buffer_lvl > 4.0:
+                    if buffer_lvl >= startup_prerender_target:
                         if emergency_recovery and hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
                             self.controller.active_midi_backend.set_emergency_recovery(False)
                             emergency_recovery = False
@@ -1919,7 +2110,11 @@ class DpgMidiPlayerApp:
                         self.controller.active_midi_backend.play()
                         has_started_playback = True
                     else:
-                        self._queue_ui(dpg.set_value, "status_text", f"Prerendering... {buffer_lvl:.1f}s / 4.0s")
+                        self._queue_ui(
+                            dpg.set_value,
+                            "status_text",
+                            f"Prerendering... {buffer_lvl:.1f}s / {startup_prerender_target:.1f}s",
+                        )
                 else:
                     if buffer_lvl < 0.2:
                         if not emergency_recovery and hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
@@ -2120,18 +2315,27 @@ class DpgMidiPlayerApp:
         if self.piano_roll and self.piano_roll.app_running.is_set():
             self._message_info("Piano Roll", "Piano Roll is already running.")
             return
-        viewport_w = dpg.get_viewport_client_width() or 900
-        viewport_h = dpg.get_viewport_client_height() or 700
-        panel_w = 320
-        panel_h = 220
-        dpg.set_item_pos(
-            "piano_roll_window",
-            [
-                max(20, int((viewport_w - panel_w) * 0.5)),
-                max(20, int((viewport_h - panel_h) * 0.5)),
-            ],
-        )
+        self._center_modal("piano_roll_window", 320, 220)
         dpg.configure_item("piano_roll_window", show=True)
+
+    def show_render_window(self, sender=None, app_data=None):
+        if self.controller.parsed_midi is None:
+            self._message_warning("No MIDI", "Load a MIDI before starting a render.")
+            return
+        if self.render_thread and self.render_thread.is_alive():
+            self._message_info("Render In Progress", "A video render is already running.")
+            return
+        current_ffmpeg = dpg.get_value("render_ffmpeg_path").strip()
+        if not current_ffmpeg or current_ffmpeg.lower() == "ffmpeg":
+            bundled_ffmpeg = self._bundled_ffmpeg_path()
+            if bundled_ffmpeg:
+                dpg.set_value("render_ffmpeg_path", bundled_ffmpeg)
+        if not dpg.get_value("render_output_path") and self.controller.parsed_midi:
+            source_name = os.path.splitext(os.path.basename(self.controller.parsed_midi.filename))[0]
+            default_path = os.path.join(os.path.dirname(self.controller.parsed_midi.filename), f"{source_name}_render.mp4")
+            dpg.set_value("render_output_path", default_path)
+        self._center_modal("render_window", 520, 420)
+        dpg.configure_item("render_window", show=True)
 
     def launch_selected_piano_roll(self):
         selected = dpg.get_value("piano_roll_resolution")
@@ -2145,6 +2349,7 @@ class DpgMidiPlayerApp:
         self.last_piano_roll_res = (width, height)
         self.piano_roll = PianoRoll(width, height, CONFIG)
         self.piano_roll.set_nps_spikes(getattr(self.controller, "max_nps_spikes", []))
+        self.piano_roll.set_preferred_color_mode(getattr(self.controller.parsed_midi, "preferred_color_mode", "track"))
         self.piano_roll_thread = threading.Thread(target=self.run_piano_roll, daemon=True)
         self.piano_roll_thread.start()
 
@@ -2157,6 +2362,509 @@ class DpgMidiPlayerApp:
 
     def get_current_playback_time_thread_safe(self):
         return self.controller.current_playback_time_for_threads
+
+    def _set_render_progress(self, fraction, overlay, detail):
+        if dpg.does_item_exist("render_progress_bar"):
+            dpg.set_value("render_progress_bar", max(0.0, min(float(fraction), 1.0)))
+            dpg.configure_item("render_progress_bar", overlay=str(overlay))
+        if dpg.does_item_exist("render_status_text"):
+            dpg.set_value("render_status_text", detail)
+
+    def _format_render_eta(self, seconds_remaining):
+        seconds_remaining = max(0, int(round(float(seconds_remaining))))
+        hours, rem = divmod(seconds_remaining, 3600)
+        minutes, seconds = divmod(rem, 60)
+        if hours > 0:
+            return f"{hours:d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
+
+    def _render_progress_with_eta(self, start_time, fraction, overlay, detail):
+        fraction = max(0.0, min(float(fraction), 1.0))
+        detail_text = str(detail)
+        if fraction > 0.001 and fraction < 1.0:
+            elapsed = max(0.0, time.monotonic() - start_time)
+            if elapsed > 0.25:
+                estimated_total = elapsed / fraction
+                eta_seconds = max(0.0, estimated_total - elapsed)
+                detail_text = f"{detail_text}\nEstimated time left: {self._format_render_eta(eta_seconds)}"
+        self._set_render_progress(fraction, overlay, detail_text)
+
+    def _bundled_ffmpeg_path(self):
+        for candidate in _BUNDLED_FFMPEG_CANDIDATES:
+            if os.path.isfile(candidate):
+                return candidate
+        return ""
+
+    def _resolve_ffmpeg_path(self, requested_path):
+        requested_path = (requested_path or "").strip()
+        if not requested_path:
+            requested_path = "ffmpeg"
+        if os.path.isfile(requested_path):
+            return requested_path
+        if requested_path.lower() == "ffmpeg":
+            bundled = self._bundled_ffmpeg_path()
+            if bundled:
+                return bundled
+        resolved = shutil.which(requested_path)
+        return resolved
+
+    def _normalize_render_output_path(self, output_path, codec_label):
+        output_path = (output_path or "").strip()
+        if not output_path:
+            return output_path
+        _, default_ext = self._codec_settings(codec_label)
+        root, ext = os.path.splitext(output_path)
+        if not ext:
+            return output_path + default_ext
+        return output_path
+
+    def _format_ffmpeg_error(self, ffmpeg_cmd, returncode, stderr_output):
+        stderr_output = (stderr_output or "").strip()
+        if stderr_output:
+            stderr_lines = [line.rstrip() for line in stderr_output.splitlines() if line.strip()]
+            if len(stderr_lines) > 18:
+                stderr_lines = stderr_lines[-18:]
+            stderr_text = "\n".join(stderr_lines)
+        else:
+            stderr_text = f"ffmpeg exited with code {returncode}."
+        return (
+            f"FFmpeg failed while encoding the video.\n\n"
+            f"Command:\n{' '.join(ffmpeg_cmd)}\n\n"
+            f"Details:\n{stderr_text}"
+        )
+
+    def _preferred_drawtext_font(self):
+        font_candidates = [
+            r"C:\Windows\Fonts\segoeui.ttf",
+            r"C:\Windows\Fonts\arial.ttf",
+            r"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            r"/usr/share/fonts/TTF/DejaVuSans.ttf",
+        ]
+        for candidate in font_candidates:
+            if os.path.isfile(candidate):
+                return candidate
+        return ""
+
+    def _escape_drawtext_value(self, value):
+        escaped = str(value).replace("\\", "/")
+        escaped = escaped.replace(":", r"\:")
+        escaped = escaped.replace("'", r"\'")
+        escaped = escaped.replace(",", r"\,")
+        return escaped
+
+    def _build_watermark_filter(self, total_duration):
+        start_time = max(0.0, float(total_duration) - 5.0)
+        fade_in_end = start_time + 1.0
+        hold_end = start_time + 4.0
+        end_time = start_time + 5.0
+        alpha_expr = (
+            f"0.25*if(lt(t,{start_time:.3f}),0,"
+            f"if(lt(t,{fade_in_end:.3f}),(t-{start_time:.3f})/1.0,"
+            f"if(lt(t,{hold_end:.3f}),1,"
+            f"if(lt(t,{end_time:.3f}),({end_time:.3f}-t)/1.0,0))))"
+        )
+        filter_parts = [
+            "drawtext=text='Rendered with LWMP'",
+            "fontcolor=white",
+            "fontsize=28",
+            "x=w-tw-18",
+            "y=h-th-16",
+            f"alpha='{alpha_expr}'",
+        ]
+        fontfile = self._preferred_drawtext_font()
+        if fontfile:
+            filter_parts.insert(1, f"fontfile='{self._escape_drawtext_value(fontfile)}'")
+        return ":".join(filter_parts)
+
+    def _build_buffered_event_arrays(self, parsed_midi):
+        note_events = parsed_midi.note_events_for_playback
+        pitch_bend_events = parsed_midi.pitch_bend_events
+        control_change_events = getattr(parsed_midi, "control_change_events", [])
+
+        count_notes = len(note_events)
+        count_bends = len(pitch_bend_events)
+        count_ccs = len(control_change_events)
+        total_ops = (count_notes * 2) + count_bends + count_ccs
+
+        times = np.empty(total_ops, dtype=np.float64)
+        statuses = np.empty(total_ops, dtype=np.uint32)
+        params = np.empty(total_ops, dtype=np.uint32)
+
+        times[:count_notes] = note_events["on_time"]
+        statuses[:count_notes] = 0x90 + note_events["channel"]
+        params[:count_notes] = (note_events["velocity"].astype(np.uint32) << 8) | note_events["pitch"].astype(np.uint32)
+
+        times[count_notes : count_notes * 2] = note_events["off_time"]
+        statuses[count_notes : count_notes * 2] = 0x80 + note_events["channel"]
+        params[count_notes : count_notes * 2] = note_events["pitch"].astype(np.uint32)
+
+        if count_bends > 0:
+            pb_arr = np.array(pitch_bend_events, dtype=[("time", "f8"), ("chan", "u4"), ("val", "u4")])
+            start_idx = count_notes * 2
+            end_idx = start_idx + count_bends
+            times[start_idx:end_idx] = pb_arr["time"]
+            statuses[start_idx:end_idx] = 0xE0 + pb_arr["chan"]
+            bend_lsb = pb_arr["val"] & 0x7F
+            bend_msb = (pb_arr["val"] >> 7) & 0x7F
+            params[start_idx:end_idx] = (bend_msb << 8) | bend_lsb
+
+        if count_ccs > 0:
+            cc_arr = np.array(control_change_events, dtype=[("time", "f8"), ("chan", "u4"), ("cc", "u4"), ("val", "u4")])
+            start_idx = (count_notes * 2) + count_bends
+            end_idx = start_idx + count_ccs
+            times[start_idx:end_idx] = cc_arr["time"]
+            statuses[start_idx:end_idx] = 0xB0 + cc_arr["chan"]
+            params[start_idx:end_idx] = (cc_arr["val"] << 8) | cc_arr["cc"]
+
+        sort_indices = np.argsort(times, kind="stable")
+        return times[sort_indices], statuses[sort_indices], params[sort_indices]
+
+    def _render_audio_to_wav(self, wav_path, parsed_midi):
+        bass_cls = self.controller.bass_engine_cls
+        if bass_cls is None:
+            raise RuntimeError("BASSMIDI engine not available for export.")
+
+        latest_config = load_config()
+        audio_cfg = latest_config.get("audio", {})
+        soundfont_path = audio_cfg.get("soundfont_path")
+        if not soundfont_path or not os.path.exists(soundfont_path):
+            raise RuntimeError("A valid SoundFont is required for video rendering.")
+
+        engine = bass_cls({}, soundfont_path=soundfont_path, buffering=True, debug=DEBUG)
+        try:
+            render_volume = float(audio_cfg.get("volume", 0.5))
+            render_voices = int(audio_cfg.get("voices", 512))
+            engine.set_volume(render_volume)
+            if hasattr(engine, "set_voices"):
+                engine.set_voices(render_voices)
+            if hasattr(engine, "set_emergency_recovery"):
+                engine.set_emergency_recovery(False)
+                if hasattr(engine, "set_voices"):
+                    engine.set_voices(render_voices)
+            if hasattr(engine, "set_pitch_bend_range"):
+                engine.set_pitch_bend_range(12)
+
+            times, statuses, params = self._build_buffered_event_arrays(parsed_midi)
+            engine.upload_events(times, statuses, params)
+            engine.set_current_time(0.0)
+
+            total_duration = float(parsed_midi.total_duration_sec)
+            chunk_seconds = 1.0 / 60.0
+            rendered_audio_time = 0.0
+            sample_rate = 44100
+            channels = 2
+
+            with wave.open(wav_path, "wb") as wav_file:
+                wav_file.setnchannels(channels)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+
+                while rendered_audio_time < total_duration:
+                    remaining = total_duration - rendered_audio_time
+                    requested_seconds = min(chunk_seconds, remaining)
+                    target_frames = max(1, int(round(requested_seconds * sample_rate)))
+                    target_samples = target_frames * channels
+                    pcm_chunk = engine.render_pcm_chunk(requested_seconds)
+                    if not pcm_chunk:
+                        pcm_int16 = np.zeros(target_samples, dtype=np.int16)
+                    else:
+                        pcm_float = np.frombuffer(pcm_chunk, dtype=np.float32)
+                        pcm_int16 = np.clip(pcm_float, -1.0, 1.0)
+                        pcm_int16 = (pcm_int16 * 32767.0).astype(np.int16)
+                        sample_delta = target_samples - pcm_int16.size
+                        if sample_delta > 0:
+                            pcm_int16 = np.pad(pcm_int16, (0, sample_delta), mode="constant")
+                        elif sample_delta < 0:
+                            pcm_int16 = pcm_int16[:target_samples]
+                    wav_file.writeframes(pcm_int16.tobytes())
+                    rendered_audio_time = min(total_duration, rendered_audio_time + requested_seconds)
+                    self._queue_ui(
+                        self._render_progress_with_eta,
+                        self.render_start_time_monotonic,
+                        0.45 * (rendered_audio_time / max(total_duration, 0.001)),
+                        f"Audio {rendered_audio_time:.1f}s / {total_duration:.1f}s",
+                        "Rendering audio...",
+                    )
+        finally:
+            try:
+                engine.shutdown()
+            except Exception:
+                pass
+
+    def _codec_settings(self, codec_label):
+        if codec_label == "H.265":
+            return ["-c:v", "libx265", "-pix_fmt", "yuv420p"], ".mp4"
+        if codec_label == "MPEG-4":
+            return ["-c:v", "mpeg4"], ".mp4"
+        return ["-c:v", "libx264", "-pix_fmt", "yuv420p"], ".mp4"
+
+    def _render_video_stream_only(self, ffmpeg_bin, parsed_midi, settings, video_output_path):
+        codec_args, _ = self._codec_settings(settings["codec"])
+        ffmpeg_cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-nostats",
+            "-f", "rawvideo",
+            "-pix_fmt", "rgb24",
+            "-s", f"{settings['width']}x{settings['height']}",
+            "-r", str(settings["framerate"]),
+            "-i", "-",
+            *codec_args,
+            "-b:v", settings["bitrate"],
+            "-an",
+            video_output_path,
+        ]
+
+        self._queue_ui(
+            self._render_progress_with_eta,
+            self.render_start_time_monotonic,
+            0.48,
+            "Video",
+            "Rendering piano roll frames...",
+        )
+        process = subprocess.Popen(
+            ffmpeg_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        piano_roll = PianoRoll(settings["width"], settings["height"], CONFIG)
+        piano_roll.set_export_mode(True)
+        piano_roll.set_nps_spikes(getattr(self.controller, "max_nps_spikes", []))
+        piano_roll.set_preferred_color_mode(getattr(parsed_midi, "preferred_color_mode", "track"))
+        ffmpeg_stderr_chunks = []
+
+        def _drain_ffmpeg_stderr():
+            try:
+                while process.stderr:
+                    chunk = process.stderr.read(4096)
+                    if not chunk:
+                        break
+                    ffmpeg_stderr_chunks.append(chunk)
+            except Exception:
+                pass
+
+        stderr_thread = threading.Thread(target=_drain_ffmpeg_stderr, daemon=True)
+        stderr_thread.start()
+        try:
+            try:
+                piano_roll.init_pygame_and_gl(hidden=True)
+            except Exception:
+                piano_roll.init_pygame_and_gl(hidden=False)
+            notes_for_gpu = np.ascontiguousarray(parsed_midi.note_data_for_gpu)
+            piano_roll.load_midi(notes_for_gpu, lambda: 0.0)
+            total_duration = float(parsed_midi.total_duration_sec)
+            total_frames = max(1, int(math.ceil(total_duration * settings["framerate"])))
+
+            for frame_idx in range(total_frames):
+                current_time = min(total_duration, frame_idx / float(settings["framerate"]))
+                piano_roll.draw(current_time, present=False)
+                try:
+                    process.stdin.write(piano_roll.capture_frame_rgb())
+                except BrokenPipeError:
+                    break
+                if process.poll() is not None:
+                    break
+                if frame_idx % max(1, settings["framerate"] // 2) == 0:
+                    fraction_start = 0.5 if settings["render_audio"] else 0.02
+                    fraction_span = 0.28 if settings["render_audio"] else 0.94
+                    fraction = fraction_start + (fraction_span * ((frame_idx + 1) / float(total_frames)))
+                    self._queue_ui(
+                        self._render_progress_with_eta,
+                        self.render_start_time_monotonic,
+                        fraction,
+                        f"Frame {frame_idx + 1:,} / {total_frames:,}",
+                        "Rendering piano roll frames...",
+                    )
+        finally:
+            try:
+                if process.stdin:
+                    process.stdin.close()
+            except Exception:
+                pass
+            try:
+                piano_roll.cleanup()
+            except Exception:
+                pass
+
+        process.wait()
+        stderr_thread.join(timeout=2.0)
+        ffmpeg_stderr = b"".join(ffmpeg_stderr_chunks).decode("utf-8", errors="replace")
+        if process.returncode != 0:
+            raise RuntimeError(self._format_ffmpeg_error(ffmpeg_cmd, process.returncode, ffmpeg_stderr))
+
+    def _finalize_render_output(self, ffmpeg_bin, video_path, output_path, settings, total_duration, audio_path=None):
+        codec_args, _ = self._codec_settings(settings["codec"])
+        watermark_filter = self._build_watermark_filter(total_duration)
+        ffmpeg_cmd = [
+            ffmpeg_bin,
+            "-y",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-nostats",
+            "-i", video_path,
+        ]
+        if audio_path:
+            ffmpeg_cmd.extend(["-i", audio_path])
+        ffmpeg_cmd.extend([
+            "-vf", watermark_filter,
+            *codec_args,
+            "-b:v", settings["bitrate"],
+        ])
+        if audio_path:
+            ffmpeg_cmd.extend([
+            "-c:a", "aac",
+            "-b:a", settings["audio_bitrate"],
+            "-shortest",
+            ])
+        else:
+            ffmpeg_cmd.append("-an")
+        ffmpeg_cmd.append(output_path)
+        self._queue_ui(
+            self._render_progress_with_eta,
+            self.render_start_time_monotonic,
+            0.82,
+            "Finalizing",
+            "Adding watermark and writing final video...",
+        )
+        process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        stderr_output = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
+        process.wait()
+        if process.returncode != 0:
+            raise RuntimeError(self._format_ffmpeg_error(ffmpeg_cmd, process.returncode, stderr_output))
+
+    def start_render_video(self, sender=None, app_data=None):
+        if self.render_thread and self.render_thread.is_alive():
+            self._message_warning("Render Busy", "A render is already in progress.")
+            return
+        if self.controller.parsed_midi is None:
+            self._message_warning("No MIDI", "Load a MIDI before rendering.")
+            return
+        if self.piano_roll and self.piano_roll.app_running.is_set():
+            self._message_warning("Close Piano Roll", "Close the live piano roll before starting a video render.")
+            return
+        if PianoRoll is None:
+            self._message_warning("Piano Roll Unavailable", "Piano roll rendering is not available in this build.")
+            return
+
+        ffmpeg_path = dpg.get_value("render_ffmpeg_path").strip()
+        output_path = self._normalize_render_output_path(dpg.get_value("render_output_path").strip(), dpg.get_value("render_codec"))
+        if not output_path:
+            self._message_warning("Output Required", "Enter an output video path before rendering.")
+            return
+
+        codec_label = dpg.get_value("render_codec")
+        resolution = dpg.get_value("render_resolution")
+        framerate = max(1, int(dpg.get_value("render_framerate")))
+        bitrate = dpg.get_value("render_bitrate").strip() or "20M"
+        audio_bitrate = dpg.get_value("render_audio_bitrate").strip() or "320k"
+        render_audio = bool(dpg.get_value("render_audio_checkbox"))
+        show_stats_overlay = bool(dpg.get_value("render_stats_overlay_checkbox"))
+
+        render_cfg = self._render_cfg()
+        render_cfg["ffmpeg_path"] = ffmpeg_path
+        render_cfg["output_path"] = output_path
+        render_cfg["codec"] = codec_label
+        render_cfg["resolution"] = resolution
+        render_cfg["framerate"] = framerate
+        render_cfg["bitrate"] = bitrate
+        render_cfg["audio_bitrate"] = audio_bitrate
+        render_cfg["render_audio"] = render_audio
+        render_cfg["show_stats_overlay"] = show_stats_overlay
+        save_config(CONFIG)
+
+        width_str, height_str = resolution.split(" x ")
+        settings = {
+            "ffmpeg_path": ffmpeg_path,
+            "output_path": output_path,
+            "codec": codec_label,
+            "width": int(width_str),
+            "height": int(height_str),
+            "framerate": framerate,
+            "bitrate": bitrate,
+            "audio_bitrate": audio_bitrate,
+            "render_audio": render_audio,
+            "show_stats_overlay": show_stats_overlay,
+        }
+
+        dpg.set_value("render_output_path", output_path)
+        dpg.disable_item("start_render_button")
+        self._set_render_progress(0.0, "Preparing", "Preparing video render...")
+        self.render_start_time_monotonic = time.monotonic()
+        self.render_thread = threading.Thread(target=self._render_video_job, args=(settings,), daemon=True)
+        self.render_thread.start()
+
+    def _render_video_job(self, settings):
+        ffmpeg_bin = self._resolve_ffmpeg_path(settings["ffmpeg_path"])
+        if not ffmpeg_bin:
+            self._queue_ui(self._set_render_progress, 0.0, "FFmpeg missing", "FFmpeg executable not found. Set a valid ffmpeg path.")
+            self._queue_ui(dpg.enable_item, "start_render_button")
+            return
+
+        parsed_midi = self.controller.parsed_midi
+        if parsed_midi is None:
+            self._queue_ui(self._set_render_progress, 0.0, "No MIDI", "No parsed MIDI is available for rendering.")
+            self._queue_ui(dpg.enable_item, "start_render_button")
+            return
+
+        output_path = settings["output_path"]
+        os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="lwmp_render_") as temp_dir:
+                wav_path = os.path.join(temp_dir, "audio.wav")
+                video_only_path = os.path.join(temp_dir, "video_only.mp4")
+
+                if settings["render_audio"]:
+                    self._queue_ui(
+                        self._render_progress_with_eta,
+                        self.render_start_time_monotonic,
+                        0.02,
+                        "Audio",
+                        "Rendering full audio track...",
+                    )
+                    self._render_audio_to_wav(wav_path, parsed_midi)
+                else:
+                    self._queue_ui(
+                        self._render_progress_with_eta,
+                        self.render_start_time_monotonic,
+                        0.02,
+                        "Video",
+                        "Skipping audio render.",
+                    )
+
+                self._render_video_stream_only(ffmpeg_bin, parsed_midi, settings, video_only_path)
+
+                if settings["render_audio"]:
+                    self._finalize_render_output(
+                        ffmpeg_bin,
+                        video_only_path,
+                        output_path,
+                        settings,
+                        parsed_midi.total_duration_sec,
+                        audio_path=wav_path,
+                    )
+                else:
+                    self._finalize_render_output(
+                        ffmpeg_bin,
+                        video_only_path,
+                        output_path,
+                        settings,
+                        parsed_midi.total_duration_sec,
+                    )
+
+            self._queue_ui(self._set_render_progress, 1.0, "Done", f"Render complete: {output_path}")
+            self._queue_ui(self.set_status, f"Render complete: {os.path.basename(output_path)}")
+            self._queue_ui(self._message_info, "Render Complete", f"Video saved to:\n{output_path}")
+        except Exception as e:
+            traceback.print_exc()
+            self._queue_ui(self._set_render_progress, 0.0, "Render Failed", str(e))
+            self._queue_ui(self._message_error, "Render Failed", str(e))
+        finally:
+            self._queue_ui(dpg.enable_item, "start_render_button")
 
     def run_piano_roll(self):
         piano_roll_instance = self.piano_roll
