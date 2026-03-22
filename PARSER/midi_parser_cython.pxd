@@ -11,6 +11,7 @@ cdef struct GpuNote:
     np.uint8_t   velocity
     np.uint8_t   track
     np.uint8_t   padding
+    np.uint32_t  sort_order
 
 # --- C-level Struct for Playback Event Data ---
 cdef struct PlaybackEvent:

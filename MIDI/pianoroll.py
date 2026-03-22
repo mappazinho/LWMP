@@ -83,12 +83,7 @@ void main() {
     vec2 instance_offset = vec2(layout.x, note_y - note_h);
     vec2 final_pos = pos * instance_scale + instance_offset;
     
-    float base_z = u_is_white_key[pitch] == 1 ? 0.0 : 0.5;
-    float time_offset = mod(on_time, 1000.0) * 0.0004;
-
-    float z_depth = base_z + time_offset;
-    
-    gl_Position = u_projection * vec4(final_pos, z_depth, 1.0);
+    gl_Position = u_projection * vec4(final_pos, 0.0, 1.0);
     
     v_pos = pos;
     v_note_h = note_h;
@@ -708,6 +703,19 @@ class PianoRoll:
         render_notes_array = np.ascontiguousarray(notes_array.copy())
         if self.note_color_mode == "channel":
             render_notes_array['track'] = render_notes_array['padding']
+        else:
+            pair_slots = np.zeros((256, 16), dtype=np.uint8)
+            pair_present = np.zeros((256, 16), dtype=bool)
+            pair_present[render_notes_array['track'], render_notes_array['padding']] = True
+
+            slot = 0
+            for track_idx in range(256):
+                for channel_idx in range(16):
+                    if pair_present[track_idx, channel_idx]:
+                        pair_slots[track_idx, channel_idx] = slot % 128
+                        slot += 1
+
+            render_notes_array['track'] = pair_slots[render_notes_array['track'], render_notes_array['padding']]
         return render_notes_array
 
     def _build_render_data(self, all_notes_gpu):
@@ -716,6 +724,14 @@ class PianoRoll:
         render_notes_array = self._apply_note_color_mode(sorted_notes)
         render_on_times = render_notes_array['on_time']
         return render_notes_array, render_on_times
+
+    def _order_visible_notes_for_draw(self, visible_slice):
+        if visible_slice is None or len(visible_slice) <= 1 or self.is_white_key_data is None:
+            return visible_slice
+        white_mask = self.is_white_key_data[visible_slice['pitch']] == 1
+        if np.all(white_mask) or not np.any(white_mask):
+            return visible_slice
+        return np.concatenate((visible_slice[white_mask], visible_slice[~white_mask]))
 
     def _rebuild_color_mode_render_data(self):
         if self.all_notes_gpu is None:
@@ -1045,6 +1061,7 @@ class PianoRoll:
             return
 
         self.keyboard_layout = {}
+        sharp_ratio = 0.65
         white_key_indices = [0, 2, 4, 5, 7, 9, 11]
         key_is_white = [(i % 12) in white_key_indices for i in range(128)]
         self.is_white_key_data = np.array(key_is_white, dtype=np.int32)
@@ -1060,6 +1077,7 @@ class PianoRoll:
         self.white_key_pitch_map.clear()
         self.black_key_pitch_map.clear()
 
+        start_pitch = 0
         white_key_count = 0
         for pitch in range(128):
             is_white = key_is_white[pitch]
@@ -1079,22 +1097,27 @@ class PianoRoll:
             if max_pitch in self.keyboard_layout:
                  self.keyboard_layout[max_pitch]['width'] += width_corr
 
-        black_key_width = white_key_width * 0.6
+        def white_count_before(pitch):
+            return sum(1 for i in range(start_pitch, pitch) if key_is_white[i])
+
+        def black_key_nudge(note_val):
+            if note_val in (1, 6):  # C#, F#
+                return -(sharp_ratio / 5.0)
+            if note_val in (3, 10):  # D#, A#
+                return sharp_ratio / 5.0
+            return 0.0
+
+        black_key_width = white_key_width * sharp_ratio
         black_key_height = white_key_height * 0.65
 
         for pitch in range(128):
             if not key_is_white[pitch]:
-                anchor_pitch = pitch - 1
-                while anchor_pitch > 0 and (anchor_pitch not in self.keyboard_layout or self.keyboard_layout[anchor_pitch]['type'] != 'white'):
-                    anchor_pitch -= 1
-                
-                if anchor_pitch in self.keyboard_layout:
-                    anchor_key = self.keyboard_layout[anchor_pitch]
-                    x_pos = anchor_key['x'] + anchor_key['width'] - (black_key_width / 2)
-                    
-                    self.keyboard_layout[pitch] = {'type': 'black', 'x': x_pos, 'width': black_key_width, 'height': black_key_height}
-                    black_keys_geom.append([x_pos, 0, black_key_width, black_key_height])
-                    self.black_key_pitch_map[pitch] = len(black_keys_geom) - 1
+                note_val = pitch % 12
+                start_offset = -sharp_ratio / 2.0
+                x_pos = white_key_width * (white_count_before(pitch) + start_offset + black_key_nudge(note_val))
+                self.keyboard_layout[pitch] = {'type': 'black', 'x': x_pos, 'width': black_key_width, 'height': black_key_height}
+                black_keys_geom.append([x_pos, 0, black_key_width, black_key_height])
+                self.black_key_pitch_map[pitch] = len(black_keys_geom) - 1
 
         white_key_dtype = np.dtype([('rect', 'f4', 4), ('is_pressed', 'f4'), ('color', 'f4', 3)])
         self.white_key_instance_data = np.zeros(len(white_keys_geom), dtype=white_key_dtype)
@@ -1681,9 +1704,16 @@ class PianoRoll:
                     visible_count = 0
                 
                 if visible_count > self.streaming_vbo_capacity:
-                    visible_slice = visible_slice[:self.streaming_vbo_capacity]
+                    active_or_distance = np.where(
+                        visible_slice['on_time'] <= now,
+                        np.where(visible_slice['off_time'] > now, 0.0, now - visible_slice['off_time']),
+                        visible_slice['on_time'] - now,
+                    )
+                    keep_idx = np.argpartition(active_or_distance, self.streaming_vbo_capacity - 1)[:self.streaming_vbo_capacity]
+                    visible_slice = visible_slice[np.sort(keep_idx)]
                     visible_count = self.streaming_vbo_capacity
-                
+                visible_slice = self._order_visible_notes_for_draw(visible_slice)
+
                 visible_slice_contiguous = np.ascontiguousarray(visible_slice)
 
                 try:
@@ -1713,8 +1743,16 @@ class PianoRoll:
             visible_count = 0
 
         if visible_count > self.streaming_vbo_capacity:
-            visible_slice = visible_slice[:self.streaming_vbo_capacity]
+            active_or_distance = np.where(
+                visible_slice['on_time'] <= current_time,
+                np.where(visible_slice['off_time'] > current_time, 0.0, current_time - visible_slice['off_time']),
+                visible_slice['on_time'] - current_time,
+            )
+            keep_idx = np.argpartition(active_or_distance, self.streaming_vbo_capacity - 1)[:self.streaming_vbo_capacity]
+            visible_slice = visible_slice[np.sort(keep_idx)]
             visible_count = self.streaming_vbo_capacity
+
+        visible_slice = self._order_visible_notes_for_draw(visible_slice)
 
         return np.ascontiguousarray(visible_slice), visible_count
 
@@ -1784,7 +1822,7 @@ class PianoRoll:
             window_start = current_time - self.seconds_before_cursor
             window_end = current_time + self.seconds_after_cursor
 
-            glEnable(GL_DEPTH_TEST)
+            glDisable(GL_DEPTH_TEST)
             glUseProgram(self.shader)
 
             glUniform1f(self.u_time_loc, current_time)

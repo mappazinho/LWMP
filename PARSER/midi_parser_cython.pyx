@@ -27,7 +27,8 @@ GPU_NOTE_DTYPE = np.dtype([
     ('pitch', 'u1'),
     ('velocity', 'u1'),
     ('track', 'u1'),
-    ('padding', 'u1')
+    ('padding', 'u1'),
+    ('sort_order', 'u4')
 ], align=True)
 
 PLAYBACK_EVENT_DTYPE = np.dtype([
@@ -43,6 +44,7 @@ cdef struct NoteOnInfo:
     double on_time_sec
     uint8_t velocity
     uint16_t track_num
+    uint32_t sort_order
 
 cdef struct RawEvent:
     uint32_t abs_tick
@@ -61,7 +63,11 @@ cdef struct TrackState:
     int track_index
 
 cdef bint compareGpuNote(const GpuNote& a, const GpuNote& b) nogil:
-    return a.on_time < b.on_time
+    if a.on_time < b.on_time:
+        return True
+    if a.on_time > b.on_time:
+        return False
+    return a.sort_order < b.sort_order
 
 cdef bint comparePlaybackEvent(const PlaybackEvent& a, const PlaybackEvent& b) nogil:
     return a.on_time < b.on_time
@@ -322,7 +328,7 @@ cdef class MidiParser:
         cdef vector[PlaybackEvent] temp_program_change_vec
         cdef vector[PlaybackEvent] temp_pitch_bend_vec
         cdef vector[PlaybackEvent] temp_control_change_vec
-        cdef vector[NoteOnInfo] note_on_stack[128][16]
+        cdef map[uint32_t, vector[NoteOnInfo]] note_on_stack[128]
         cdef vector[uint64_t] event_heap
         event_heap.reserve(len(track_buffers))
         track_states.reserve(len(track_buffers))
@@ -367,14 +373,14 @@ cdef class MidiParser:
         cdef double seconds_per_tick, on_time, off_time
         cdef uint8_t vel
         cdef uint16_t on_track_num
+        cdef uint32_t note_on_sequence = 0
         cdef int first_note_track = -1
-        cdef int second_note_track = -1
-        cdef bint many_note_tracks = False
+        cdef bint multiple_note_tracks = False
         cdef uint32_t channel_mask = 0
-        cdef pair[uint8_t, uint8_t] key
         cdef NoteOnInfo on_info
         cdef GpuNote gpu_note
         cdef PlaybackEvent playback_event
+        cdef uint32_t track_channel_key
 
         with nogil:
             while event_heap.size() > 0:
@@ -420,17 +426,20 @@ cdef class MidiParser:
                 channel = raw_ev.channel
                 data1 = raw_ev.data1
                 data2 = raw_ev.data2
+                track_channel_key = ((<uint32_t>track_num) << 4) | <uint32_t>channel
 
                 if event_type == 0x90 and data2 > 0:
                     on_info.on_time_sec = current_time_sec
                     on_info.velocity = data2
                     on_info.track_num = track_num
-                    note_on_stack[data1][channel].push_back(on_info)
+                    on_info.sort_order = note_on_sequence
+                    note_on_sequence += 1
+                    note_on_stack[data1][track_channel_key].push_back(on_info)
 
                 elif event_type == 0x80 or (event_type == 0x90 and data2 == 0):
-                    if note_on_stack[data1][channel].size() > 0:
-                        on_info = note_on_stack[data1][channel].back()
-                        note_on_stack[data1][channel].pop_back()
+                    if note_on_stack[data1].count(track_channel_key) > 0 and note_on_stack[data1][track_channel_key].size() > 0:
+                        on_info = note_on_stack[data1][track_channel_key].back()
+                        note_on_stack[data1][track_channel_key].pop_back()
                         
                         on_time = on_info.on_time_sec
                         vel = on_info.velocity
@@ -443,10 +452,7 @@ cdef class MidiParser:
                         if first_note_track == -1:
                             first_note_track = on_track_num
                         elif on_track_num != first_note_track:
-                            if second_note_track == -1:
-                                second_note_track = on_track_num
-                            elif on_track_num != second_note_track:
-                                many_note_tracks = True
+                            multiple_note_tracks = True
                         channel_mask |= (1 << channel)
                         
                         gpu_note.on_time = <np.float32_t>on_time
@@ -455,6 +461,7 @@ cdef class MidiParser:
                         gpu_note.velocity = vel
                         gpu_note.track = <uint8_t>(on_track_num & 0xFF)
                         gpu_note.padding = <uint8_t>channel
+                        gpu_note.sort_order = on_info.sort_order
                         temp_gpu_notes_vec.push_back(gpu_note)
                         
                         playback_event.on_time = on_time
@@ -522,7 +529,7 @@ cdef class MidiParser:
             memcpy(np.PyArray_DATA(self.note_data_for_gpu),
                    &temp_gpu_notes_vec[0],
                    n_gpu_notes * sizeof(GpuNote))
-            self.preferred_color_mode = "channel" if ((not many_note_tracks) and channel_mask and (channel_mask & (channel_mask - 1))) else "track"
+            self.preferred_color_mode = "track"
             
         if n_playback_events > 0:
             if progress_queue:
@@ -603,7 +610,7 @@ cdef class MidiParser:
         cdef vector[PlaybackEvent] temp_program_change_vec
         cdef vector[PlaybackEvent] temp_pitch_bend_vec
         cdef vector[PlaybackEvent] temp_control_change_vec
-        cdef vector[NoteOnInfo] note_on_stack[128][16]
+        cdef map[uint32_t, vector[NoteOnInfo]] note_on_stack[128]
         cdef TrackState ts
         cdef bytes data_bytes
         cdef RawEvent raw_ev
@@ -627,13 +634,14 @@ cdef class MidiParser:
         cdef double seconds_per_tick, on_time, off_time
         cdef uint8_t vel
         cdef uint16_t on_track_num
+        cdef uint32_t note_on_sequence = 0
         cdef int first_note_track = -1
-        cdef int second_note_track = -1
-        cdef bint many_note_tracks = False
+        cdef bint multiple_note_tracks = False
         cdef uint32_t channel_mask = 0
         cdef NoteOnInfo on_info
         cdef GpuNote gpu_note
         cdef PlaybackEvent playback_event
+        cdef uint32_t track_channel_key
 
         _log("Parsing all track events (Cython low-memory pass 1/2: notes)...")
 
@@ -697,17 +705,20 @@ cdef class MidiParser:
                 channel = raw_ev.channel
                 data1 = raw_ev.data1
                 data2 = raw_ev.data2
+                track_channel_key = ((<uint32_t>track_num) << 4) | <uint32_t>channel
 
                 if event_type == 0x90 and data2 > 0:
                     on_info.on_time_sec = current_time_sec
                     on_info.velocity = data2
                     on_info.track_num = track_num
-                    note_on_stack[data1][channel].push_back(on_info)
+                    on_info.sort_order = note_on_sequence
+                    note_on_sequence += 1
+                    note_on_stack[data1][track_channel_key].push_back(on_info)
 
                 elif event_type == 0x80 or (event_type == 0x90 and data2 == 0):
-                    if note_on_stack[data1][channel].size() > 0:
-                        on_info = note_on_stack[data1][channel].back()
-                        note_on_stack[data1][channel].pop_back()
+                    if note_on_stack[data1].count(track_channel_key) > 0 and note_on_stack[data1][track_channel_key].size() > 0:
+                        on_info = note_on_stack[data1][track_channel_key].back()
+                        note_on_stack[data1][track_channel_key].pop_back()
 
                         on_time = on_info.on_time_sec
                         vel = on_info.velocity
@@ -720,10 +731,7 @@ cdef class MidiParser:
                         if first_note_track == -1:
                             first_note_track = on_track_num
                         elif on_track_num != first_note_track:
-                            if second_note_track == -1:
-                                second_note_track = on_track_num
-                            elif on_track_num != second_note_track:
-                                many_note_tracks = True
+                            multiple_note_tracks = True
                         channel_mask |= (1 << channel)
 
                         gpu_note.on_time = <np.float32_t>on_time
@@ -732,6 +740,7 @@ cdef class MidiParser:
                         gpu_note.velocity = vel
                         gpu_note.track = <uint8_t>(on_track_num & 0xFF)
                         gpu_note.padding = <uint8_t>channel
+                        gpu_note.sort_order = on_info.sort_order
                         temp_gpu_notes_vec.push_back(gpu_note)
 
                 elif event_type == 0xFF and raw_ev.meta_type == 0x51:
@@ -760,7 +769,7 @@ cdef class MidiParser:
             memcpy(np.PyArray_DATA(self.note_data_for_gpu),
                    &temp_gpu_notes_vec[0],
                    n_gpu_notes * sizeof(GpuNote))
-            self.preferred_color_mode = "channel" if ((not many_note_tracks) and channel_mask and (channel_mask & (channel_mask - 1))) else "track"
+            self.preferred_color_mode = "track"
         else:
             self.note_data_for_gpu = np.empty((0,), dtype=GPU_NOTE_DTYPE)
             self.preferred_color_mode = "track"
@@ -784,8 +793,7 @@ cdef class MidiParser:
         track_states.reserve(len(track_buffers))
         current_events.reserve(len(track_buffers))
         for data1 in range(128):
-            for channel in range(16):
-                note_on_stack[data1][channel].clear()
+            note_on_stack[data1].clear()
         for i in range(len(track_buffers)):
             data_bytes = track_buffers[i]
             ts.ptr = <const uint8_t*> data_bytes
@@ -843,17 +851,18 @@ cdef class MidiParser:
                 channel = raw_ev.channel
                 data1 = raw_ev.data1
                 data2 = raw_ev.data2
+                track_channel_key = ((<uint32_t>track_num) << 4) | <uint32_t>channel
 
                 if event_type == 0x90 and data2 > 0:
                     on_info.on_time_sec = current_time_sec
                     on_info.velocity = data2
                     on_info.track_num = track_num
-                    note_on_stack[data1][channel].push_back(on_info)
+                    note_on_stack[data1][track_channel_key].push_back(on_info)
 
                 elif event_type == 0x80 or (event_type == 0x90 and data2 == 0):
-                    if note_on_stack[data1][channel].size() > 0:
-                        on_info = note_on_stack[data1][channel].back()
-                        note_on_stack[data1][channel].pop_back()
+                    if note_on_stack[data1].count(track_channel_key) > 0 and note_on_stack[data1][track_channel_key].size() > 0:
+                        on_info = note_on_stack[data1][track_channel_key].back()
+                        note_on_stack[data1][track_channel_key].pop_back()
 
                         playback_event.on_time = on_info.on_time_sec
                         playback_event.off_time = current_time_sec

@@ -21,7 +21,8 @@ except ImportError:
         ('pitch', 'u1'),
         ('velocity', 'u1'),
         ('track', 'u1'),
-        ('padding', 'u1')
+        ('padding', 'u1'),
+        ('sort_order', 'u4')
     ], align=True)
     
     PLAYBACK_EVENT_DTYPE = np.dtype([
@@ -129,9 +130,9 @@ except ImportError:
 
             temp_gpu_notes = []
             total_event_count = 0
+            note_on_sequence = 0
             first_note_track = None
-            second_note_track = None
-            many_note_tracks = False
+            multiple_note_tracks = False
             channel_mask = 0
             
             _log("Parsing all track events (Python Fallback)...")
@@ -174,13 +175,14 @@ except ImportError:
                 event_type, channel, data1, data2 = event
 
                 if event_type == 0x90 and data2 > 0:
-                    key = (data1, channel)
-                    note_on_dict.setdefault(key, []).append((current_time_sec, data2, track_num))
+                    key = (track_num, channel, data1)
+                    note_on_dict.setdefault(key, []).append((current_time_sec, data2, track_num, note_on_sequence))
+                    note_on_sequence += 1
 
                 elif event_type == 0x80 or (event_type == 0x90 and data2 == 0):
-                    key = (data1, channel)
+                    key = (track_num, channel, data1)
                     if key in note_on_dict and note_on_dict[key]:
-                        on_time, vel, on_track_num = note_on_dict[key].pop(0)
+                        on_time, vel, on_track_num, sort_order = note_on_dict[key].pop()
                         off_time = current_time_sec
                         
                         if off_time > max_off_time:
@@ -189,13 +191,10 @@ except ImportError:
                         if first_note_track is None:
                             first_note_track = on_track_num
                         elif on_track_num != first_note_track:
-                            if second_note_track is None:
-                                second_note_track = on_track_num
-                            elif on_track_num != second_note_track:
-                                many_note_tracks = True
+                            multiple_note_tracks = True
                         channel_mask |= (1 << channel)
                         
-                        temp_gpu_notes.append((on_time, off_time, data1, vel, on_track_num % 256, channel))
+                        temp_gpu_notes.append((on_time, off_time, data1, vel, on_track_num % 256, channel, sort_order))
                         self.note_events_for_playback_list.append((on_time, off_time, data1, vel, channel, on_track_num))
 
                         if not note_on_dict[key]:
@@ -231,8 +230,7 @@ except ImportError:
                 _log(f"Sorting {len(temp_gpu_notes)} notes...")
                 self.note_data_for_gpu = np.array(temp_gpu_notes, dtype=GPU_NOTE_DTYPE)
                 self.note_data_for_gpu.sort(order='on_time')
-                use_channel_colors = (not many_note_tracks) and channel_mask and (channel_mask & (channel_mask - 1))
-                self.preferred_color_mode = "channel" if use_channel_colors else "track"
+                self.preferred_color_mode = "track"
             else:
                 self.note_data_for_gpu = np.empty((0,), dtype=GPU_NOTE_DTYPE)
                 
