@@ -223,6 +223,12 @@ class PlayerController:
                 (t + start_padding, c, p) for t, c, p in self.parsed_midi.pitch_bend_events
             ]
 
+        if hasattr(self.parsed_midi, "program_change_events") and self.parsed_midi.program_change_events:
+            self.parsed_midi.program_change_events = [
+                (t + start_padding, c, program)
+                for t, c, program in self.parsed_midi.program_change_events
+            ]
+
         if hasattr(self.parsed_midi, "control_change_events") and self.parsed_midi.control_change_events:
             self.parsed_midi.control_change_events = [
                 (t + start_padding, c, cc, value)

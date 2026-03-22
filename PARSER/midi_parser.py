@@ -204,6 +204,9 @@ except ImportError:
                 elif event_type == 0xFF and data1 == 0x51:
                     current_tempo_usec = data2
                 
+                elif event_type == 0xC0:
+                    self.program_change_events.append((current_time_sec, channel, data1))
+
                 elif event_type == 0xE0:
                     pitch_bend_value = (data2 << 7) | data1
                     self.pitch_bend_events.append((current_time_sec, channel, pitch_bend_value))

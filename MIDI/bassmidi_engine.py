@@ -284,6 +284,10 @@ class BassMidiEngine:
             value = (param >> 8) & 0xFF
             raw_event = (ctypes.c_ubyte * 3)(status, controller, value)
             bassmidi.BASS_MIDI_StreamEvents(target, BASS_MIDI_EVENTS_RAW, raw_event, 3)
+        elif cmd == 0xC0:
+            program = param & 0x7F
+            raw_event = (ctypes.c_ubyte * 2)(status, program)
+            bassmidi.BASS_MIDI_StreamEvents(target, BASS_MIDI_EVENTS_RAW, raw_event, 2)
 
     def send_all_notes_off(self):
         target = self.decode_stream if self.buffering_enabled else self.midi_stream

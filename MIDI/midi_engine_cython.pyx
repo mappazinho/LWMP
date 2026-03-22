@@ -550,6 +550,7 @@ cdef class BassMidiEngine:
         cdef uint32_t d2
         cdef BOOL ok = 0
         cdef uint8_t raw_cc[3]
+        cdef uint8_t raw_pc[2]
         
         if cmd == 0x90 or cmd == 0x80:
             if cmd == 0x90 and self.buffering_enabled and self.emergency_recovery_enabled:
@@ -567,6 +568,11 @@ cdef class BassMidiEngine:
             raw_cc[1] = <uint8_t>(param & 0xFF)
             raw_cc[2] = <uint8_t>((param >> 8) & 0xFF)
             self.f.MIDI_StreamEvents(target, BASS_MIDI_EVENTS_RAW, raw_cc, 3)
+            ok = 1
+        elif cmd == 0xC0:
+            raw_pc[0] = <uint8_t>status
+            raw_pc[1] = <uint8_t>(param & 0x7F)
+            self.f.MIDI_StreamEvents(target, BASS_MIDI_EVENTS_RAW, raw_pc, 2)
             ok = 1
         if self.debug_mode and not ok:
             print(f"[Cython] MIDI_StreamEvent failed: status=0x{status:02X} chan={chan} param={param} err={self.f.ErrorGetCode()}")

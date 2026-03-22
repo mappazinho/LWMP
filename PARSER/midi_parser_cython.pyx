@@ -319,6 +319,7 @@ cdef class MidiParser:
 
         cdef vector[GpuNote] temp_gpu_notes_vec
         cdef vector[PlaybackEvent] temp_playback_events_vec
+        cdef vector[PlaybackEvent] temp_program_change_vec
         cdef vector[PlaybackEvent] temp_pitch_bend_vec
         cdef vector[PlaybackEvent] temp_control_change_vec
         cdef vector[NoteOnInfo] note_on_stack[128][16]
@@ -467,6 +468,15 @@ cdef class MidiParser:
                 elif event_type == 0xFF and raw_ev.meta_type == 0x51:
                     current_tempo_usec = raw_ev.meta_val
                 
+                elif event_type == 0xC0:
+                    playback_event.on_time = current_time_sec
+                    playback_event.off_time = current_time_sec
+                    playback_event.pitch = data1
+                    playback_event.velocity = 0
+                    playback_event.channel = channel
+                    playback_event.track_num = 0
+                    temp_program_change_vec.push_back(playback_event)
+
                 elif event_type == 0xE0:
                     pitch_bend_value = (data2 << 7) | data1
                     playback_event.on_time = current_time_sec
@@ -529,6 +539,11 @@ cdef class MidiParser:
                    &temp_playback_events_vec[0],
                    n_playback_events * sizeof(PlaybackEvent))
             
+        if temp_program_change_vec.size() > 0:
+            self.program_change_events = [(temp_program_change_vec[i].on_time,
+                                           temp_program_change_vec[i].channel,
+                                           temp_program_change_vec[i].pitch)
+                                          for i in range(temp_program_change_vec.size())]
         if temp_pitch_bend_vec.size() > 0:
             self.pitch_bend_events = [(temp_pitch_bend_vec[i].on_time,
                                        temp_pitch_bend_vec[i].channel,
@@ -554,6 +569,7 @@ cdef class MidiParser:
         current_events = vector[RawEvent]()
         temp_gpu_notes_vec = vector[GpuNote]()
         temp_playback_events_vec = vector[PlaybackEvent]()
+        temp_program_change_vec = vector[PlaybackEvent]()
         temp_pitch_bend_vec = vector[PlaybackEvent]()
         temp_control_change_vec = vector[PlaybackEvent]()
 
@@ -584,6 +600,7 @@ cdef class MidiParser:
         cdef vector[uint64_t] event_heap
         cdef vector[GpuNote] temp_gpu_notes_vec
         cdef vector[PlaybackEvent] temp_playback_events_vec
+        cdef vector[PlaybackEvent] temp_program_change_vec
         cdef vector[PlaybackEvent] temp_pitch_bend_vec
         cdef vector[PlaybackEvent] temp_control_change_vec
         cdef vector[NoteOnInfo] note_on_stack[128][16]
@@ -849,6 +866,15 @@ cdef class MidiParser:
                 elif event_type == 0xFF and raw_ev.meta_type == 0x51:
                     current_tempo_usec = raw_ev.meta_val
 
+                elif event_type == 0xC0:
+                    playback_event.on_time = current_time_sec
+                    playback_event.off_time = current_time_sec
+                    playback_event.pitch = data1
+                    playback_event.velocity = 0
+                    playback_event.channel = channel
+                    playback_event.track_num = 0
+                    temp_program_change_vec.push_back(playback_event)
+
                 elif event_type == 0xE0:
                     pitch_bend_value = (data2 << 7) | data1
                     playback_event.on_time = current_time_sec
@@ -892,6 +918,14 @@ cdef class MidiParser:
                    n_playback_events * sizeof(PlaybackEvent))
         else:
             self.note_events_for_playback = np.empty((0,), dtype=PLAYBACK_EVENT_DTYPE)
+
+        if temp_program_change_vec.size() > 0:
+            self.program_change_events = [(temp_program_change_vec[i].on_time,
+                                           temp_program_change_vec[i].channel,
+                                           temp_program_change_vec[i].pitch)
+                                          for i in range(temp_program_change_vec.size())]
+        else:
+            self.program_change_events = []
 
         if temp_pitch_bend_vec.size() > 0:
             self.pitch_bend_events = [(temp_pitch_bend_vec[i].on_time,
