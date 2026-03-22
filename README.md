@@ -19,7 +19,7 @@ Just launch build.bat, and all dependencies and compilation happens automaticall
 
 ### For Linux (tested, audio broken as of now!):
 1. Download and install all dependencies:  
-`pip install --no-warn-script-location numpy cython setuptools pyopengl pyopengl_accelerate pygame dearpygui`  
+`pip install --no-warn-script-location numpy cython setuptools pyopengl pyopengl_accelerate pygame dearpygui tqdm`  
 *If you get an error for externally-managed-environment, include* `--break-system-packages`
 
 2. Clone git of repository:  
