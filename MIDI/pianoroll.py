@@ -11,8 +11,16 @@ import ctypes
 import xml.etree.ElementTree as ET
 import os
 import sys
-from midi_parser import GPU_NOTE_DTYPE
 from config import save_config
+
+RENDER_NOTE_DTYPE = np.dtype([
+    ('on_time', 'f4'),
+    ('off_time', 'f4'),
+    ('pitch', 'u1'),
+    ('velocity', 'u1'),
+    ('track', 'u1'),
+    ('padding', 'u1'),
+])
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _RUNTIME_ROOT = getattr(sys, "_MEIPASS", _SCRIPT_DIR)
@@ -503,6 +511,7 @@ class PianoRoll:
         self.bloom_vao = 0
         self.vbo_vertices = 0
         self.vbo_stream_data = 0
+        self.vbo_stream_capacity_bytes = 0
         self.note_texture = 0
         self.note_edge_texture = 0
         self.u_note_texture_loc = -1
@@ -558,6 +567,13 @@ class PianoRoll:
         self.scroll_slider_rect = None
         self.scroll_slider_bar = None
         self.scroll_slider_handle_x = 0.0
+        self.fps_cap = int(vis_cfg.get('fps_cap', 120))
+        self.fps_slider_min = 30.0
+        self.fps_slider_max = 5000.0
+        self.fps_slider_dragging = False
+        self.fps_slider_rect = None
+        self.fps_slider_bar = None
+        self.fps_slider_handle_x = 0.0
         self.note_width = float(vis_cfg.get('note_width', 10.0))
         self.show_guide_line = bool(vis_cfg.get('show_guide_line', True))
         self.show_glow = bool(vis_cfg.get('show_glow', False))
@@ -637,6 +653,8 @@ class PianoRoll:
         self.last_glow_time = None
         self.render_notes_array = None
         self.render_on_times = None
+        self.render_notes_by_mode = {}
+        self.render_on_times_by_mode = {}
         self.max_note_duration = 10.0
         
         self.pending_midi_data = None
@@ -657,7 +675,7 @@ class PianoRoll:
         self.controls_toggle_rect = None
         self.controls_panel_rect = None
         self.controls_close_rect = None
-        self.controls_panel_size = (300, 136)
+        self.controls_panel_size = (300, 184)
         self.overlay_font = None
         self._text_texture_cache = {}
         self.hover_fade_states = {}
@@ -696,17 +714,32 @@ class PianoRoll:
         vis_cfg['seconds_before_cursor'] = float(self.window_seconds)
         vis_cfg['seconds_after_cursor'] = float(self.window_seconds)
         vis_cfg['scroll_speed'] = float(self.scroll_speed)
+        vis_cfg['fps_cap'] = int(self.fps_cap)
         vis_cfg['streaming_vbo_capacity'] = int(self.streaming_vbo_capacity)
         save_config(self.config)
 
-    def _apply_note_color_mode(self, notes_array):
-        render_notes_array = np.ascontiguousarray(notes_array.copy())
-        if self.note_color_mode == "channel":
-            render_notes_array['track'] = render_notes_array['padding']
-        else:
+    def _pack_render_notes(self, notes_array):
+        packed = np.empty(len(notes_array), dtype=RENDER_NOTE_DTYPE)
+        if len(notes_array) == 0:
+            return packed
+        packed['on_time'] = notes_array['on_time']
+        packed['off_time'] = notes_array['off_time']
+        packed['pitch'] = notes_array['pitch']
+        packed['velocity'] = notes_array['velocity']
+        packed['track'] = notes_array['track']
+        packed['padding'] = notes_array['padding']
+        return packed
+
+    def _build_render_data(self, all_notes_gpu):
+        render_sort_idx = np.argsort(all_notes_gpu['on_time'], kind='stable')
+        sorted_notes = all_notes_gpu[render_sort_idx]
+        base_render_notes = self._pack_render_notes(sorted_notes)
+
+        track_render_notes = np.ascontiguousarray(base_render_notes.copy())
+        if len(track_render_notes) > 0:
             pair_slots = np.zeros((256, 16), dtype=np.uint8)
             pair_present = np.zeros((256, 16), dtype=bool)
-            pair_present[render_notes_array['track'], render_notes_array['padding']] = True
+            pair_present[track_render_notes['track'], track_render_notes['padding']] = True
 
             slot = 0
             for track_idx in range(256):
@@ -715,15 +748,21 @@ class PianoRoll:
                         pair_slots[track_idx, channel_idx] = slot % 128
                         slot += 1
 
-            render_notes_array['track'] = pair_slots[render_notes_array['track'], render_notes_array['padding']]
-        return render_notes_array
+            track_render_notes['track'] = pair_slots[track_render_notes['track'], track_render_notes['padding']]
 
-    def _build_render_data(self, all_notes_gpu):
-        render_sort_idx = np.argsort(all_notes_gpu['on_time'], kind='stable')
-        sorted_notes = all_notes_gpu[render_sort_idx]
-        render_notes_array = self._apply_note_color_mode(sorted_notes)
-        render_on_times = render_notes_array['on_time']
-        return render_notes_array, render_on_times
+        channel_render_notes = np.ascontiguousarray(base_render_notes.copy())
+        if len(channel_render_notes) > 0:
+            channel_render_notes['track'] = channel_render_notes['padding']
+
+        render_notes_by_mode = {
+            'track': track_render_notes,
+            'channel': channel_render_notes,
+        }
+        render_on_times_by_mode = {
+            mode: render_notes['on_time']
+            for mode, render_notes in render_notes_by_mode.items()
+        }
+        return render_notes_by_mode, render_on_times_by_mode
 
     def _order_visible_notes_for_draw(self, visible_slice):
         if visible_slice is None or len(visible_slice) <= 1 or self.is_white_key_data is None:
@@ -736,16 +775,27 @@ class PianoRoll:
     def _rebuild_color_mode_render_data(self):
         if self.all_notes_gpu is None:
             return
-        render_notes_array, render_on_times = self._build_render_data(self.all_notes_gpu)
+        if self.render_notes_by_mode and self.render_on_times_by_mode:
+            render_notes_by_mode = self.render_notes_by_mode
+            render_on_times_by_mode = self.render_on_times_by_mode
+        else:
+            render_notes_by_mode, render_on_times_by_mode = self._build_render_data(self.all_notes_gpu)
+        active_mode = "channel" if self.note_color_mode == "channel" else "track"
+        render_notes_array = render_notes_by_mode[active_mode]
+        render_on_times = render_on_times_by_mode[active_mode]
         if self.export_mode:
+            self.render_notes_by_mode = render_notes_by_mode
+            self.render_on_times_by_mode = render_on_times_by_mode
             self.render_notes_array = render_notes_array
             self.render_on_times = render_on_times
             self.notes_to_draw = 0
-            self.last_visible_notes = np.empty(0, dtype=GPU_NOTE_DTYPE)
+            self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
         else:
             with self.midi_data_lock:
                 self.pending_midi_data = {
                     'all_notes_gpu': self.all_notes_gpu,
+                    'render_notes_by_mode': render_notes_by_mode,
+                    'render_on_times_by_mode': render_on_times_by_mode,
                     'render_notes_array': render_notes_array,
                     'render_on_times': render_on_times
                 }
@@ -1254,9 +1304,10 @@ class PianoRoll:
 
         self.vbo_stream_data = glGenBuffers(1)
         glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-        self.note_size_bytes = GPU_NOTE_DTYPE.itemsize
+        self.note_size_bytes = RENDER_NOTE_DTYPE.itemsize
+        self.vbo_stream_capacity_bytes = self.streaming_vbo_capacity * self.note_size_bytes
         
-        glBufferData(GL_ARRAY_BUFFER, self.streaming_vbo_capacity * self.note_size_bytes, None, GL_DYNAMIC_DRAW)
+        glBufferData(GL_ARRAY_BUFFER, self.vbo_stream_capacity_bytes, None, GL_DYNAMIC_DRAW)
         
         glEnableVertexAttribArray(note_times_loc); glVertexAttribPointer(note_times_loc, 2, GL_FLOAT, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(0)); glVertexAttribDivisor(note_times_loc, 1)
         
@@ -1567,7 +1618,10 @@ class PianoRoll:
         self.get_current_time = get_current_time_func
         self.glow_trails.clear()
         self.last_glow_time = None
-        render_notes_array, render_on_times = self._build_render_data(all_notes_gpu)
+        render_notes_by_mode, render_on_times_by_mode = self._build_render_data(all_notes_gpu)
+        active_mode = "channel" if self.note_color_mode == "channel" else "track"
+        render_notes_array = render_notes_by_mode[active_mode]
+        render_on_times = render_on_times_by_mode[active_mode]
         durations = render_notes_array['off_time'] - render_notes_array['on_time']
         if len(durations) > 0:
             self.max_note_duration = float(np.max(durations))
@@ -1576,14 +1630,18 @@ class PianoRoll:
             self.export_total_duration = 0.0
         if self.export_mode:
             self.all_notes_gpu = all_notes_gpu
+            self.render_notes_by_mode = render_notes_by_mode
+            self.render_on_times_by_mode = render_on_times_by_mode
             self.render_notes_array = render_notes_array
             self.render_on_times = render_on_times
             self.notes_to_draw = 0
-            self.last_visible_notes = np.empty(0, dtype=GPU_NOTE_DTYPE)
+            self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
         else:
             with self.midi_data_lock:
                 self.pending_midi_data = {
                     'all_notes_gpu': all_notes_gpu,
+                    'render_notes_by_mode': render_notes_by_mode,
+                    'render_on_times_by_mode': render_on_times_by_mode,
                     'render_notes_array': render_notes_array,
                     'render_on_times': render_on_times
                 }
@@ -1600,10 +1658,12 @@ class PianoRoll:
             self.pending_midi_data = None
         
         self.all_notes_gpu = data['all_notes_gpu']
+        self.render_notes_by_mode = data.get('render_notes_by_mode', {})
+        self.render_on_times_by_mode = data.get('render_on_times_by_mode', {})
         self.render_notes_array = data['render_notes_array']
         self.render_on_times = data['render_on_times']
         self.notes_to_draw = 0
-        self.last_visible_notes = np.empty(0, dtype=GPU_NOTE_DTYPE)
+        self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
         
         self.force_data_update.set()
         print("MIDI data active on GPU thread.")
@@ -1725,7 +1785,7 @@ class PianoRoll:
 
     def _slice_visible_notes_for_time(self, current_time):
         if self.render_notes_array is None or self.render_on_times is None:
-            return np.empty(0, dtype=GPU_NOTE_DTYPE), 0
+            return np.empty(0, dtype=RENDER_NOTE_DTYPE), 0
 
         view_start = current_time - self.seconds_before_cursor
         view_end = current_time + self.seconds_after_cursor
@@ -1770,7 +1830,6 @@ class PianoRoll:
             self.last_visible_notes = visible_notes
             self.notes_to_draw = count
             glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-            glBufferData(GL_ARRAY_BUFFER, self.streaming_vbo_capacity * self.note_size_bytes, None, GL_DYNAMIC_DRAW)
             if count > 0:
                 glBufferSubData(GL_ARRAY_BUFFER, 0, visible_notes.nbytes, visible_notes)
         else:
@@ -1781,7 +1840,6 @@ class PianoRoll:
                 self.notes_to_draw = count
 
                 glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                glBufferData(GL_ARRAY_BUFFER, self.streaming_vbo_capacity * self.note_size_bytes, None, GL_DYNAMIC_DRAW)
                 if count > 0:
                     glBufferSubData(GL_ARRAY_BUFFER, 0, visible_notes.nbytes, visible_notes)
                 
@@ -2279,6 +2337,10 @@ class PianoRoll:
         self.scroll_slider_rect = pygame.Rect(x, scroll_y, bar_width, self.slider_area_height)
         self.scroll_slider_bar = (x, scroll_y + (self.slider_area_height - bar_height) // 2, bar_width, bar_height)
         self._recalc_scroll_slider_handle()
+        fps_y = scroll_y + self.slider_area_height + 18
+        self.fps_slider_rect = pygame.Rect(x, fps_y, bar_width, self.slider_area_height)
+        self.fps_slider_bar = (x, fps_y + (self.slider_area_height - bar_height) // 2, bar_width, bar_height)
+        self._recalc_fps_slider_handle()
 
     def _recalc_slider_handle(self):
         if not self.slider_rect: return
@@ -2292,17 +2354,26 @@ class PianoRoll:
         t = max(0.0, min(1.0, t))
         self.scroll_slider_handle_x = self.scroll_slider_rect.x + t * self.scroll_slider_rect.width
 
+    def _recalc_fps_slider_handle(self):
+        if not self.fps_slider_rect:
+            return
+        t = (float(self.fps_cap) - self.fps_slider_min) / (self.fps_slider_max - self.fps_slider_min)
+        t = max(0.0, min(1.0, t))
+        self.fps_slider_handle_x = self.fps_slider_rect.x + t * self.fps_slider_rect.width
+
     def handle_slider_event(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             if (not self.controls_panel_expanded) and self.controls_toggle_rect and self.controls_toggle_rect.collidepoint(event.pos):
                 self.controls_panel_expanded = not self.controls_panel_expanded
                 self.slider_dragging = False
                 self.scroll_slider_dragging = False
+                self.fps_slider_dragging = False
                 return
             if self.controls_panel_expanded and self.controls_close_rect and self.controls_close_rect.collidepoint(event.pos):
                 self.controls_panel_expanded = False
                 self.slider_dragging = False
                 self.scroll_slider_dragging = False
+                self.fps_slider_dragging = False
                 return
             if self.glow_options_button_rect and self.glow_options_button_rect.collidepoint(event.pos):
                 self.glow_options_expanded = not self.glow_options_expanded
@@ -2348,13 +2419,19 @@ class PianoRoll:
             if self.controls_panel_expanded and self.scroll_slider_rect and self.scroll_slider_rect.collidepoint(event.pos):
                 self.scroll_slider_dragging = True
                 self._update_scroll_slider_from_pos(event.pos[0])
+            if self.controls_panel_expanded and self.fps_slider_rect and self.fps_slider_rect.collidepoint(event.pos):
+                self.fps_slider_dragging = True
+                self._update_fps_slider_from_pos(event.pos[0])
         elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
             self.slider_dragging = False
             self.scroll_slider_dragging = False
+            self.fps_slider_dragging = False
         elif event.type == pygame.MOUSEMOTION and self.slider_dragging:
             self._update_slider_from_pos(event.pos[0])
         elif event.type == pygame.MOUSEMOTION and self.scroll_slider_dragging:
             self._update_scroll_slider_from_pos(event.pos[0])
+        elif event.type == pygame.MOUSEMOTION and self.fps_slider_dragging:
+            self._update_fps_slider_from_pos(event.pos[0])
     
     def randomize_colors(self):
         """Shuffle the track colors randomly and update the shader."""
@@ -2406,6 +2483,14 @@ class PianoRoll:
         new_val = self.scroll_slider_min + t * (self.scroll_slider_max - self.scroll_slider_min)
         self.scroll_speed = new_val
         self._recalc_scroll_slider_handle()
+        self._save_visualizer_config()
+
+    def _update_fps_slider_from_pos(self, x_pos):
+        t = (x_pos - self.fps_slider_rect.x) / float(self.fps_slider_rect.width)
+        t = max(0.0, min(1.0, t))
+        new_val = self.fps_slider_min + t * (self.fps_slider_max - self.fps_slider_min)
+        self.fps_cap = max(1, int(round(new_val)))
+        self._recalc_fps_slider_handle()
         self._save_visualizer_config()
 
     def _get_text_texture(self, text, color=(225, 228, 235)):
@@ -2607,6 +2692,7 @@ class PianoRoll:
 
             self._draw_text_overlay("Note Length", self.slider_rect.x, self.slider_rect.y - 12)
             self._draw_text_overlay("Scroll Speed", self.scroll_slider_rect.x, self.scroll_slider_rect.y - 12)
+            self._draw_text_overlay("FPS Cap", self.fps_slider_rect.x, self.fps_slider_rect.y - 12)
 
             x, y, w, h = self.slider_bar
             glColor3f(0.2, 0.2, 0.25)
@@ -2630,6 +2716,18 @@ class PianoRoll:
                 hy2 = y2 + h2 / 2
                 glColor3f(0.95, 0.95, 0.95)
                 glBegin(GL_QUADS); glVertex2f(hx2 - handle_half, hy2 - handle_half); glVertex2f(hx2 + handle_half, hy2 - handle_half); glVertex2f(hx2 + handle_half, hy2 + handle_half); glVertex2f(hx2 - handle_half, hy2 + handle_half); glEnd()
+
+            if self.fps_slider_bar:
+                x3, y3, w3, h3 = self.fps_slider_bar
+                glColor3f(0.22, 0.22, 0.28)
+                glBegin(GL_QUADS); glVertex2f(x3, y3); glVertex2f(x3 + w3, y3); glVertex2f(x3 + w3, y3 + h3); glVertex2f(x3, y3 + h3); glEnd()
+                filled_w3 = (self.fps_slider_handle_x - x3)
+                glColor3f(0.86, 0.72, 0.34)
+                glBegin(GL_QUADS); glVertex2f(x3, y3); glVertex2f(x3 + filled_w3, y3); glVertex2f(x3 + filled_w3, y3 + h3); glVertex2f(x3, y3 + h3); glEnd()
+                hx3 = self.fps_slider_handle_x
+                hy3 = y3 + h3 / 2
+                glColor3f(0.95, 0.95, 0.95)
+                glBegin(GL_QUADS); glVertex2f(hx3 - handle_half, hy3 - handle_half); glVertex2f(hx3 + handle_half, hy3 - handle_half); glVertex2f(hx3 + handle_half, hy3 + handle_half); glVertex2f(hx3 - handle_half, hy3 + handle_half); glEnd()
 
         if self.color_button_rect:
             bx, by = self.color_button_rect.x, self.color_button_rect.y

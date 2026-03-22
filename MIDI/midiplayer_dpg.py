@@ -39,6 +39,7 @@ except ImportError:
     PianoRoll = None
 
 DEBUG = False
+AUDIO_MIN_NOTE_VELOCITY = 10
 
 try:
     if os.name == "nt":
@@ -2250,7 +2251,7 @@ class DpgMidiPlayerApp:
                         self.controller.notes_played_count += 1
                         self.controller.nps_event_timestamps.append(note["on_time"])
 
-                        if vel >= 20:
+                        if vel >= AUDIO_MIN_NOTE_VELOCITY:
                             status_on = 0x90 + channel
                             if self.controller.active_midi_backend:
                                 param = (vel << 8) | pitch
@@ -2463,11 +2464,12 @@ class DpgMidiPlayerApp:
 
     def _build_buffered_event_arrays(self, parsed_midi):
         note_events = parsed_midi.note_events_for_playback
+        audible_note_events = note_events[note_events["velocity"] >= AUDIO_MIN_NOTE_VELOCITY]
         program_change_events = getattr(parsed_midi, "program_change_events", [])
         pitch_bend_events = parsed_midi.pitch_bend_events
         control_change_events = getattr(parsed_midi, "control_change_events", [])
 
-        count_notes = len(note_events)
+        count_notes = len(audible_note_events)
         count_programs = len(program_change_events)
         count_bends = len(pitch_bend_events)
         count_ccs = len(control_change_events)
@@ -2477,13 +2479,13 @@ class DpgMidiPlayerApp:
         statuses = np.empty(total_ops, dtype=np.uint32)
         params = np.empty(total_ops, dtype=np.uint32)
 
-        times[:count_notes] = note_events["on_time"]
-        statuses[:count_notes] = 0x90 + note_events["channel"]
-        params[:count_notes] = (note_events["velocity"].astype(np.uint32) << 8) | note_events["pitch"].astype(np.uint32)
+        times[:count_notes] = audible_note_events["on_time"]
+        statuses[:count_notes] = 0x90 + audible_note_events["channel"]
+        params[:count_notes] = (audible_note_events["velocity"].astype(np.uint32) << 8) | audible_note_events["pitch"].astype(np.uint32)
 
-        times[count_notes : count_notes * 2] = note_events["off_time"]
-        statuses[count_notes : count_notes * 2] = 0x80 + note_events["channel"]
-        params[count_notes : count_notes * 2] = note_events["pitch"].astype(np.uint32)
+        times[count_notes : count_notes * 2] = audible_note_events["off_time"]
+        statuses[count_notes : count_notes * 2] = 0x80 + audible_note_events["channel"]
+        params[count_notes : count_notes * 2] = audible_note_events["pitch"].astype(np.uint32)
 
         if count_programs > 0:
             pc_arr = np.array(program_change_events, dtype=[("time", "f8"), ("chan", "u4"), ("program", "u4")])
@@ -2889,7 +2891,7 @@ class DpgMidiPlayerApp:
                     )
                     last_caption_update_time = now
 
-                target_fps = 120 if self.controller.playing else 60
+                target_fps = max(1, int(getattr(piano_roll_instance, "fps_cap", 120)))
                 clock.tick(target_fps)
         except Exception as e:
             traceback.print_exc()
