@@ -560,6 +560,8 @@ class PianoRoll:
         self.get_current_time = None
         self.last_frame_time = 0.0
         self.export_total_duration = 0.0
+        self.capacity_warning_active = False
+        self.capacity_warning_visible_count = 0
         
         vis_cfg = self.config.get('visualizer', {})
         gui_cfg = self.config.get('gui', {})
@@ -1866,6 +1868,8 @@ class PianoRoll:
             if abs(now - last_update_time) > self.data_update_interval or self.force_data_update.is_set():
                 self.force_data_update.clear()
                 last_update_time = now
+                self.capacity_warning_active = False
+                self.capacity_warning_visible_count = 0
                 
                 view_start = now - self.seconds_before_cursor
                 view_end = now + self.seconds_after_cursor
@@ -1883,6 +1887,8 @@ class PianoRoll:
                     visible_count = 0
                 
                 if visible_count > self.streaming_vbo_capacity:
+                    self.capacity_warning_active = True
+                    self.capacity_warning_visible_count = int(visible_count)
                     active_or_distance = np.where(
                         visible_slice['on_time'] <= now,
                         np.where(visible_slice['off_time'] > now, 0.0, now - visible_slice['off_time']),
@@ -1912,6 +1918,8 @@ class PianoRoll:
         if self.render_notes_array is None or self.render_on_times is None:
             return np.empty(0, dtype=RENDER_NOTE_DTYPE), 0
 
+        self.capacity_warning_active = False
+        self.capacity_warning_visible_count = 0
         view_start = current_time - self.seconds_before_cursor
         view_end = current_time + self.seconds_after_cursor
         search_start = view_start - self.max_note_duration
@@ -1928,6 +1936,8 @@ class PianoRoll:
             visible_count = 0
 
         if visible_count > self.streaming_vbo_capacity:
+            self.capacity_warning_active = True
+            self.capacity_warning_visible_count = int(visible_count)
             active_or_distance = np.where(
                 visible_slice['on_time'] <= current_time,
                 np.where(visible_slice['off_time'] > current_time, 0.0, current_time - visible_slice['off_time']),
@@ -1987,6 +1997,7 @@ class PianoRoll:
 
         if not self.export_mode:
             self._draw_slider_overlay()
+            self._draw_capacity_warning_overlay()
         elif self.export_show_stats_overlay:
             self._draw_export_stats_overlay(current_time)
 
@@ -2748,6 +2759,54 @@ class PianoRoll:
             color=(235, 238, 244),
             alpha=0.25 * alpha_factor,
         )
+
+    def _draw_capacity_warning_overlay(self):
+        if self.export_mode or not self.capacity_warning_active:
+            return
+
+        message = "VBO capacity drained, reducing visible notes..."
+        detail = f"Visible notes: {self.capacity_warning_visible_count:,}   Cap: {self.streaming_vbo_capacity:,}"
+        msg_info = self._get_text_texture(message, (242, 244, 248))
+        detail_info = self._get_text_texture(detail, (198, 204, 214))
+        if msg_info is None or detail_info is None:
+            return
+
+        msg_w, msg_h = msg_info[1], msg_info[2]
+        detail_w, detail_h = detail_info[1], detail_info[2]
+        spacing = 6
+        box_w = max(msg_w, detail_w) + 40
+        box_h = msg_h + detail_h + spacing + 28
+        box_x = (self.width - box_w) * 0.5
+        box_y = (self.height - box_h) * 0.46
+
+        glDisable(GL_DEPTH_TEST)
+        glUseProgram(0)
+        glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); glOrtho(0, self.width, self.height, 0, -1, 1)
+        glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        glColor4f(0.04, 0.045, 0.06, 0.80)
+        glBegin(GL_QUADS)
+        glVertex2f(box_x, box_y); glVertex2f(box_x + box_w, box_y)
+        glVertex2f(box_x + box_w, box_y + box_h); glVertex2f(box_x, box_y + box_h)
+        glEnd()
+
+        glColor4f(0.85, 0.62, 0.24, 0.60)
+        glLineWidth(1.0)
+        glBegin(GL_LINE_LOOP)
+        glVertex2f(box_x, box_y); glVertex2f(box_x + box_w, box_y)
+        glVertex2f(box_x + box_w, box_y + box_h); glVertex2f(box_x, box_y + box_h)
+        glEnd()
+
+        msg_x = box_x + (box_w - msg_w) * 0.5
+        msg_y = box_y + 10
+        detail_x = box_x + (box_w - detail_w) * 0.5
+        detail_y = msg_y + msg_h + spacing
+        self._draw_text_overlay(message, msg_x, msg_y, color=(242, 244, 248), alpha=0.98)
+        self._draw_text_overlay(detail, detail_x, detail_y, color=(198, 204, 214), alpha=0.90)
+
+        glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
 
     def _draw_slider_overlay(self):
         if not self.slider_rect:
