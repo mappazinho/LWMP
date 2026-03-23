@@ -161,6 +161,7 @@ cdef class BassMidiEngine:
     cdef public int emergency_voice_limit
     cdef public int emergency_velocity
     cdef public bint emergency_recovery_enabled
+    cdef public bint emergency_skip_note_ons
     
     cdef public HSTREAM midi_stream
     cdef public HSTREAM decode_stream
@@ -184,8 +185,9 @@ cdef class BassMidiEngine:
         self.playback_speed = 1.0
         self.normal_voice_limit = 512
         self.emergency_voice_limit = 96
-        self.emergency_velocity = 100
+        self.emergency_velocity = 0
         self.emergency_recovery_enabled = False
+        self.emergency_skip_note_ons = False
         self.midi_stream = 0
         self.decode_stream = 0
         self.playback_stream = 0
@@ -482,10 +484,30 @@ cdef class BassMidiEngine:
 
     cpdef set_emergency_recovery(self, bint enabled):
         self.emergency_recovery_enabled = enabled
+        self.emergency_skip_note_ons = False
+        if not enabled:
+            self.emergency_velocity = 0
         cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
         cdef int effective_voices = self.emergency_voice_limit if enabled else self.normal_voice_limit
         if target:
             self.f.ChannelSetAttribute(target, BASS_ATTRIB_MIDI_VOICES, <float>effective_voices)
+
+    cpdef configure_emergency_recovery(self, int skip_velocity_below, int voice_limit, bint skip_note_ons):
+        if skip_velocity_below < 0:
+            skip_velocity_below = 0
+        elif skip_velocity_below > 127:
+            skip_velocity_below = 127
+        if voice_limit < 1:
+            voice_limit = 1
+
+        self.emergency_recovery_enabled = True
+        self.emergency_velocity = skip_velocity_below
+        self.emergency_voice_limit = voice_limit
+        self.emergency_skip_note_ons = skip_note_ons
+
+        cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
+        if target:
+            self.f.ChannelSetAttribute(target, BASS_ATTRIB_MIDI_VOICES, <float>voice_limit)
 
     cpdef load_soundfont(self, HSTREAM stream, str path):
         if self.debug_mode: print(f"[Cython] load_soundfont called for path: {path}")
@@ -557,7 +579,10 @@ cdef class BassMidiEngine:
                 d1 = param & 0xFF
                 d2 = (param >> 8) & 0xFF
                 if d2 > 0:
-                    param = d1 | (<uint32_t>self.emergency_velocity << 8)
+                    if self.emergency_skip_note_ons:
+                        return
+                    if d2 <= <uint32_t>self.emergency_velocity:
+                        return
             ok = self.f.MIDI_StreamEvent(target, chan, BASS_MIDI_EVENT_NOTE, param)
         elif cmd == 0xE0:
             d1 = param & 0xFF

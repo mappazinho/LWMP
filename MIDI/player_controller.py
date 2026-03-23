@@ -47,6 +47,9 @@ class PlayerController:
         self.buffered_playback_start_offset = 0.0
         self.current_playback_time_for_threads = 0.0
         self.playback_speed = 1.0
+        self.recovery_active = False
+        self.recovery_buffer_level = 0.0
+        self.recovery_buffer_target = 4.0
 
         self.nps_event_timestamps = deque()
         self.last_nps_graph_update_time = 0.0
@@ -324,6 +327,9 @@ class PlayerController:
         self.notes_played_count = 0
         self.last_processed_event_time = 0.0
         self.current_lag = 0.0
+        self.recovery_active = False
+        self.recovery_buffer_level = 0.0
+        self.recovery_buffer_target = 4.0
         self.nps_event_timestamps.clear()
         self.stop_backend()
 
@@ -358,6 +364,8 @@ class PlayerController:
     def finish_playback(self):
         self.playing = False
         self.paused = False
+        self.recovery_active = False
+        self.recovery_buffer_level = 0.0
 
     def unload_midi(self):
         self.playing = False

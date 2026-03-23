@@ -276,8 +276,12 @@ class DpgMidiPlayerApp:
         return "plot_theme_normal"
 
     def _apply_graph_series_colors(self, nps_value, cpu_value):
+        if dpg.does_item_exist("nps_area_series"):
+            dpg.bind_item_theme("nps_area_series", self._nps_series_theme_tag(nps_value))
         if dpg.does_item_exist("nps_series"):
             dpg.bind_item_theme("nps_series", self._nps_series_theme_tag(nps_value))
+        if dpg.does_item_exist("cpu_area_series"):
+            dpg.bind_item_theme("cpu_area_series", self._cpu_series_theme_tag(cpu_value))
         if dpg.does_item_exist("cpu_series"):
             dpg.bind_item_theme("cpu_series", self._cpu_series_theme_tag(cpu_value))
 
@@ -366,8 +370,11 @@ class DpgMidiPlayerApp:
     def refresh_library_files(self, sender=None, app_data=None):
         directories = self._get_library_directories()
         search_text = ""
+        previous_selection = None
         if dpg.does_item_exist("library_search_input"):
             search_text = dpg.get_value("library_search_input").strip().lower()
+        if dpg.does_item_exist("library_file_list"):
+            previous_selection = dpg.get_value("library_file_list")
 
         entries = []
         for root_dir in directories:
@@ -392,7 +399,12 @@ class DpgMidiPlayerApp:
         if dpg.does_item_exist("library_file_list"):
             items = self.library_file_labels if self.library_file_labels else ["No MIDI files found"]
             dpg.configure_item("library_file_list", items=items)
-            dpg.set_value("library_file_list", items[0])
+            if previous_selection in self.library_file_map:
+                dpg.set_value("library_file_list", previous_selection)
+            elif not self.library_file_labels:
+                dpg.set_value("library_file_list", items[0])
+                self.last_library_click_label = None
+                self.last_library_click_time = 0.0
 
         if dpg.does_item_exist("library_count_text"):
             dpg.set_value("library_count_text", f"Files: {len(self.library_file_labels):,}")
@@ -889,6 +901,12 @@ class DpgMidiPlayerApp:
                                     width=-1,
                                     overlay="Buffer: 0.0s / 60.0s",
                                 )
+                                dpg.add_progress_bar(
+                                    tag="recovery_buffer_progress",
+                                    default_value=0.0,
+                                    width=-1,
+                                    overlay="Recovery: 0.0s / 4.0s",
+                                )
 
                     plot_x = list(range(100))
                     with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp, borders_innerV=True):
@@ -924,6 +942,7 @@ class DpgMidiPlayerApp:
                                         lock_max=True,
                                         tick_format="%.0f",
                                     ):
+                                        dpg.add_area_series(plot_x, list(self.nps_history), tag="nps_area_series")
                                         dpg.add_line_series(plot_x, list(self.nps_history), tag="nps_series")
 
                             with dpg.table_cell(tag="cpu_graph_cell"):
@@ -955,6 +974,7 @@ class DpgMidiPlayerApp:
                                         lock_max=True,
                                         tick_format="%.0f",
                                     ):
+                                        dpg.add_area_series(plot_x, list(self.cpu_history), tag="cpu_area_series")
                                         dpg.add_line_series(plot_x, list(self.cpu_history), tag="cpu_series")
 
                 with dpg.group(horizontal=True):
@@ -1367,6 +1387,13 @@ class DpgMidiPlayerApp:
                 with dpg.theme(tag=theme_tag):
                     with dpg.theme_component(dpg.mvLineSeries):
                         dpg.add_theme_color(dpg.mvPlotCol_Line, color, category=dpg.mvThemeCat_Plots)
+                    with dpg.theme_component(dpg.mvAreaSeries):
+                        dpg.add_theme_color(dpg.mvPlotCol_Line, color, category=dpg.mvThemeCat_Plots)
+                        dpg.add_theme_color(
+                            dpg.mvPlotCol_Fill,
+                            (color[0], color[1], color[2], 96),
+                            category=dpg.mvThemeCat_Plots,
+                        )
 
         if dpg.does_item_exist("title_text"):
             dpg.configure_item("title_text", color=self._color_tuple("accent_text"))
@@ -1969,6 +1996,8 @@ class DpgMidiPlayerApp:
         dpg.set_value("slowdown_text", "Slowdown: 0.0%")
         dpg.set_value("buffer_progress", 0.0)
         dpg.configure_item("buffer_progress", overlay="Buffer: 0.0s / 60.0s")
+        dpg.set_value("recovery_buffer_progress", 0.0)
+        dpg.configure_item("recovery_buffer_progress", overlay="Recovery: 0.0s / 4.0s")
 
     def reset_playback_state(self):
         self.controller.reset_playback_state()
@@ -1985,6 +2014,8 @@ class DpgMidiPlayerApp:
             dpg.set_value("time_text", f"{finished} / {finished}")
             dpg.set_value("seek_slider", self.controller.total_song_duration)
         dpg.configure_item("voices_slider", enabled=True)
+        dpg.set_value("recovery_buffer_progress", 0.0)
+        dpg.configure_item("recovery_buffer_progress", overlay="Recovery: 0.0s / 4.0s")
         self._refresh_transport_button_state()
         self.panic_all_notes_off()
 
@@ -2026,6 +2057,10 @@ class DpgMidiPlayerApp:
             has_started_playback = False
             emergency_recovery = False
             startup_prerender_target = 3.0 if start_time <= 0.001 else 4.0
+            recovery_target = 4.0
+            self.controller.recovery_active = False
+            self.controller.recovery_buffer_level = 0.0
+            self.controller.recovery_buffer_target = recovery_target
 
             while self.controller.playing:
                 if not self.controller.playing:
@@ -2041,6 +2076,8 @@ class DpgMidiPlayerApp:
                     if emergency_recovery and hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
                         self.controller.active_midi_backend.set_emergency_recovery(False)
                         emergency_recovery = False
+                    self.controller.recovery_active = False
+                    self.controller.recovery_buffer_level = 0.0
                     self.controller.active_midi_backend.stop()
                     self.controller.active_midi_backend.set_current_time(requested_time)
                     self.controller.buffered_playback_start_offset = requested_time
@@ -2049,11 +2086,14 @@ class DpgMidiPlayerApp:
 
                 buffer_lvl = self.controller.active_midi_backend.fill_buffer(60.0)
                 is_active = self.controller.active_midi_backend.is_active()
+                self.controller.recovery_buffer_target = recovery_target
 
                 if self.controller.paused:
                     if emergency_recovery and hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
                         self.controller.active_midi_backend.set_emergency_recovery(False)
                         emergency_recovery = False
+                    self.controller.recovery_active = False
+                    self.controller.recovery_buffer_level = 0.0
                     self.controller.active_midi_backend.pause()
                     if buffer_lvl >= 60.0:
                         time.sleep(0.1)
@@ -2066,25 +2106,77 @@ class DpgMidiPlayerApp:
                         if emergency_recovery and hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
                             self.controller.active_midi_backend.set_emergency_recovery(False)
                             emergency_recovery = False
+                        self.controller.recovery_active = False
+                        self.controller.recovery_buffer_level = min(buffer_lvl, recovery_target)
                         self._queue_ui(dpg.set_value, "status_text", "Playing...")
                         self.controller.active_midi_backend.play()
                         has_started_playback = True
                     else:
+                        self.controller.recovery_active = False
+                        self.controller.recovery_buffer_level = min(buffer_lvl, recovery_target)
                         self._queue_ui(
                             dpg.set_value,
                             "status_text",
                             f"Prerendering... {buffer_lvl:.1f}s / {startup_prerender_target:.1f}s",
                         )
                 else:
-                    if buffer_lvl < 0.2:
-                        if not emergency_recovery and hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
+                    if emergency_recovery or buffer_lvl < 0.2:
+                        progress = max(0.0, min(buffer_lvl / recovery_target, 1.0))
+                        normal_voice_limit = max(
+                            1,
+                            int(
+                                getattr(
+                                    self.controller.active_midi_backend,
+                                    "normal_voice_limit",
+                                    CONFIG["audio"].get("voices", 512),
+                                )
+                            ),
+                        )
+                        min_voice_limit = min(normal_voice_limit, 32)
+                        eased_progress = progress ** 1.65
+                        skip_velocity_below = max(0, min(127, int(round(127.0 * (1.0 - eased_progress)))))
+                        recovery_voice_limit = max(
+                            min_voice_limit,
+                            min(
+                                normal_voice_limit,
+                                int(
+                                    round(
+                                        min_voice_limit
+                                        + ((normal_voice_limit - min_voice_limit) * eased_progress)
+                                    )
+                                ),
+                            ),
+                        )
+                        skip_note_ons = progress <= 0.04 and recovery_voice_limit <= min_voice_limit
+                        if hasattr(self.controller.active_midi_backend, "configure_emergency_recovery"):
+                            self.controller.active_midi_backend.configure_emergency_recovery(
+                                skip_velocity_below,
+                                recovery_voice_limit,
+                                skip_note_ons,
+                            )
+                        elif not emergency_recovery and hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
                             self.controller.active_midi_backend.set_emergency_recovery(True)
-                            emergency_recovery = True
+                        emergency_recovery = True
+                        self.controller.recovery_active = buffer_lvl < recovery_target
+                        self.controller.recovery_buffer_level = min(buffer_lvl, recovery_target)
                         if not self.controller.paused and not is_active and buffer_lvl > 0.02:
                             self.controller.active_midi_backend.play()
-                        self._queue_ui(dpg.set_value, "status_text", "Recovering buffer...")
+                        if buffer_lvl >= recovery_target:
+                            if hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
+                                self.controller.active_midi_backend.set_emergency_recovery(False)
+                            emergency_recovery = False
+                            self.controller.recovery_active = False
+                            self._queue_ui(dpg.set_value, "status_text", "Playing...")
+                        else:
+                            self._queue_ui(
+                                dpg.set_value,
+                                "status_text",
+                                f"Recovering buffer... {buffer_lvl:.1f}s / {recovery_target:.1f}s",
+                            )
                     else:
-                        if emergency_recovery and buffer_lvl >= 4.0 and hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
+                        self.controller.recovery_active = False
+                        self.controller.recovery_buffer_level = min(buffer_lvl, recovery_target)
+                        if emergency_recovery and hasattr(self.controller.active_midi_backend, "set_emergency_recovery"):
                             self.controller.active_midi_backend.set_emergency_recovery(False)
                             emergency_recovery = False
                             self._queue_ui(dpg.set_value, "status_text", "Playing...")
@@ -2101,6 +2193,8 @@ class DpgMidiPlayerApp:
             print(f"Buffered playback error: {e}")
             traceback.print_exc()
         finally:
+            self.controller.recovery_active = False
+            self.controller.recovery_buffer_level = 0.0
             if (
                 self.controller.active_midi_backend
                 and hasattr(self.controller.active_midi_backend, "set_emergency_recovery")
@@ -2905,7 +2999,9 @@ class DpgMidiPlayerApp:
 
     def _update_plot_series(self):
         x_values = list(range(100))
+        dpg.set_value("nps_area_series", [x_values, list(self.nps_history)])
         dpg.set_value("nps_series", [x_values, list(self.nps_history)])
+        dpg.set_value("cpu_area_series", [x_values, list(self.cpu_history)])
         dpg.set_value("cpu_series", [x_values, list(self.cpu_history)])
         current_max_nps = max(self.nps_history) if self.nps_history else 0
         if current_max_nps <= 100:
@@ -2992,10 +3088,30 @@ class DpgMidiPlayerApp:
                     dpg.set_value("slowdown_text", "Buffered playback")
                     dpg.set_value("buffer_progress", clamped_buf / 60.0)
                     dpg.configure_item("buffer_progress", overlay=f"Buffer: {buf_lvl:.1f}s / 60.0s")
+                    recovery_target = max(0.1, float(getattr(self.controller, "recovery_buffer_target", 4.0)))
+                    recovery_lvl = max(
+                        0.0,
+                        min(float(getattr(self.controller, "recovery_buffer_level", 0.0)), recovery_target),
+                    )
+                    dpg.set_value("recovery_buffer_progress", recovery_lvl / recovery_target)
+                    if getattr(self.controller, "recovery_active", False):
+                        dpg.configure_item(
+                            "recovery_buffer_progress",
+                            overlay=f"Recovery: {recovery_lvl:.1f}s / {recovery_target:.1f}s",
+                        )
+                    elif buf_lvl >= recovery_target:
+                        dpg.configure_item("recovery_buffer_progress", overlay="Recovery: Ready")
+                    else:
+                        dpg.configure_item(
+                            "recovery_buffer_progress",
+                            overlay=f"Recovery: {min(float(buf_lvl), recovery_target):.1f}s / {recovery_target:.1f}s",
+                        )
                 except Exception:
                     dpg.set_value("slowdown_text", "Buffered playback")
                     dpg.set_value("buffer_progress", 0.0)
                     dpg.configure_item("buffer_progress", overlay="Buffer: N/A")
+                    dpg.set_value("recovery_buffer_progress", 0.0)
+                    dpg.configure_item("recovery_buffer_progress", overlay="Recovery: N/A")
             else:
                 if self.controller.playing and not self.controller.paused:
                     delta_lag = self.controller.current_lag - self.controller.last_lag_value
@@ -3009,6 +3125,8 @@ class DpgMidiPlayerApp:
                 dpg.set_value("slowdown_text", f"Slowdown: {self.controller.slowdown_percentage:.1f}%")
                 dpg.set_value("buffer_progress", 0.0)
                 dpg.configure_item("buffer_progress", overlay="Buffer: N/A")
+                dpg.set_value("recovery_buffer_progress", 0.0)
+                dpg.configure_item("recovery_buffer_progress", overlay="Recovery: N/A")
 
     def cleanup(self):
         if self._cleaned_up:

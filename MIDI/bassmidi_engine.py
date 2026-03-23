@@ -144,8 +144,9 @@ class BassMidiEngine:
         self.playback_speed = 1.0
         self.normal_voice_limit = 512
         self.emergency_voice_limit = 96
-        self.emergency_velocity = 100
+        self.emergency_velocity = 0
         self.emergency_recovery_enabled = False
+        self.emergency_skip_note_ons = False
         self.soundfont_preset = -1
         self.soundfont_bank = 0
         
@@ -272,7 +273,10 @@ class BassMidiEngine:
                 pitch = param & 0xFF
                 velocity = (param >> 8) & 0xFF
                 if velocity > 0:
-                    param = pitch | (int(self.emergency_velocity) << 8)
+                    if self.emergency_skip_note_ons:
+                        return
+                    if velocity <= int(self.emergency_velocity):
+                        return
             bassmidi.BASS_MIDI_StreamEvent(target, chan, BASS_MIDI_EVENT_NOTE, param)
         elif cmd == 0xE0:
             d1 = param & 0xFF
@@ -457,7 +461,23 @@ class BassMidiEngine:
 
     def set_emergency_recovery(self, enabled):
         self.emergency_recovery_enabled = bool(enabled)
+        self.emergency_skip_note_ons = False
+        if not self.emergency_recovery_enabled:
+            self.emergency_velocity = 0
         target = self.decode_stream if self.buffering_enabled else self.midi_stream
         if target:
             effective = self.emergency_voice_limit if self.emergency_recovery_enabled else self.normal_voice_limit
             bass.BASS_ChannelSetAttribute(target, BASS_ATTRIB_MIDI_VOICES, ctypes.c_float(float(effective)))
+
+    def configure_emergency_recovery(self, skip_velocity_below, voice_limit, skip_note_ons):
+        self.emergency_recovery_enabled = True
+        self.emergency_velocity = max(0, min(int(skip_velocity_below), 127))
+        self.emergency_voice_limit = max(1, int(voice_limit))
+        self.emergency_skip_note_ons = bool(skip_note_ons)
+        target = self.decode_stream if self.buffering_enabled else self.midi_stream
+        if target:
+            bass.BASS_ChannelSetAttribute(
+                target,
+                BASS_ATTRIB_MIDI_VOICES,
+                ctypes.c_float(float(self.emergency_voice_limit)),
+            )
