@@ -20,6 +20,7 @@ RENDER_NOTE_DTYPE = np.dtype([
     ('velocity', 'u1'),
     ('track', 'u1'),
     ('padding', 'u1'),
+    ('depth', 'f4'),
 ])
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -50,6 +51,7 @@ VERT_SHADER = """#version 120
 attribute vec2 pos;
 attribute vec2 note_times;
 attribute vec3 note_info;
+attribute float note_depth;
 
 uniform mat4 u_projection;
 uniform float u_time;
@@ -91,7 +93,7 @@ void main() {
     vec2 instance_offset = vec2(layout.x, note_y - note_h);
     vec2 final_pos = pos * instance_scale + instance_offset;
     
-    gl_Position = u_projection * vec4(final_pos, 0.0, 1.0);
+    gl_Position = u_projection * vec4(final_pos, note_depth, 1.0);
     
     v_pos = pos;
     v_note_h = note_h;
@@ -552,6 +554,7 @@ class PianoRoll:
         self.app_running.set()
         self.force_data_update = threading.Event()
         self.data_thread = None
+        self.last_stream_signature = None
         self.notes_to_draw = 0
         self.current_note_data = None
         self.get_current_time = None
@@ -651,11 +654,16 @@ class PianoRoll:
         self.last_visible_notes = None
         self.glow_trails = {}
         self.last_glow_time = None
+        self.base_render_notes = None
+        self.base_render_on_times = None
         self.render_notes_array = None
         self.render_on_times = None
         self.render_notes_by_mode = {}
         self.render_on_times_by_mode = {}
         self.max_note_duration = 10.0
+        self.overlap_cull_duration_similarity = 0.82
+        self.overlap_cull_coverage_threshold = 0.88
+        self.overlap_cull_recent_candidates = 4
         
         self.pending_midi_data = None
         self.midi_data_lock = threading.Lock()
@@ -728,18 +736,24 @@ class PianoRoll:
         packed['velocity'] = notes_array['velocity']
         packed['track'] = notes_array['track']
         packed['padding'] = notes_array['padding']
+        packed['depth'] = 0.0
         return packed
 
-    def _build_render_data(self, all_notes_gpu):
+    def _build_base_render_data(self, all_notes_gpu):
         render_sort_idx = np.argsort(all_notes_gpu['on_time'], kind='stable')
         sorted_notes = all_notes_gpu[render_sort_idx]
         base_render_notes = self._pack_render_notes(sorted_notes)
+        return base_render_notes, base_render_notes['on_time']
 
-        track_render_notes = np.ascontiguousarray(base_render_notes.copy())
-        if len(track_render_notes) > 0:
+    def _build_render_data_for_mode(self, base_render_notes, mode):
+        render_notes = np.ascontiguousarray(base_render_notes.copy())
+        if len(render_notes) == 0:
+            return render_notes, render_notes['on_time']
+
+        if mode == 'track':
             pair_slots = np.zeros((256, 16), dtype=np.uint8)
             pair_present = np.zeros((256, 16), dtype=bool)
-            pair_present[track_render_notes['track'], track_render_notes['padding']] = True
+            pair_present[render_notes['track'], render_notes['padding']] = True
 
             slot = 0
             for track_idx in range(256):
@@ -748,21 +762,11 @@ class PianoRoll:
                         pair_slots[track_idx, channel_idx] = slot % 128
                         slot += 1
 
-            track_render_notes['track'] = pair_slots[track_render_notes['track'], track_render_notes['padding']]
+            render_notes['track'] = pair_slots[render_notes['track'], render_notes['padding']]
+        else:
+            render_notes['track'] = render_notes['padding']
 
-        channel_render_notes = np.ascontiguousarray(base_render_notes.copy())
-        if len(channel_render_notes) > 0:
-            channel_render_notes['track'] = channel_render_notes['padding']
-
-        render_notes_by_mode = {
-            'track': track_render_notes,
-            'channel': channel_render_notes,
-        }
-        render_on_times_by_mode = {
-            mode: render_notes['on_time']
-            for mode, render_notes in render_notes_by_mode.items()
-        }
-        return render_notes_by_mode, render_on_times_by_mode
+        return render_notes, render_notes['on_time']
 
     def _order_visible_notes_for_draw(self, visible_slice):
         if visible_slice is None or len(visible_slice) <= 1 or self.is_white_key_data is None:
@@ -772,20 +776,106 @@ class PianoRoll:
             return visible_slice
         return np.concatenate((visible_slice[white_mask], visible_slice[~white_mask]))
 
+    def _cull_overlapped_visible_notes(self, visible_slice):
+        if visible_slice is None or len(visible_slice) <= 1:
+            return visible_slice
+
+        keep_mask = np.ones(len(visible_slice), dtype=bool)
+        kept_intervals_by_pitch = {}
+
+        for idx in range(len(visible_slice) - 1, -1, -1):
+            note = visible_slice[idx]
+            pitch = int(note['pitch'])
+            on_time = float(note['on_time'])
+            off_time = float(note['off_time'])
+            note_duration = max(0.0001, off_time - on_time)
+
+            should_skip = False
+            for kept_on, kept_off, kept_duration in kept_intervals_by_pitch.get(pitch, ()):
+                overlap = min(off_time, kept_off) - max(on_time, kept_on)
+                if overlap <= 0.0:
+                    continue
+
+                duration_similarity = min(note_duration, kept_duration) / max(note_duration, kept_duration, 0.0001)
+                if duration_similarity < self.overlap_cull_duration_similarity:
+                    continue
+
+                overlap_coverage = overlap / min(note_duration, kept_duration)
+                if overlap_coverage >= self.overlap_cull_coverage_threshold:
+                    should_skip = True
+                    break
+
+            if should_skip:
+                keep_mask[idx] = False
+            else:
+                kept_intervals_by_pitch.setdefault(pitch, []).append((on_time, off_time, note_duration))
+
+        if np.all(keep_mask):
+            return visible_slice
+        return visible_slice[keep_mask]
+
+    def _precompute_overlap_cull_mask(self, notes_array):
+        if notes_array is None or len(notes_array) <= 1:
+            return np.ones(len(notes_array), dtype=bool)
+
+        keep_mask = np.ones(len(notes_array), dtype=bool)
+        recent_kept_by_pitch = [[] for _ in range(128)]
+        recent_limit = max(1, int(self.overlap_cull_recent_candidates))
+
+        for idx in range(len(notes_array) - 1, -1, -1):
+            note = notes_array[idx]
+            pitch = int(note['pitch'])
+            on_time = float(note['on_time'])
+            off_time = float(note['off_time'])
+            note_duration = max(0.0001, off_time - on_time)
+
+            should_skip = False
+            for kept_on, kept_off, kept_duration in recent_kept_by_pitch[pitch]:
+                if kept_on >= off_time:
+                    continue
+                overlap = min(off_time, kept_off) - max(on_time, kept_on)
+                if overlap <= 0.0:
+                    continue
+
+                duration_similarity = min(note_duration, kept_duration) / max(note_duration, kept_duration, 0.0001)
+                if duration_similarity < self.overlap_cull_duration_similarity:
+                    continue
+
+                overlap_coverage = overlap / min(note_duration, kept_duration)
+                if overlap_coverage >= self.overlap_cull_coverage_threshold:
+                    should_skip = True
+                    break
+
+            if should_skip:
+                keep_mask[idx] = False
+                continue
+
+            recent_kept_by_pitch[pitch].insert(0, (on_time, off_time, note_duration))
+            if len(recent_kept_by_pitch[pitch]) > recent_limit:
+                del recent_kept_by_pitch[pitch][recent_limit:]
+
+        return keep_mask
+
+    def _assign_note_depths(self, visible_notes):
+        count = len(visible_notes)
+        if count <= 0:
+            return
+        visible_notes['depth'] = (np.arange(1, count + 1, dtype=np.float32) / np.float32(count + 1))
+
     def _rebuild_color_mode_render_data(self):
         if self.all_notes_gpu is None:
             return
-        if self.render_notes_by_mode and self.render_on_times_by_mode:
-            render_notes_by_mode = self.render_notes_by_mode
-            render_on_times_by_mode = self.render_on_times_by_mode
-        else:
-            render_notes_by_mode, render_on_times_by_mode = self._build_render_data(self.all_notes_gpu)
         active_mode = "channel" if self.note_color_mode == "channel" else "track"
-        render_notes_array = render_notes_by_mode[active_mode]
-        render_on_times = render_on_times_by_mode[active_mode]
+        if self.base_render_notes is None:
+            self.base_render_notes, self.base_render_on_times = self._build_base_render_data(self.all_notes_gpu)
+        if active_mode not in self.render_notes_by_mode:
+            render_notes_array, render_on_times = self._build_render_data_for_mode(self.base_render_notes, active_mode)
+            self.render_notes_by_mode[active_mode] = render_notes_array
+            self.render_on_times_by_mode[active_mode] = render_on_times
+        else:
+            render_notes_array = self.render_notes_by_mode[active_mode]
+            render_on_times = self.render_on_times_by_mode[active_mode]
         if self.export_mode:
-            self.render_notes_by_mode = render_notes_by_mode
-            self.render_on_times_by_mode = render_on_times_by_mode
             self.render_notes_array = render_notes_array
             self.render_on_times = render_on_times
             self.notes_to_draw = 0
@@ -794,8 +884,10 @@ class PianoRoll:
             with self.midi_data_lock:
                 self.pending_midi_data = {
                     'all_notes_gpu': self.all_notes_gpu,
-                    'render_notes_by_mode': render_notes_by_mode,
-                    'render_on_times_by_mode': render_on_times_by_mode,
+                    'base_render_notes': self.base_render_notes,
+                    'base_render_on_times': self.base_render_on_times,
+                    'render_notes_by_mode': self.render_notes_by_mode,
+                    'render_on_times_by_mode': self.render_on_times_by_mode,
                     'render_notes_array': render_notes_array,
                     'render_on_times': render_on_times
                 }
@@ -1294,6 +1386,7 @@ class PianoRoll:
         pos_loc = glGetAttribLocation(self.shader, "pos")
         note_times_loc = glGetAttribLocation(self.shader, "note_times")
         note_info_loc = glGetAttribLocation(self.shader, "note_info")
+        note_depth_loc = glGetAttribLocation(self.shader, "note_depth")
 
         self.vbo_vertices = glGenBuffers(1)
         glBindBuffer(GL_ARRAY_BUFFER, self.vbo_vertices)
@@ -1314,6 +1407,10 @@ class PianoRoll:
         glEnableVertexAttribArray(note_info_loc)
         glVertexAttribPointer(note_info_loc, 3, GL_UNSIGNED_BYTE, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(8))
         glVertexAttribDivisor(note_info_loc, 1)
+
+        glEnableVertexAttribArray(note_depth_loc)
+        glVertexAttribPointer(note_depth_loc, 1, GL_FLOAT, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(12))
+        glVertexAttribDivisor(note_depth_loc, 1)
 
         if self.bloom_shader:
             bloom_pos_loc = glGetAttribLocation(self.bloom_shader, "pos")
@@ -1618,10 +1715,13 @@ class PianoRoll:
         self.get_current_time = get_current_time_func
         self.glow_trails.clear()
         self.last_glow_time = None
-        render_notes_by_mode, render_on_times_by_mode = self._build_render_data(all_notes_gpu)
+        self.base_render_notes, self.base_render_on_times = self._build_base_render_data(all_notes_gpu)
+        self.render_notes_by_mode = {}
+        self.render_on_times_by_mode = {}
         active_mode = "channel" if self.note_color_mode == "channel" else "track"
-        render_notes_array = render_notes_by_mode[active_mode]
-        render_on_times = render_on_times_by_mode[active_mode]
+        render_notes_array, render_on_times = self._build_render_data_for_mode(self.base_render_notes, active_mode)
+        self.render_notes_by_mode[active_mode] = render_notes_array
+        self.render_on_times_by_mode[active_mode] = render_on_times
         durations = render_notes_array['off_time'] - render_notes_array['on_time']
         if len(durations) > 0:
             self.max_note_duration = float(np.max(durations))
@@ -1640,8 +1740,10 @@ class PianoRoll:
             with self.midi_data_lock:
                 self.pending_midi_data = {
                     'all_notes_gpu': all_notes_gpu,
-                    'render_notes_by_mode': render_notes_by_mode,
-                    'render_on_times_by_mode': render_on_times_by_mode,
+                    'base_render_notes': self.base_render_notes,
+                    'base_render_on_times': self.base_render_on_times,
+                    'render_notes_by_mode': self.render_notes_by_mode,
+                    'render_on_times_by_mode': self.render_on_times_by_mode,
                     'render_notes_array': render_notes_array,
                     'render_on_times': render_on_times
                 }
@@ -1658,10 +1760,13 @@ class PianoRoll:
             self.pending_midi_data = None
         
         self.all_notes_gpu = data['all_notes_gpu']
+        self.base_render_notes = data.get('base_render_notes')
+        self.base_render_on_times = data.get('base_render_on_times')
         self.render_notes_by_mode = data.get('render_notes_by_mode', {})
         self.render_on_times_by_mode = data.get('render_on_times_by_mode', {})
         self.render_notes_array = data['render_notes_array']
         self.render_on_times = data['render_on_times']
+        self.last_stream_signature = None
         self.notes_to_draw = 0
         self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
         
@@ -1687,6 +1792,20 @@ class PianoRoll:
             weighted_norm = pow(norm, 1.35)
             amplitude = self.spike_bloom_min_boost + (self.spike_bloom_max_boost - self.spike_bloom_min_boost) * weighted_norm
             self._spike_rank_map[(float(spike_time), int(spike_value))] = amplitude
+
+    def _visible_slice_signature(self, visible_slice, visible_count):
+        if visible_count <= 0 or visible_slice is None or len(visible_slice) == 0:
+            return (0,)
+
+        first = visible_slice[0]
+        last = visible_slice[-1]
+        mid = visible_slice[visible_count // 2]
+        return (
+            int(visible_count),
+            float(first['on_time']), float(first['off_time']), int(first['pitch']), int(first['track']),
+            float(mid['on_time']), float(mid['off_time']), int(mid['pitch']), int(mid['track']),
+            float(last['on_time']), float(last['off_time']), int(last['pitch']), int(last['track']),
+        )
 
     def _smoothstep(self, edge0, edge1, x):
         if edge0 == edge1:
@@ -1775,6 +1894,12 @@ class PianoRoll:
                 visible_slice = self._order_visible_notes_for_draw(visible_slice)
 
                 visible_slice_contiguous = np.ascontiguousarray(visible_slice)
+                self._assign_note_depths(visible_slice_contiguous)
+                visible_signature = self._visible_slice_signature(visible_slice_contiguous, visible_count)
+                if visible_signature == self.last_stream_signature:
+                    time.sleep(0.005)
+                    continue
+                self.last_stream_signature = visible_signature
 
                 try:
                     self.data_queue.put((visible_slice_contiguous, visible_count), block=True, timeout=0.1)
@@ -1813,8 +1938,10 @@ class PianoRoll:
             visible_count = self.streaming_vbo_capacity
 
         visible_slice = self._order_visible_notes_for_draw(visible_slice)
-
-        return np.ascontiguousarray(visible_slice), visible_count
+        visible_count = len(visible_slice)
+        visible_slice_contiguous = np.ascontiguousarray(visible_slice)
+        self._assign_note_depths(visible_slice_contiguous)
+        return visible_slice_contiguous, visible_count
 
     def draw(self, current_time, present=True):
         """Draw the latest buffer provided by the data thread."""
@@ -1880,7 +2007,8 @@ class PianoRoll:
             window_start = current_time - self.seconds_before_cursor
             window_end = current_time + self.seconds_after_cursor
 
-            glDisable(GL_DEPTH_TEST)
+            glEnable(GL_DEPTH_TEST)
+            glDepthMask(GL_TRUE)
             glUseProgram(self.shader)
 
             glUniform1f(self.u_time_loc, current_time)
@@ -1901,6 +2029,7 @@ class PianoRoll:
             glBindVertexArray(0)
             glUseProgram(0)
             glBindBuffer(GL_ARRAY_BUFFER, 0)
+            glDisable(GL_DEPTH_TEST)
 
         if self.show_glow and self.show_key_press_glow:
             self._draw_active_note_glow_overlay(current_time)
