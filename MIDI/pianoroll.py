@@ -1732,8 +1732,6 @@ class PianoRoll:
             self.export_total_duration = 0.0
         if self.export_mode:
             self.all_notes_gpu = all_notes_gpu
-            self.render_notes_by_mode = render_notes_by_mode
-            self.render_on_times_by_mode = render_on_times_by_mode
             self.render_notes_array = render_notes_array
             self.render_on_times = render_on_times
             self.notes_to_draw = 0

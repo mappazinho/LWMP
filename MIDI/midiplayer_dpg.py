@@ -1151,7 +1151,7 @@ class DpgMidiPlayerApp:
             height=420,
         ):
             dpg.add_text("Video Output", color=(223, 177, 103))
-            dpg.add_text("FFmpeg path", color=(160, 166, 178))
+            dpg.add_text("FFmpeg path (PATH/TO/ffmpeg.exe)", color=(160, 166, 178))
             dpg.add_input_text(
                 tag="render_ffmpeg_path",
                 default_value=str(self._render_cfg().get("ffmpeg_path", "ffmpeg")),
@@ -2458,16 +2458,17 @@ class DpgMidiPlayerApp:
             return f"{hours:d}:{minutes:02d}:{seconds:02d}"
         return f"{minutes:02d}:{seconds:02d}"
 
-    def _render_progress_with_eta(self, start_time, fraction, overlay, detail):
-        fraction = max(0.0, min(float(fraction), 1.0))
+    def _render_progress_with_timing(self, stage_name, stage_start_time, stage_fraction, overall_fraction, overlay, detail):
+        stage_fraction = max(0.0, min(float(stage_fraction), 1.0))
+        overall_fraction = max(0.0, min(float(overall_fraction), 1.0))
         detail_text = str(detail)
-        if fraction > 0.001 and fraction < 1.0:
-            elapsed = max(0.0, time.monotonic() - start_time)
-            if elapsed > 0.25:
-                estimated_total = elapsed / fraction
-                eta_seconds = max(0.0, estimated_total - elapsed)
-                detail_text = f"{detail_text}\nEstimated time left: {self._format_render_eta(eta_seconds)}"
-        self._set_render_progress(fraction, overlay, detail_text)
+        elapsed = max(0.0, time.monotonic() - stage_start_time)
+        detail_text = f"{detail_text}\nTime elapsed: {self._format_render_eta(elapsed)}"
+        if stage_fraction > 0.001 and stage_fraction < 1.0 and elapsed > 0.25:
+            estimated_total = elapsed / stage_fraction
+            eta_seconds = max(0.0, estimated_total - elapsed)
+            detail_text = f"{detail_text}\n{stage_name} time left: {self._format_render_eta(eta_seconds)}"
+        self._set_render_progress(overall_fraction, overlay, detail_text)
 
     def _bundled_ffmpeg_path(self):
         for candidate in _BUNDLED_FFMPEG_CANDIDATES:
@@ -2611,6 +2612,7 @@ class DpgMidiPlayerApp:
         return times[sort_indices], statuses[sort_indices], params[sort_indices]
 
     def _render_audio_to_wav(self, wav_path, parsed_midi):
+        stage_start_time = time.monotonic()
         bass_cls = self.controller.bass_engine_cls
         if bass_cls is None:
             raise RuntimeError("BASSMIDI engine not available for export.")
@@ -2670,8 +2672,10 @@ class DpgMidiPlayerApp:
                     wav_file.writeframes(pcm_int16.tobytes())
                     rendered_audio_time = min(total_duration, rendered_audio_time + requested_seconds)
                     self._queue_ui(
-                        self._render_progress_with_eta,
-                        self.render_start_time_monotonic,
+                        self._render_progress_with_timing,
+                        "Audio",
+                        stage_start_time,
+                        rendered_audio_time / max(total_duration, 0.001),
                         0.45 * (rendered_audio_time / max(total_duration, 0.001)),
                         f"Audio {rendered_audio_time:.1f}s / {total_duration:.1f}s",
                         "Rendering audio...",
@@ -2690,6 +2694,7 @@ class DpgMidiPlayerApp:
         return ["-c:v", "libx264", "-pix_fmt", "yuv420p"], ".mp4"
 
     def _render_video_stream_only(self, ffmpeg_bin, parsed_midi, settings, video_output_path):
+        stage_start_time = time.monotonic()
         codec_args, _ = self._codec_settings(settings["codec"])
         ffmpeg_cmd = [
             ffmpeg_bin,
@@ -2709,8 +2714,10 @@ class DpgMidiPlayerApp:
         ]
 
         self._queue_ui(
-            self._render_progress_with_eta,
-            self.render_start_time_monotonic,
+            self._render_progress_with_timing,
+            "Video",
+            stage_start_time,
+            0.0,
             0.48,
             "Video",
             "Rendering piano roll frames...",
@@ -2762,10 +2769,13 @@ class DpgMidiPlayerApp:
                 if frame_idx % max(1, settings["framerate"] // 2) == 0:
                     fraction_start = 0.5 if settings["render_audio"] else 0.02
                     fraction_span = 0.28 if settings["render_audio"] else 0.94
+                    stage_fraction = (frame_idx + 1) / float(total_frames)
                     fraction = fraction_start + (fraction_span * ((frame_idx + 1) / float(total_frames)))
                     self._queue_ui(
-                        self._render_progress_with_eta,
-                        self.render_start_time_monotonic,
+                        self._render_progress_with_timing,
+                        "Video",
+                        stage_start_time,
+                        stage_fraction,
                         fraction,
                         f"Frame {frame_idx + 1:,} / {total_frames:,}",
                         "Rendering piano roll frames...",
@@ -2788,6 +2798,7 @@ class DpgMidiPlayerApp:
             raise RuntimeError(self._format_ffmpeg_error(ffmpeg_cmd, process.returncode, ffmpeg_stderr))
 
     def _finalize_render_output(self, ffmpeg_bin, video_path, output_path, settings, total_duration, audio_path=None):
+        stage_start_time = time.monotonic()
         codec_args, _ = self._codec_settings(settings["codec"])
         watermark_filter = self._build_watermark_filter(total_duration)
         ffmpeg_cmd = [
@@ -2815,8 +2826,10 @@ class DpgMidiPlayerApp:
             ffmpeg_cmd.append("-an")
         ffmpeg_cmd.append(output_path)
         self._queue_ui(
-            self._render_progress_with_eta,
-            self.render_start_time_monotonic,
+            self._render_progress_with_timing,
+            "Finalizing",
+            stage_start_time,
+            0.0,
             0.82,
             "Finalizing",
             "Adding watermark and writing final video...",
@@ -2911,8 +2924,10 @@ class DpgMidiPlayerApp:
 
                 if settings["render_audio"]:
                     self._queue_ui(
-                        self._render_progress_with_eta,
-                        self.render_start_time_monotonic,
+                        self._render_progress_with_timing,
+                        "Audio",
+                        time.monotonic(),
+                        0.0,
                         0.02,
                         "Audio",
                         "Rendering full audio track...",
@@ -2920,8 +2935,10 @@ class DpgMidiPlayerApp:
                     self._render_audio_to_wav(wav_path, parsed_midi)
                 else:
                     self._queue_ui(
-                        self._render_progress_with_eta,
-                        self.render_start_time_monotonic,
+                        self._render_progress_with_timing,
+                        "Video",
+                        time.monotonic(),
+                        0.0,
                         0.02,
                         "Video",
                         "Skipping audio render.",
