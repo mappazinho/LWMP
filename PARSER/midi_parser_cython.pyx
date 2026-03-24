@@ -207,6 +207,7 @@ cdef class MidiParser:
         
         self.note_data_for_gpu = np.empty((0,), dtype=GPU_NOTE_DTYPE)
         self.note_events_for_playback = np.empty((0,), dtype=PLAYBACK_EVENT_DTYPE)
+        self.tempo_events = [(0.0, 120.0)]
         self.program_change_events = []
         self.pitch_bend_events = []
         self.control_change_events = []
@@ -266,6 +267,7 @@ cdef class MidiParser:
 
         self.note_data_for_gpu = np.empty((0,), dtype=GPU_NOTE_DTYPE)
         self.note_events_for_playback = np.empty((0,), dtype=PLAYBACK_EVENT_DTYPE)
+        self.tempo_events = [(0.0, 120.0)]
         self.program_change_events = []
         self.pitch_bend_events = []
         self.control_change_events = []
@@ -474,6 +476,9 @@ cdef class MidiParser:
 
                 elif event_type == 0xFF and raw_ev.meta_type == 0x51:
                     current_tempo_usec = raw_ev.meta_val
+                    if current_tempo_usec > 0:
+                        with gil:
+                            self.tempo_events.append((current_time_sec, 60000000.0 / current_tempo_usec))
                 
                 elif event_type == 0xC0:
                     playback_event.on_time = current_time_sec
@@ -745,6 +750,9 @@ cdef class MidiParser:
 
                 elif event_type == 0xFF and raw_ev.meta_type == 0x51:
                     current_tempo_usec = raw_ev.meta_val
+                    if current_tempo_usec > 0:
+                        with gil:
+                            self.tempo_events.append((current_time_sec, 60000000.0 / current_tempo_usec))
 
                 ts = track_states[track_num]
                 if next_raw_event(&ts, &raw_ev):
@@ -874,6 +882,9 @@ cdef class MidiParser:
 
                 elif event_type == 0xFF and raw_ev.meta_type == 0x51:
                     current_tempo_usec = raw_ev.meta_val
+                    if current_tempo_usec > 0:
+                        with gil:
+                            self.tempo_events.append((current_time_sec, 60000000.0 / current_tempo_usec))
 
                 elif event_type == 0xC0:
                     playback_event.on_time = current_time_sec

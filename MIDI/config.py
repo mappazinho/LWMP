@@ -44,6 +44,7 @@ DEFAULT_CONFIG = {
         "show_backend_hint": True,
         "show_nps_graph": True,
         "show_cpu_graph": True,
+        "show_pianoroll_stats_overlay": False,
         "theme_seed": [191, 120, 54],
         "window_bg": [22, 24, 29],
         "pianoroll_bg": [13, 13, 20],
@@ -59,7 +60,8 @@ DEFAULT_CONFIG = {
         "body_text": [196, 198, 204]
     },
     "library": {
-        "midi_directories": []
+        "midi_directories": [],
+        "soundfont_directories": []
     },
     "render": {
         "resolution": "1280 x 720",
@@ -70,7 +72,8 @@ DEFAULT_CONFIG = {
         "ffmpeg_path": "ffmpeg",
         "output_path": "",
         "render_audio": True,
-        "show_stats_overlay": False
+        "show_stats_overlay": False,
+        "show_watermark": True
     }
 }
 

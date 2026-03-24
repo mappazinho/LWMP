@@ -10,6 +10,7 @@ import numpy as np
 import ctypes
 import xml.etree.ElementTree as ET
 import os
+import shutil
 import sys
 from config import save_config
 
@@ -25,6 +26,7 @@ RENDER_NOTE_DTYPE = np.dtype([
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _RUNTIME_ROOT = getattr(sys, "_MEIPASS", _SCRIPT_DIR)
+_EXE_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else _SCRIPT_DIR
 
 
 def _first_existing_path(*candidates):
@@ -34,8 +36,34 @@ def _first_existing_path(*candidates):
     return candidates[0] if candidates else ""
 
 
+def _ensure_external_skin_dir():
+    if not getattr(sys, "frozen", False):
+        return
+
+    bundled_skin_dir = os.path.join(_RUNTIME_ROOT, "skin")
+    external_skin_dir = os.path.join(_EXE_DIR, "skin")
+    if not os.path.isdir(bundled_skin_dir):
+        return
+
+    try:
+        os.makedirs(external_skin_dir, exist_ok=True)
+        for entry in os.listdir(bundled_skin_dir):
+            src = os.path.join(bundled_skin_dir, entry)
+            dst = os.path.join(external_skin_dir, entry)
+            if os.path.exists(dst):
+                continue
+            if os.path.isdir(src):
+                shutil.copytree(src, dst)
+            else:
+                shutil.copy2(src, dst)
+    except Exception as e:
+        print(f"Failed to prepare external skin directory '{external_skin_dir}': {e}")
+
+
 _PROJECT_DIR = os.path.dirname(_SCRIPT_DIR)
+_ensure_external_skin_dir()
 _SKIN_DIR = _first_existing_path(
+    os.path.join(_EXE_DIR, "skin"),
     os.path.join(_PROJECT_DIR, "skin"),
     os.path.join(_SCRIPT_DIR, "skin"),
     os.path.join(_RUNTIME_ROOT, "skin"),
@@ -691,8 +719,21 @@ class PianoRoll:
         self.hover_fade_states = {}
         self.hover_tooltip_text = None
         self.hover_mouse_pos = (0, 0)
+        gui_cfg = self.config.get('gui', {})
         render_cfg = self.config.get('render', {})
+        self.live_show_stats_overlay = bool(gui_cfg.get('show_pianoroll_stats_overlay', False))
         self.export_show_stats_overlay = bool(render_cfg.get('show_stats_overlay', False))
+        self.live_note_count_passed = 0
+        self.live_nps_value = 0
+        self.live_bpm_value = 0.0
+        self.live_polyphony_value = 0
+        self.stats_on_times = None
+        self.stats_off_times_sorted = None
+        self.stats_tempo_events = [(0.0, 120.0)]
+        self.stats_tempo_times = np.array([0.0], dtype=np.float64)
+        self.stats_tempo_bpms = np.array([120.0], dtype=np.float32)
+        self.stats_total_duration = 0.0
+        self.stats_total_notes = 0
 
     def _get_guide_line_y(self):
         if self.show_keyboard and 'white_key' in self.keyboard_texture_info:
@@ -1954,6 +1995,7 @@ class PianoRoll:
     def draw(self, current_time, present=True):
         """Draw the latest buffer provided by the data thread."""
         self.last_frame_time = current_time
+        self._init_slider_geometry()
         self._upload_pending_midi_data()
         if self.show_glow and (self.show_key_press_glow or self.show_key_light_fade):
             self._update_glow_trails(current_time)
@@ -1996,8 +2038,10 @@ class PianoRoll:
         if not self.export_mode:
             self._draw_slider_overlay()
             self._draw_capacity_warning_overlay()
-        elif self.export_show_stats_overlay:
-            self._draw_export_stats_overlay(current_time)
+            if self.live_show_stats_overlay:
+                self._draw_stats_overlay(current_time)
+        else:
+            self._draw_stats_overlay(current_time)
 
         if present:
             pygame.display.flip()
@@ -2460,6 +2504,9 @@ class PianoRoll:
         panel_width, panel_height = self.controls_panel_size
         panel_x = padding - 4
         panel_y = padding - 2
+        stats_rect = self._get_stats_overlay_box_rect(self.last_frame_time)
+        if stats_rect is not None:
+            panel_y = max(panel_y, stats_rect.bottom + 10)
         self.controls_toggle_rect = pygame.Rect(panel_x, panel_y, 34, 34)
         self.controls_panel_rect = pygame.Rect(panel_x, panel_y, panel_width, panel_height)
         self.controls_close_rect = pygame.Rect(panel_x + panel_width - 34 - 8, panel_y + 8, 34, 34)
@@ -2661,19 +2708,89 @@ class PianoRoll:
             return f"{hours:d}:{minutes:02d}:{sec:02d}"
         return f"{minutes:02d}:{sec:02d}"
 
-    def _draw_export_stats_overlay(self, current_time):
-        if not self.export_mode or not self.export_show_stats_overlay or self.render_on_times is None:
-            return
+    def set_live_stats(self, note_count_passed, nps_value, bpm_value=0.0, polyphony_value=0):
+        self.live_note_count_passed = max(0, int(note_count_passed))
+        self.live_nps_value = max(0, int(nps_value))
+        self.live_bpm_value = max(0.0, float(bpm_value))
+        self.live_polyphony_value = max(0, int(polyphony_value))
 
-        note_count_passed = int(np.searchsorted(self.render_on_times, current_time, side='right'))
-        left_idx = int(np.searchsorted(self.render_on_times, max(0.0, current_time - 1.0), side='left'))
-        nps_value = max(0, note_count_passed - left_idx)
-        total_notes = int(len(self.render_on_times))
-        total_duration = float(self.export_total_duration)
+    def set_stats_context(self, on_times, off_times_sorted, tempo_events, total_duration, total_notes):
+        self.stats_on_times = on_times
+        self.stats_off_times_sorted = off_times_sorted
+        tempo_events = tempo_events or [(0.0, 120.0)]
+        self.stats_tempo_events = tempo_events
+        self.stats_tempo_times = np.array([t for t, _ in tempo_events], dtype=np.float64)
+        self.stats_tempo_bpms = np.array([bpm for _, bpm in tempo_events], dtype=np.float32)
+        self.stats_total_duration = max(0.0, float(total_duration))
+        self.stats_total_notes = max(0, int(total_notes))
+
+    def _get_stats_overlay_box_rect(self, current_time):
+        if self.export_mode or not self.live_show_stats_overlay:
+            return None
+        if self.render_on_times is None or self.overlay_font is None:
+            return None
+
+        total_notes = int(self.stats_total_notes or len(self.render_on_times))
+        total_duration = float(self.stats_total_duration or self.export_total_duration)
+        lines = [
+            f"Notes: {self.live_note_count_passed:,} / {total_notes:,}",
+            f"NPS: {self.live_nps_value:,}",
+            f"BPM: {self.live_bpm_value:.2f}".rstrip('0').rstrip('.'),
+            f"Polyphony: {self.live_polyphony_value:,}",
+            f"Time: {self._format_time_overlay(current_time)} / {self._format_time_overlay(total_duration)}",
+        ]
+        tex_infos = [self._get_text_texture(line, (235, 238, 244)) for line in lines]
+        if any(info is None for info in tex_infos):
+            return None
+
+        line_height = max(info[2] for info in tex_infos)
+        content_width = max(info[1] for info in tex_infos)
+        padding_x = 12
+        padding_y = 10
+        spacing = 4
+        box_x = 14
+        box_y = 14
+        box_w = content_width + (padding_x * 2)
+        box_h = (line_height * len(lines)) + (spacing * (len(lines) - 1)) + (padding_y * 2)
+        return pygame.Rect(int(box_x), int(box_y), int(box_w), int(box_h))
+
+    def _draw_stats_overlay(self, current_time):
+        if self.render_on_times is None:
+            return
+        if self.export_mode:
+            if not self.export_show_stats_overlay:
+                return
+            stats_on_times = self.stats_on_times if self.stats_on_times is not None else self.render_on_times
+            note_count_passed = int(np.searchsorted(stats_on_times, current_time, side='right'))
+            left_idx = int(np.searchsorted(stats_on_times, max(0.0, current_time - 1.0), side='left'))
+            nps_value = max(0, note_count_passed - left_idx)
+            if self.stats_off_times_sorted is not None and len(self.stats_off_times_sorted) > 0:
+                ended_idx = int(np.searchsorted(self.stats_off_times_sorted, current_time, side='right'))
+                polyphony_value = max(0, note_count_passed - ended_idx)
+            else:
+                polyphony_value = 0
+            if self.stats_tempo_times is not None and len(self.stats_tempo_times) > 0:
+                tempo_idx = int(np.searchsorted(self.stats_tempo_times, current_time, side='right')) - 1
+                if tempo_idx < 0:
+                    tempo_idx = 0
+                bpm_value = float(self.stats_tempo_bpms[tempo_idx])
+            else:
+                bpm_value = 120.0
+        elif not self.live_show_stats_overlay:
+            return
+        else:
+            note_count_passed = self.live_note_count_passed
+            nps_value = self.live_nps_value
+            bpm_value = self.live_bpm_value
+            polyphony_value = self.live_polyphony_value
+        total_notes = int(self.stats_total_notes or len(self.render_on_times))
+        total_duration = float(self.stats_total_duration or self.export_total_duration)
 
         lines = [
             f"Notes: {note_count_passed:,} / {total_notes:,}",
             f"NPS: {nps_value:,}",
+            f"BPM: {bpm_value:.2f}".rstrip('0').rstrip('.'),
+            f"Polyphony: {polyphony_value:,}",
             f"Time: {self._format_time_overlay(current_time)} / {self._format_time_overlay(total_duration)}",
         ]
 

@@ -27,6 +27,7 @@ cdef class MidiParser:
     # Public attributes (read-only)
     cdef public np.ndarray note_data_for_gpu
     cdef public np.ndarray note_events_for_playback
+    cdef public list tempo_events
     cdef public list program_change_events
     cdef public list pitch_bend_events
     cdef public list control_change_events

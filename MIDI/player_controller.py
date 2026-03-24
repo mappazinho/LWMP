@@ -238,8 +238,28 @@ class PlayerController:
                 for t, c, cc, value in self.parsed_midi.control_change_events
             ]
 
+        tempo_events = getattr(self.parsed_midi, "tempo_events", None) or [(0.0, 120.0)]
+        self.parsed_midi.tempo_events = [
+            (float(t) + start_padding, float(bpm)) for t, bpm in tempo_events
+        ]
+        if not self.parsed_midi.tempo_events or self.parsed_midi.tempo_events[0][0] > 0.0:
+            self.parsed_midi.tempo_events.insert(0, (0.0, 120.0))
+        self.parsed_midi.tempo_times = np.array(
+            [t for t, _ in self.parsed_midi.tempo_events], dtype=np.float64
+        )
+        self.parsed_midi.tempo_bpms = np.array(
+            [bpm for _, bpm in self.parsed_midi.tempo_events], dtype=np.float32
+        )
+
         if hasattr(self.parsed_midi, "total_duration_sec"):
             self.parsed_midi.total_duration_sec += start_padding + end_padding
+
+        if self.parsed_midi.note_events_for_playback.size > 0:
+            self.parsed_midi.sorted_off_times = np.sort(
+                self.parsed_midi.note_events_for_playback["off_time"].astype(np.float64, copy=True)
+            )
+        else:
+            self.parsed_midi.sorted_off_times = np.empty((0,), dtype=np.float64)
 
         self.total_song_notes = len(self.parsed_midi.note_events_for_playback)
         self.total_song_duration = self.parsed_midi.total_duration_sec
@@ -366,6 +386,10 @@ class PlayerController:
         self.paused = False
         self.recovery_active = False
         self.recovery_buffer_level = 0.0
+        final_time = max(0.0, float(self.total_song_duration))
+        self.current_playback_time_for_threads = final_time
+        self.last_processed_event_time = final_time
+        self.buffered_playback_start_offset = final_time
 
     def unload_midi(self):
         self.playing = False
@@ -428,21 +452,26 @@ class PlayerController:
 
     def get_current_playback_time(self):
         if threading.current_thread() is not threading.main_thread() and not self.playing:
-            return self.current_playback_time_for_threads
+            return min(self.current_playback_time_for_threads, self.total_song_duration) if self.total_song_duration > 0 else self.current_playback_time_for_threads
 
         if self.active_midi_backend and getattr(self.active_midi_backend, "buffering_enabled", False):
             if self.playing:
-                return self.buffered_playback_start_offset + self.active_midi_backend.get_position_seconds()
-            return self.buffered_playback_start_offset
+                current_time = self.buffered_playback_start_offset + self.active_midi_backend.get_position_seconds()
+            else:
+                current_time = self.buffered_playback_start_offset
+            return min(current_time, self.total_song_duration) if self.total_song_duration > 0 else current_time
 
         if self.playing and not self.paused:
             ideal_time = (time.monotonic() - self.playback_start_time - self.total_paused_duration) * self.playback_speed
-            return ideal_time - self.current_lag
+            current_time = ideal_time - self.current_lag
+            return min(current_time, self.total_song_duration) if self.total_song_duration > 0 else current_time
         if self.playing and self.paused:
             if self.paused_at_time > 0:
-                return (self.paused_at_time - self.playback_start_time - self.total_paused_duration) * self.playback_speed
-            return self.last_processed_event_time
-        return self.current_playback_time_for_threads
+                current_time = (self.paused_at_time - self.playback_start_time - self.total_paused_duration) * self.playback_speed
+            else:
+                current_time = self.last_processed_event_time
+            return min(current_time, self.total_song_duration) if self.total_song_duration > 0 else current_time
+        return min(self.current_playback_time_for_threads, self.total_song_duration) if self.total_song_duration > 0 else self.current_playback_time_for_threads
 
     def set_playback_speed(self, speed):
         new_speed = max(0.1, min(float(speed), 4.0))
