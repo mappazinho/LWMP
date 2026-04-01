@@ -13,3 +13,5 @@ OmniMIDI.dll
 *.mp4
 *.wav
 ffmpeg.exe
+*.ini
+*.dllsyndrv
