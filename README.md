@@ -33,8 +33,6 @@ Just launch build.bat, and all dependencies and compilation happens automaticall
 
 Requires Python 3.11+ for building!
 
-### ⚠️ Still in beta stage, lots of bugs still needs fixing and features are somewhat incomplete.
-
 ## Credits
 - [BASSMIDI](https://www.un4seen.com/bass.html) libraries by Un4seen for MIDI synthesis and audio streaming.
 - [BASSMIDI drivers](https://github.com/kode54/BASSMIDI-Driver) by kode54
