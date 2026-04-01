@@ -13,6 +13,15 @@ Lightweight MIDI Player for heavy MIDI files/Black MIDI, made with Python and Cy
 • Support for custom bundled synth (SYNTH.dll) dlls  
 • And more!
 
+## Using custom synths:
+As of v1.0.5, compiled .EXE builds now support custom synthesizer DLLs as a MIDI backend. To load these DLLs:  
+
+#### NOTE: DLL MUST BE NAMED AS SYNTH.dll, OTHERWISE NOTHING WILL BE SHOWN ON LWMP!  
+
+1. Place synthesizer DLL next to where `LWMP_v1-0-5.exe` is located  
+2. Open LWMP, and set audio mode to Custom Synth (Bundled DLL)  
+3. Apply audio mode and enjoy!  
+
 # Build instructions
 ### For Windows
 Just launch build.bat, and all dependencies and compilation happens automatically.  
