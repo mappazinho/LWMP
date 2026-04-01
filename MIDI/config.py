@@ -6,9 +6,10 @@ import sys
 # executable when the app is frozen into a standalone build.
 _resource_dir = os.path.dirname(os.path.abspath(__file__))
 _runtime_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else _resource_dir
+_external_synth_dir = _runtime_dir if getattr(sys, "frozen", False) else _resource_dir
 
 CONFIG_FILENAME = os.path.join(_runtime_dir, "config.json")
-BUNDLED_OMNIMIDI_DLL = os.path.join(_resource_dir, "SYNTH.dll")
+BUNDLED_OMNIMIDI_DLL = os.path.join(_external_synth_dir, "SYNTH.dll")
 
 DEFAULT_CONFIG = {
     "visualizer": {

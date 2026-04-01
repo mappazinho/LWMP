@@ -23,6 +23,7 @@ import numpy as np
 import psutil
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
+runtime_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else script_dir
 sys.path.append(script_dir)
 parent_dir = os.path.dirname(script_dir)
 sys.path.append(os.path.join(parent_dir, "PARSER"))
@@ -171,7 +172,7 @@ class DpgMidiPlayerApp:
         self._cleaned_up = False
         self.startup_ready = False
         self.pending_midi_name = None
-        self.has_bundled_omnimidi = os.path.exists(os.path.join(script_dir, "SYNTH.dll"))
+        self.has_bundled_omnimidi = os.path.exists(os.path.join(runtime_dir, "SYNTH.dll"))
         self.recommended_mode = "local" if self.has_bundled_omnimidi else "path"
         self.recommended_note_limit = 20_000_000
         self.last_cpu_sample_time = 0.0
@@ -203,6 +204,7 @@ class DpgMidiPlayerApp:
         self.available_resolutions = self._build_resolution_list()
 
         self._build_ui()
+        self._refresh_soundfont_visibility()
         self._refresh_library_directory_ui()
         self.refresh_library_files()
         self._bind_theme()
@@ -1031,9 +1033,10 @@ class DpgMidiPlayerApp:
                                 width=-1,
                             )
                             dpg.add_button(label="Apply Audio Mode", callback=self.apply_audio_mode, width=-1, height=30)
-                            dpg.add_text("Current SoundFont", color=(160, 166, 178))
-                            dpg.add_text("No SoundFont selected", tag="soundfont_text", wrap=470)
-                            dpg.add_button(label="Change SoundFont", callback=self.show_soundfont_library_window, width=-1, height=28)
+                            with dpg.group(tag="soundfont_group"):
+                                dpg.add_text("Current SoundFont", color=(160, 166, 178))
+                                dpg.add_text("No SoundFont selected", tag="soundfont_text", wrap=470)
+                                dpg.add_button(label="Change SoundFont", callback=self.show_soundfont_library_window, width=-1, height=28)
                             dpg.add_text("Synth Controls", color=(160, 166, 178))
                             dpg.add_slider_float(
                                 label="",
@@ -1850,6 +1853,20 @@ class DpgMidiPlayerApp:
         if dpg.does_item_exist("soundfont_text"):
             dpg.set_value("soundfont_text", self._current_soundfont_label())
 
+    def _refresh_soundfont_visibility(self):
+        if dpg.does_item_exist("soundfont_group"):
+            selected_mode = None
+            if dpg.does_item_exist("backend_combo"):
+                selected_label = dpg.get_value("backend_combo")
+                selected_mode = self._normalize_backend_mode(
+                    self.backend_values.get(selected_label, CONFIG["audio"].get("omnimidi_load_preference", "path"))
+                )
+            if selected_mode is None:
+                selected_mode = self.controller.active_backend_mode or self._normalize_backend_mode(
+                    CONFIG["audio"].get("omnimidi_load_preference", "path")
+                )
+            dpg.configure_item("soundfont_group", show=(selected_mode == "bassmidi"))
+
     def _center_modal(self, tag, width, height):
         viewport_w = dpg.get_viewport_client_width() or 900
         viewport_h = dpg.get_viewport_client_height() or 700
@@ -1980,6 +1997,7 @@ class DpgMidiPlayerApp:
 
     def initialize_audio_backend(self):
         current_mode = self._normalize_backend_mode(CONFIG["audio"].get("omnimidi_load_preference", "path"))
+        self._refresh_soundfont_visibility()
         if current_mode == "bassmidi":
             self.set_status("Select a SoundFont to initialize BASSMIDI.")
             self._ensure_bassmidi_soundfont(self._complete_initialize_audio_backend)
@@ -2002,6 +2020,7 @@ class DpgMidiPlayerApp:
         self.controller.set_playback_speed(dpg.get_value("speed_slider"))
         dpg.set_value("backend_hint_text", self._build_audio_hint_text())
         self._refresh_soundfont_text()
+        self._refresh_soundfont_visibility()
         self._refresh_transport_button_state()
 
     def apply_audio_mode(self):
@@ -2018,6 +2037,7 @@ class DpgMidiPlayerApp:
         self.controller.config["audio"]["omnimidi_load_preference"] = selected_mode
         dpg.set_value("backend_combo", self._get_combo_label_for_mode(selected_mode))
         self.controller.active_midi_backend = None
+        self._refresh_soundfont_visibility()
         self.set_status("Reinitializing audio backend...")
         self.initialize_audio_backend()
 
@@ -3731,5 +3751,28 @@ class DpgMidiPlayerApp:
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+    if os.name == "nt" and any(arg.lower() == "-log" for arg in sys.argv[1:]) and not any(arg.startswith("--multiprocessing-fork") for arg in sys.argv[1:]):
+        try:
+            kernel32 = ctypes.windll.kernel32
+            attached = bool(kernel32.AttachConsole(ctypes.c_uint(-1).value))
+            if not attached:
+                kernel32.AllocConsole()
+            try:
+                kernel32.SetConsoleTitleW("LWMP Log Console")
+            except Exception:
+                pass
+            try:
+                sys.stdout = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+                sys.stderr = open("CONOUT$", "w", encoding="utf-8", buffering=1)
+            except OSError:
+                pass
+            try:
+                sys.stdin = open("CONIN$", "r", encoding="utf-8", buffering=1)
+            except OSError:
+                pass
+            print("[LWMP] Log console enabled via -log")
+        except Exception:
+            pass
+        sys.argv = [sys.argv[0], *[arg for arg in sys.argv[1:] if arg.lower() != "-log"]]
     app = DpgMidiPlayerApp()
     app.run()

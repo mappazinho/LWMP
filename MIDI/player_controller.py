@@ -1,5 +1,6 @@
 import os
 import gc
+import sys
 import shutil
 import threading
 import time
@@ -35,6 +36,7 @@ class PlayerController:
         self.max_nps = 0
         self.max_nps_spikes = []
         self.active_midi_backend = None
+        self.active_backend_mode = None
 
         self.playing = False
         self.paused = False
@@ -83,7 +85,8 @@ class PlayerController:
         launch_sweep=None,
     ):
         load_from_path_pref = self.config["audio"].get("omnimidi_load_preference", "local")
-        bundled_omnimidi_exists = os.path.exists(os.path.join(self.script_dir, "SYNTH.dll"))
+        bundled_synth_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else self.script_dir
+        bundled_omnimidi_exists = os.path.exists(os.path.join(bundled_synth_dir, "SYNTH.dll"))
         if load_from_path_pref == "local" and not bundled_omnimidi_exists:
             load_from_path_pref = "path"
             self.config["audio"]["omnimidi_load_preference"] = "path"
@@ -130,6 +133,7 @@ class PlayerController:
                     self.active_midi_backend.set_voices(voices)
 
                     if self.active_midi_backend.midi_stream:
+                        self.active_backend_mode = "bassmidi"
                         set_status("BASSMIDI Engine Initialized (Buffered).")
                         if launch_sweep:
                             launch_sweep(self.active_midi_backend)
@@ -137,6 +141,7 @@ class PlayerController:
                 except Exception as e:
                     print(f"BASSMIDI Init Failed: {e}")
                     self.active_midi_backend = None
+                    self.active_backend_mode = None
             elif prompt_error:
                 prompt_error("Error", "BASSMIDI libraries not found or failed to load.")
 
@@ -153,6 +158,7 @@ class PlayerController:
 
             try:
                 self.active_midi_backend = self.omni_engine_cls({}, load_from_path=should_load_from_path)
+                self.active_backend_mode = "path" if should_load_from_path else "local"
                 set_status(
                     f"{'OmniMIDI' if should_load_from_path else 'Custom Synth'} Initialized ({'System PATH' if should_load_from_path else 'Bundled SYNTH.dll'})."
                 )
@@ -161,8 +167,10 @@ class PlayerController:
                 set_status(f"{'OmniMIDI' if should_load_from_path else 'Custom Synth'} Init Error: {e}. Playback disabled.")
                 print(f"MIDI Backend Init Error: {e}")
                 self.active_midi_backend = None
+                self.active_backend_mode = None
 
         if self.active_midi_backend is None:
+            self.active_backend_mode = None
             set_status("No MIDI backend found. Playback disabled.")
         return self.active_midi_backend
 
@@ -499,6 +507,7 @@ class PlayerController:
         if self.active_midi_backend:
             self.active_midi_backend.shutdown()
             self.active_midi_backend = None
+        self.active_backend_mode = None
         if self.parser_process and self.parser_process.is_alive():
             self.parser_process.terminate()
             self.parser_process.join(0.1)

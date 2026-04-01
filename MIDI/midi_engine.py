@@ -1,6 +1,7 @@
 
 import ctypes
 import os
+import sys
 
 class DebugInfo(ctypes.Structure):
     _fields_ = [
@@ -25,6 +26,8 @@ class OmniMidiEngine:
         self.is_initialized = False
         self.lib = None
         self.debug_info_ptr = None
+        self._dll_dir_handle = None
+        self._init_working_dir = None
         self.load_from_path = bool(load_from_path)
         self.backend_display_name = "OmniMIDI" if self.load_from_path else "Custom Synth"
 
@@ -57,14 +60,25 @@ class OmniMidiEngine:
             except (OSError, FileNotFoundError):
                 raise Exception("OmniMIDI.dll not found in system PATH. Please ensure OmniMIDI is installed or available on PATH.")
         else:
-            script_dir = os.path.dirname(os.path.abspath(__file__))
-            dll_path = os.path.join(script_dir, "SYNTH.dll")
+            synth_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+            dll_path = os.path.join(synth_dir, "SYNTH.dll")
             dll_location = dll_path # Set dll_location for local load
             try: # [FIX] Added missing try block
-                self.lib = ctypes.cdll.LoadLibrary(dll_path)
+                if hasattr(os, "add_dll_directory") and os.path.isdir(synth_dir):
+                    try:
+                        self._dll_dir_handle = os.add_dll_directory(synth_dir)
+                        print(f"[Engine] Added DLL search directory: {synth_dir}")
+                    except OSError as e:
+                        print(f"[Engine] Warning: Could not add DLL search directory '{synth_dir}': {e}")
+                self._init_working_dir = os.getcwd()
+                if os.path.isdir(synth_dir):
+                    os.chdir(synth_dir)
+                    print(f"[Engine] Switched working directory to: {synth_dir}")
                 print(f"[Engine] Attempting to load SYNTH.dll from: {dll_path}")
-            except (OSError, FileNotFoundError):
-                raise Exception(f"SYNTH.dll not found at '{dll_path}'. Please ensure it's in the same directory as the script.")
+                self.lib = ctypes.cdll.LoadLibrary(dll_path)
+            except (OSError, FileNotFoundError) as e:
+                location_hint = "next to the EXE" if getattr(sys, "frozen", False) else "in the MIDI folder"
+                raise Exception(f"Failed to load SYNTH.dll from '{dll_path}'. Ensure it is {location_hint}. Loader error: {e}")
         
         self.lib.IsKDMAPIAvailable.restype = ctypes.c_bool
         self.lib.InitializeKDMAPIStream.restype = ctypes.c_bool
@@ -87,6 +101,14 @@ class OmniMidiEngine:
         except AttributeError:
             print("[Engine] Warning: GetDriverDebugInfo not found in this DLL version. Performance stats will be unavailable.")
             self.debug_info_ptr = None
+        finally:
+            if self._init_working_dir is not None:
+                try:
+                    os.chdir(self._init_working_dir)
+                    print(f"[Engine] Restored working directory to: {self._init_working_dir}")
+                except OSError as e:
+                    print(f"[Engine] Warning: Could not restore working directory: {e}")
+                self._init_working_dir = None
         
         print(f"[Engine] {self.backend_display_name} API Stream initialized successfully.")
         self.is_initialized = True
