@@ -9,7 +9,7 @@ MIDI/midi_engine_cython.c
 PARSER/midi_parser_cython.cpp
 *.json
 dist/
-OmniMIDI.dll
+*.dll
 *.mp4
 *.wav
 ffmpeg.exe

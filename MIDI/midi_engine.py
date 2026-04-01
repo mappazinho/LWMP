@@ -25,9 +25,11 @@ class OmniMidiEngine:
         self.is_initialized = False
         self.lib = None
         self.debug_info_ptr = None
+        self.load_from_path = bool(load_from_path)
+        self.backend_display_name = "OmniMIDI" if self.load_from_path else "Custom Synth"
 
         # Explicitly load winmm.dll from the system directory first.
-        # This can sometimes help OmniMIDI hook into the correct multimedia functions.
+        # This can sometimes help the synth hook into the correct multimedia functions.
         try:
             ctypes.WinDLL('winmm.dll')
             print("[Engine] Pre-loaded winmm.dll")
@@ -53,16 +55,16 @@ class OmniMidiEngine:
             try:
                 self.lib = ctypes.cdll.LoadLibrary("OmniMIDI.dll")
             except (OSError, FileNotFoundError):
-                raise Exception("OmniMIDI.dll not found in system PATH. Please ensure it's installed or available on PATH.")
+                raise Exception("OmniMIDI.dll not found in system PATH. Please ensure OmniMIDI is installed or available on PATH.")
         else:
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            dll_path = os.path.join(script_dir, "OmniMIDI.dll")
+            dll_path = os.path.join(script_dir, "SYNTH.dll")
             dll_location = dll_path # Set dll_location for local load
             try: # [FIX] Added missing try block
                 self.lib = ctypes.cdll.LoadLibrary(dll_path)
-                print(f"[Engine] Attempting to load OmniMIDI.dll from: {dll_path}")
+                print(f"[Engine] Attempting to load SYNTH.dll from: {dll_path}")
             except (OSError, FileNotFoundError):
-                raise Exception(f"OmniMIDI.dll not found at '{dll_path}'. Please ensure it's in the same directory as the script.")
+                raise Exception(f"SYNTH.dll not found at '{dll_path}'. Please ensure it's in the same directory as the script.")
         
         self.lib.IsKDMAPIAvailable.restype = ctypes.c_bool
         self.lib.InitializeKDMAPIStream.restype = ctypes.c_bool
@@ -71,10 +73,14 @@ class OmniMidiEngine:
         self.lib.TerminateKDMAPIStream.restype = ctypes.c_bool
 
         if not self.lib.IsKDMAPIAvailable():
-            raise Exception(f"OmniMIDI ({dll_location}) reported that the KDMAPI is not available. Please check your OmniMIDI installation.")
+            if self.load_from_path:
+                raise Exception(f"{self.backend_display_name} ({dll_location}) reported that the KDMAPI is not available. Please check your OmniMIDI installation.")
+            raise Exception(f"{self.backend_display_name} ({dll_location}) reported that the KDMAPI is not available. Please check the bundled SYNTH.dll.")
             
         if not self.lib.InitializeKDMAPIStream(): # [FIX] Moved the try-except block for GetDriverDebugInfo here
-            raise Exception(f"Failed to initialize the OmniMIDI KDMAPI Stream from {dll_location}. Please check your OmniMIDI installation.") 
+            if self.load_from_path:
+                raise Exception(f"Failed to initialize the {self.backend_display_name} KDMAPI stream from {dll_location}. Please check your OmniMIDI installation.")
+            raise Exception(f"Failed to initialize the {self.backend_display_name} KDMAPI stream from {dll_location}. Please check the bundled SYNTH.dll.")
         try:
             self.lib.GetDriverDebugInfo.restype = ctypes.POINTER(DebugInfo)
             self.debug_info_ptr = self.lib.GetDriverDebugInfo()
@@ -82,7 +88,7 @@ class OmniMidiEngine:
             print("[Engine] Warning: GetDriverDebugInfo not found in this DLL version. Performance stats will be unavailable.")
             self.debug_info_ptr = None
         
-        print("[Engine] OmniMIDI API Stream initialized successfully.")
+        print(f"[Engine] {self.backend_display_name} API Stream initialized successfully.")
         self.is_initialized = True
 
     def get_cpu_usage(self):
@@ -130,10 +136,10 @@ class OmniMidiEngine:
             self.lib.SendDirectData(message)
 
     def load_soundfont(self, sf2_path):
-        print("[Engine] SoundFont must be configured in OmniMIDI.")
+        print(f"[Engine] SoundFont must be configured in {self.backend_display_name}.")
         
     def set_voices(self, voices):
-        print("[Engine] Max voices should be set via OmniMIDI's settings.")
+        print(f"[Engine] Max voices should be set via {self.backend_display_name}'s settings.")
         
     def start_stream(self):
         return True
@@ -142,9 +148,9 @@ class OmniMidiEngine:
         return 0
 
     def shutdown(self):
-        """Explicitly shuts down the OmniMIDI stream."""
+        """Explicitly shuts down the synth stream."""
         if self.is_initialized:
-            print("[Engine] Terminating OmniMIDI API Stream.")
+            print(f"[Engine] Terminating {self.backend_display_name} API Stream.")
             self.lib.TerminateKDMAPIStream()
             self.is_initialized = False
 

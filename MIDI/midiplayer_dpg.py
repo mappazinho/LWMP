@@ -48,7 +48,7 @@ try:
         OmniMidiEngine = None
 except ImportError:
     OmniMidiEngine = None
-    print("midi_engine.py or OmniMIDI.dll not found.")
+    print("midi_engine.py or SYNTH.dll not found.")
 except Exception as e:
     OmniMidiEngine = None
     print(f"Error importing OmniMidiEngine: {e}")
@@ -171,7 +171,7 @@ class DpgMidiPlayerApp:
         self._cleaned_up = False
         self.startup_ready = False
         self.pending_midi_name = None
-        self.has_bundled_omnimidi = os.path.exists(os.path.join(script_dir, "OmniMIDI.dll"))
+        self.has_bundled_omnimidi = os.path.exists(os.path.join(script_dir, "SYNTH.dll"))
         self.recommended_mode = "local" if self.has_bundled_omnimidi else "path"
         self.recommended_note_limit = 20_000_000
         self.last_cpu_sample_time = 0.0
@@ -188,11 +188,12 @@ class DpgMidiPlayerApp:
         self.soundfont_file_map = {}
         self.last_soundfont_click_label = None
         self.last_soundfont_click_time = 0.0
+        self.render_spike_label_map = {}
 
         self.all_backend_labels = {
             "bassmidi": "BASSMIDI (Buffered)",
-            "path": "OmniMIDI (System PATH)",
-            "local": "OmniMIDI (Bundled DLL)",
+            "path": "OmniMIDI",
+            "local": "Custom Synth (Bundled SYNTH.dll)",
         }
         self.backend_labels = self._build_backend_labels()
         self.backend_values = {label: value for value, label in self.backend_labels.items()}
@@ -580,6 +581,30 @@ class DpgMidiPlayerApp:
         if dpg.does_item_exist("nps_spikes_text"):
             dpg.set_value("nps_spikes_text", self._build_nps_spikes_text())
 
+    def _build_render_spike_options(self):
+        spikes = getattr(self.controller, "max_nps_spikes", [])
+        self.render_spike_label_map = {}
+        if not spikes:
+            return ["No spikes detected"]
+        items = ["None"]
+        for idx, (spike_time, spike_value) in enumerate(spikes):
+            label = f"{idx + 1}. {self.format_time(spike_time)} - {self.format_nps(spike_value)}"
+            items.append(label)
+            self.render_spike_label_map[label] = (float(spike_time), int(spike_value))
+        return items
+
+    def _toggle_render_stats_mod_controls(self, sender=None, app_data=None):
+        enabled = bool(dpg.get_value("render_stats_mod_checkbox")) if dpg.does_item_exist("render_stats_mod_checkbox") else False
+        for tag in ("render_stats_multiplier", "render_spike_select", "render_spike_intensity"):
+            if dpg.does_item_exist(tag):
+                dpg.configure_item(tag, enabled=enabled)
+
+    def _toggle_render_stats_controls(self, sender=None, app_data=None):
+        visible = bool(dpg.get_value("render_stats_overlay_checkbox")) if dpg.does_item_exist("render_stats_overlay_checkbox") else False
+        if dpg.does_item_exist("render_stats_mod_group"):
+            dpg.configure_item("render_stats_mod_group", show=visible)
+        self._toggle_render_stats_mod_controls()
+
     def show_nps_spikes_window(self, sender=None, app_data=None):
         self._refresh_nps_spikes_window()
         dpg.configure_item("nps_spikes_window", show=True)
@@ -729,7 +754,7 @@ class DpgMidiPlayerApp:
     def _build_startup_warning(self):
         warnings = []
         if not self.has_bundled_omnimidi:
-            warnings.append("Bundled OmniMIDI DLL not found. System PATH mode is recommended.")
+            warnings.append("Bundled synth DLL not found. System PATH mode is recommended.")
         if not self.controller.bass_engine_cls:
             warnings.append("BASSMIDI engine not available. Buffered prerender mode is disabled.")
         return "\n".join(warnings)
@@ -781,7 +806,7 @@ class DpgMidiPlayerApp:
     def _build_audio_hint_text(self):
         lines = []
         lines.append(
-            "Bundled OmniMIDI DLL: detected" if self.has_bundled_omnimidi else "Bundled OmniMIDI DLL: missing"
+            "Bundled custom synth DLL: detected" if self.has_bundled_omnimidi else "Bundled custom synth DLL: missing"
         )
         lines.append(
             "BASSMIDI: available" if self.controller.bass_engine_cls else "BASSMIDI: unavailable"
@@ -885,7 +910,7 @@ class DpgMidiPlayerApp:
 
     def _build_ui(self):
         dpg.create_context()
-        dpg.create_viewport(title="Lightweight MIDI Player (DearPyGUI)", width=1040, height=720)
+        dpg.create_viewport(title="LWMP - v1.0.5", width=1040, height=720)
 
         default_mode = self._normalize_backend_mode(CONFIG["audio"].get("omnimidi_load_preference", "path"))
         default_combo_label = self._get_combo_label_for_mode(default_mode)
@@ -1391,7 +1416,7 @@ class DpgMidiPlayerApp:
             no_resize=True,
             no_collapse=True,
             width=520,
-            height=420,
+            height=520,
         ):
             dpg.add_text("Video Output", color=(223, 177, 103))
             dpg.add_text("FFmpeg path (PATH/TO/ffmpeg.exe)", color=(160, 166, 178))
@@ -1462,9 +1487,47 @@ class DpgMidiPlayerApp:
             )
             dpg.add_checkbox(
                 tag="render_stats_overlay_checkbox",
-                label="Draw notes passed, NPS, and time in video",
+                label="Draw notes, NPS, BPM, polyphony, and time in video",
                 default_value=bool(self._render_cfg().get("show_stats_overlay", False)),
+                callback=self._toggle_render_stats_controls,
             )
+            with dpg.group(tag="render_stats_mod_group", show=bool(self._render_cfg().get("show_stats_overlay", False))):
+                dpg.add_checkbox(
+                    tag="render_stats_mod_checkbox",
+                    label="Stats Modification",
+                    default_value=bool(self._render_cfg().get("enable_stats_modification", False)),
+                    callback=self._toggle_render_stats_mod_controls,
+                )
+                dpg.add_text("Render-only stat edits", color=(160, 166, 178))
+                with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp):
+                    dpg.add_table_column(init_width_or_weight=1.0)
+                    dpg.add_table_column(init_width_or_weight=1.0)
+                    with dpg.table_row():
+                        with dpg.table_cell():
+                            dpg.add_text("Stats Multiplier", color=(160, 166, 178))
+                            dpg.add_input_text(
+                                tag="render_stats_multiplier",
+                                default_value=str(self._render_cfg().get("stats_multiplier", 1.0)),
+                                width=-1,
+                            )
+                        with dpg.table_cell():
+                            dpg.add_text("NPS Spike", color=(160, 166, 178))
+                            dpg.add_combo(
+                                tag="render_spike_select",
+                                items=["None"],
+                                default_value=str(self._render_cfg().get("spike_selection", "None") or "None"),
+                                width=-1,
+                            )
+                    with dpg.table_row():
+                        with dpg.table_cell():
+                            dpg.add_text("Spike Intensity", color=(160, 166, 178))
+                            dpg.add_input_text(
+                                tag="render_spike_intensity",
+                                default_value=str(self._render_cfg().get("spike_intensity", 1.0)),
+                                width=-1,
+                            )
+                        with dpg.table_cell():
+                            dpg.add_spacer(height=1)
             dpg.add_checkbox(
                 tag="render_watermark_checkbox",
                 label="Draw 'Rendered with LWMP' watermark",
@@ -1581,7 +1644,7 @@ class DpgMidiPlayerApp:
             )
             dpg.add_spacer(height=6)
             dpg.add_button(
-                label="Use Defaults (System PATH, 720p)",
+                label="Use Defaults (OmniMIDI PATH, 720p)",
                 callback=self.use_default_startup,
                 width=-1,
                 height=34,
@@ -2701,7 +2764,14 @@ class DpgMidiPlayerApp:
             source_name = os.path.splitext(os.path.basename(self.controller.parsed_midi.filename))[0]
             default_path = os.path.join(os.path.dirname(self.controller.parsed_midi.filename), f"{source_name}_render.mp4")
             dpg.set_value("render_output_path", default_path)
-        self._center_modal("render_window", 520, 420)
+        spike_items = self._build_render_spike_options()
+        selected_spike = str(self._render_cfg().get("spike_selection", "None") or "None")
+        if selected_spike not in spike_items:
+            selected_spike = "None" if "None" in spike_items else spike_items[0]
+        dpg.configure_item("render_spike_select", items=spike_items)
+        dpg.set_value("render_spike_select", selected_spike)
+        self._toggle_render_stats_controls()
+        self._center_modal("render_window", 520, 520)
         dpg.configure_item("render_window", show=True)
 
     def launch_selected_piano_roll(self):
@@ -3071,6 +3141,10 @@ class DpgMidiPlayerApp:
             getattr(parsed_midi, "tempo_events", None),
             float(parsed_midi.total_duration_sec),
             int(len(parsed_midi.note_events_for_playback)),
+            float(settings.get("stats_multiplier", 1.0)),
+            bool(settings.get("enable_stats_modification", False)),
+            settings.get("selected_spike"),
+            float(settings.get("spike_intensity", 1.0)),
         )
         piano_roll.set_preferred_color_mode(getattr(parsed_midi, "preferred_color_mode", "track"))
         ffmpeg_stderr_chunks = []
@@ -3205,6 +3279,23 @@ class DpgMidiPlayerApp:
         framerate = max(1, int(dpg.get_value("render_framerate")))
         bitrate = dpg.get_value("render_bitrate").strip() or "20M"
         audio_bitrate = dpg.get_value("render_audio_bitrate").strip() or "320k"
+        stats_multiplier_raw = str(dpg.get_value("render_stats_multiplier")).strip()
+        try:
+            stats_multiplier = float(stats_multiplier_raw.lstrip("xX")) if stats_multiplier_raw else 1.0
+        except ValueError:
+            self._message_warning("Invalid Multiplier", "Enter a valid numeric stats multiplier, like 2 or 2.5.")
+            return
+        stats_multiplier = max(0.1, stats_multiplier)
+        spike_intensity_raw = str(dpg.get_value("render_spike_intensity")).strip()
+        try:
+            spike_intensity = float(spike_intensity_raw.lstrip("xX")) if spike_intensity_raw else 1.0
+        except ValueError:
+            self._message_warning("Invalid Spike Intensity", "Enter a valid numeric spike intensity, like 1.5 or 2.")
+            return
+        spike_intensity = max(0.0, spike_intensity)
+        enable_stats_modification = bool(dpg.get_value("render_stats_mod_checkbox"))
+        selected_spike_label = str(dpg.get_value("render_spike_select") or "None")
+        selected_spike = self.render_spike_label_map.get(selected_spike_label)
         render_audio = bool(dpg.get_value("render_audio_checkbox"))
         show_stats_overlay = bool(dpg.get_value("render_stats_overlay_checkbox"))
         show_watermark = bool(dpg.get_value("render_watermark_checkbox"))
@@ -3217,6 +3308,10 @@ class DpgMidiPlayerApp:
         render_cfg["framerate"] = framerate
         render_cfg["bitrate"] = bitrate
         render_cfg["audio_bitrate"] = audio_bitrate
+        render_cfg["enable_stats_modification"] = enable_stats_modification
+        render_cfg["stats_multiplier"] = stats_multiplier
+        render_cfg["spike_selection"] = selected_spike_label
+        render_cfg["spike_intensity"] = spike_intensity
         render_cfg["render_audio"] = render_audio
         render_cfg["show_stats_overlay"] = show_stats_overlay
         render_cfg["show_watermark"] = show_watermark
@@ -3232,12 +3327,18 @@ class DpgMidiPlayerApp:
             "framerate": framerate,
             "bitrate": bitrate,
             "audio_bitrate": audio_bitrate,
+            "enable_stats_modification": enable_stats_modification,
+            "stats_multiplier": stats_multiplier,
+            "selected_spike": selected_spike,
+            "spike_intensity": spike_intensity,
             "render_audio": render_audio,
             "show_stats_overlay": show_stats_overlay,
             "show_watermark": show_watermark,
         }
 
         dpg.set_value("render_output_path", output_path)
+        dpg.set_value("render_stats_multiplier", str(stats_multiplier))
+        dpg.set_value("render_spike_intensity", str(spike_intensity))
         dpg.disable_item("start_render_button")
         self._set_render_progress(0.0, "Preparing", "Preparing video render...")
         self.render_start_time_monotonic = time.monotonic()

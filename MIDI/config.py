@@ -8,7 +8,7 @@ _resource_dir = os.path.dirname(os.path.abspath(__file__))
 _runtime_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else _resource_dir
 
 CONFIG_FILENAME = os.path.join(_runtime_dir, "config.json")
-BUNDLED_OMNIMIDI_DLL = os.path.join(_resource_dir, "OmniMIDI.dll")
+BUNDLED_OMNIMIDI_DLL = os.path.join(_resource_dir, "SYNTH.dll")
 
 DEFAULT_CONFIG = {
     "visualizer": {
@@ -68,6 +68,10 @@ DEFAULT_CONFIG = {
         "framerate": 60,
         "bitrate": "20M",
         "audio_bitrate": "320k",
+        "enable_stats_modification": False,
+        "stats_multiplier": 1.0,
+        "spike_selection": "",
+        "spike_intensity": 1.0,
         "codec": "H.264",
         "ffmpeg_path": "ffmpeg",
         "output_path": "",

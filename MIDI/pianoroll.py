@@ -734,6 +734,10 @@ class PianoRoll:
         self.stats_tempo_bpms = np.array([120.0], dtype=np.float32)
         self.stats_total_duration = 0.0
         self.stats_total_notes = 0
+        self.stats_multiplier = 1.0
+        self.stats_modification_enabled = False
+        self.stats_selected_spike = None
+        self.stats_spike_intensity = 1.0
 
     def _get_guide_line_y(self):
         if self.show_keyboard and 'white_key' in self.keyboard_texture_info:
@@ -2714,7 +2718,18 @@ class PianoRoll:
         self.live_bpm_value = max(0.0, float(bpm_value))
         self.live_polyphony_value = max(0, int(polyphony_value))
 
-    def set_stats_context(self, on_times, off_times_sorted, tempo_events, total_duration, total_notes):
+    def set_stats_context(
+        self,
+        on_times,
+        off_times_sorted,
+        tempo_events,
+        total_duration,
+        total_notes,
+        stats_multiplier=1.0,
+        stats_modification_enabled=False,
+        selected_spike=None,
+        spike_intensity=1.0,
+    ):
         self.stats_on_times = on_times
         self.stats_off_times_sorted = off_times_sorted
         tempo_events = tempo_events or [(0.0, 120.0)]
@@ -2723,6 +2738,60 @@ class PianoRoll:
         self.stats_tempo_bpms = np.array([bpm for _, bpm in tempo_events], dtype=np.float32)
         self.stats_total_duration = max(0.0, float(total_duration))
         self.stats_total_notes = max(0, int(total_notes))
+        self.stats_multiplier = max(0.1, float(stats_multiplier))
+        self.stats_modification_enabled = bool(stats_modification_enabled)
+        self.stats_selected_spike = selected_spike if selected_spike else None
+        self.stats_spike_intensity = max(0.0, float(spike_intensity))
+
+    def _compute_export_spike_nps_multiplier(self, current_time):
+        if not self.export_mode or not self.stats_modification_enabled or not self.stats_selected_spike:
+            return 1.0
+        if self.stats_spike_intensity == 1.0:
+            return 1.0
+        spike_time = float(self.stats_selected_spike[0])
+        spike_window = 1.0
+        distance = abs(float(current_time) - spike_time)
+        if distance >= spike_window:
+            return 1.0
+        t = 1.0 - (distance / spike_window)
+        eased = t * t * (3.0 - 2.0 * t)
+        return 1.0 + ((self.stats_spike_intensity - 1.0) * eased)
+
+    def _compute_export_spike_note_delta(self, current_time):
+        if not self.export_mode or not self.stats_modification_enabled or not self.stats_selected_spike:
+            return 0
+        spike_intensity = self.stats_spike_intensity
+        if spike_intensity == 1.0:
+            return 0
+
+        spike_time = float(self.stats_selected_spike[0])
+        spike_value = max(0.0, float(self.stats_selected_spike[1]))
+        spike_window = 1.0
+        extra_notes_total = spike_value * (spike_intensity - 1.0)
+        if extra_notes_total == 0.0:
+            return 0
+
+        window_start = spike_time - spike_window
+        window_end = spike_time + spike_window
+        current_time = float(current_time)
+
+        if current_time <= window_start:
+            return 0
+        if current_time >= window_end:
+            return int(round(extra_notes_total))
+
+        progress = (current_time - window_start) / max(0.001, (window_end - window_start))
+        eased_progress = progress * progress * (3.0 - 2.0 * progress)
+        return int(round(extra_notes_total * eased_progress))
+
+    def _get_export_spike_total_note_delta(self):
+        if not self.export_mode or not self.stats_modification_enabled or not self.stats_selected_spike:
+            return 0
+        spike_intensity = self.stats_spike_intensity
+        if spike_intensity == 1.0:
+            return 0
+        spike_value = max(0.0, float(self.stats_selected_spike[1]))
+        return int(round(spike_value * (spike_intensity - 1.0)))
 
     def _get_stats_overlay_box_rect(self, current_time):
         if self.export_mode or not self.live_show_stats_overlay:
@@ -2785,12 +2854,20 @@ class PianoRoll:
             polyphony_value = self.live_polyphony_value
         total_notes = int(self.stats_total_notes or len(self.render_on_times))
         total_duration = float(self.stats_total_duration or self.export_total_duration)
+        stats_multiplier = self.stats_multiplier if self.export_mode and self.stats_modification_enabled else 1.0
+        spike_nps_multiplier = self._compute_export_spike_nps_multiplier(current_time)
+        spike_note_delta = self._compute_export_spike_note_delta(current_time)
+        spike_total_note_delta = self._get_export_spike_total_note_delta()
+        scaled_note_count = int(round(note_count_passed * stats_multiplier)) + spike_note_delta
+        scaled_total_notes = int(round(total_notes * stats_multiplier)) + spike_total_note_delta
+        scaled_nps_value = int(round(nps_value * stats_multiplier * spike_nps_multiplier))
+        scaled_polyphony_value = int(round(polyphony_value * stats_multiplier))
 
         lines = [
-            f"Notes: {note_count_passed:,} / {total_notes:,}",
-            f"NPS: {nps_value:,}",
+            f"Notes: {scaled_note_count:,} / {scaled_total_notes:,}",
+            f"NPS: {scaled_nps_value:,}",
             f"BPM: {bpm_value:.2f}".rstrip('0').rstrip('.'),
-            f"Polyphony: {polyphony_value:,}",
+            f"Polyphony: {scaled_polyphony_value:,}",
             f"Time: {self._format_time_overlay(current_time)} / {self._format_time_overlay(total_duration)}",
         ]
 

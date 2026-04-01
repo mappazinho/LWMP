@@ -83,7 +83,7 @@ class PlayerController:
         launch_sweep=None,
     ):
         load_from_path_pref = self.config["audio"].get("omnimidi_load_preference", "local")
-        bundled_omnimidi_exists = os.path.exists(os.path.join(self.script_dir, "OmniMIDI.dll"))
+        bundled_omnimidi_exists = os.path.exists(os.path.join(self.script_dir, "SYNTH.dll"))
         if load_from_path_pref == "local" and not bundled_omnimidi_exists:
             load_from_path_pref = "path"
             self.config["audio"]["omnimidi_load_preference"] = "path"
@@ -143,9 +143,9 @@ class PlayerController:
         if self.platform_name == "nt" and self.omni_engine_cls is not None:
             should_load_from_path = load_from_path_pref == "path"
             status_msg = (
-                "Initializing OmniMIDI (System Path)..."
+                "Initializing OmniMIDI (System PATH)..."
                 if should_load_from_path
-                else "Initializing OmniMIDI (Local DLL)..."
+                else "Initializing Custom Synth (Bundled SYNTH.dll)..."
             )
             set_status(status_msg)
             if refresh_status:
@@ -153,10 +153,12 @@ class PlayerController:
 
             try:
                 self.active_midi_backend = self.omni_engine_cls({}, load_from_path=should_load_from_path)
-                set_status(f"OmniMIDI Engine Initialized ({'Path' if should_load_from_path else 'Local'}).")
+                set_status(
+                    f"{'OmniMIDI' if should_load_from_path else 'Custom Synth'} Initialized ({'System PATH' if should_load_from_path else 'Bundled SYNTH.dll'})."
+                )
                 return self.active_midi_backend
             except Exception as e:
-                set_status(f"OmniMIDI Engine Init Error: {e}. Playback disabled.")
+                set_status(f"{'OmniMIDI' if should_load_from_path else 'Custom Synth'} Init Error: {e}. Playback disabled.")
                 print(f"MIDI Backend Init Error: {e}")
                 self.active_midi_backend = None
 
