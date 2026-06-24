@@ -115,17 +115,19 @@ void main() {
     float note_duration = max(off_time - on_time, 0.0001);
     float note_h = max(2.0, note_duration * u_scroll_speed);
     float note_y = u_guide_line_y + (u_time - on_time) * u_scroll_speed;
-    
-    vec2 layout = u_pitch_layout[pitch];
-    vec2 instance_scale = vec2(layout.y, note_h);
-    vec2 instance_offset = vec2(layout.x, note_y - note_h);
-    vec2 final_pos = pos * instance_scale + instance_offset;
-    
-    gl_Position = u_projection * vec4(final_pos, note_depth, 1.0);
-    
+    vec2 key_layout = u_pitch_layout[pitch];
+    vec2 instance_scale = vec2(key_layout.y, note_h);
+    vec2 instance_offset = vec2(key_layout.x, note_y - note_h);
+
+    vec2 final_pos = pos * instance_scale +
+        instance_offset;
+
+    gl_Position = u_projection *
+        vec4(final_pos, note_depth, 1.0);
+
     v_pos = pos;
     v_note_h = note_h;
-    v_note_w = layout.y;
+    v_note_w = key_layout.y;
     
     int color_idx = int(mod(float(track), 128.0));
     v_fragColor = u_colors[color_idx] * 1.2;
