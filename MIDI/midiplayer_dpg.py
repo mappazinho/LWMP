@@ -42,17 +42,7 @@ except ImportError:
 DEBUG = False
 AUDIO_MIN_NOTE_VELOCITY = 10
 
-try:
-    if os.name == "nt":
-        from midi_engine import OmniMidiEngine
-    else:
-        OmniMidiEngine = None
-except ImportError:
-    OmniMidiEngine = None
-    print("midi_engine.py or SYNTH.dll not found.")
-except Exception as e:
-    OmniMidiEngine = None
-    print(f"Error importing OmniMidiEngine: {e}")
+OmniMidiEngine = None
 
 try:
     from midi_engine_cython import BassMidiEngine
