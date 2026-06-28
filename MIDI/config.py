@@ -26,7 +26,8 @@ DEFAULT_CONFIG = {
         "streaming_vbo_capacity": 10000000,
         "data_update_interval": 0.1,
         "guide_line_y_ratio": 0.85,
-        "show_keyboard": True
+        "show_keyboard": True,
+        "skin_name": "default"
     },
     "audio": {
         "midi_backend": "omnimidi",
