@@ -1,0 +1,14 @@
+package:
+  name: lwmp-android-native
+  version: 0.1.0
+
+source:
+  path: src
+
+requirements:
+  build:
+    - cython 3.0.0
+  host:
+    - python
+    - setuptools
+    - numpy

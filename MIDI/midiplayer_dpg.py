@@ -58,19 +58,11 @@ try:
     from midi_engine_cython import BassMidiEngine
     print("Loaded Cython BASSMIDI engine.")
 except ImportError:
-    try:
-        from bassmidi_engine import BassMidiEngine
-        print("Loaded Python BASSMIDI engine.")
-    except ImportError:
-        BassMidiEngine = None
-        print("No BASSMIDI engine found.")
+    BassMidiEngine = None
+    print("No BASSMIDI engine found.")
 except Exception as e:
-    try:
-        from bassmidi_engine import BassMidiEngine
-        print(f"Cython BASSMIDI engine failed, using Python fallback: {e}")
-    except Exception as python_error:
-        BassMidiEngine = None
-        print(f"Error importing BassMidiEngine: {python_error}")
+    BassMidiEngine = None
+    print(f"Error importing BassMidiEngine: {e}")
 
 CONFIG = setup_omnimidi_preference(load_config())
 
