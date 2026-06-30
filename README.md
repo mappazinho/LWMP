@@ -23,6 +23,16 @@ As of v1.0.5, compiled .EXE builds now support custom synthesizer DLLs as a MIDI
 3. Apply audio mode and enjoy!  
 
 # Build instructions
+
+### Prerequisites
+Since proprietary audio binaries are not hosted in this repository, you must manually download the required Un4seen BASS binaries for prerender support.
+
+1. Go to the [Un4seen BASS Website](https://www.un4seen.com/).
+2. Download the main **BASS** package and the **BASSMIDI** add-on package for your operating system.
+3. Extract the archives and place the following files directly inside your `MIDI/` source directory:
+   * **Windows:** `bass.dll` and `bassmidi.dll`
+   * **Linux:** `libbass.so` and `libbassmidi.so`.
+
 ### For Windows
 Just launch build.bat, and all dependencies and compilation happens automatically.  
 
