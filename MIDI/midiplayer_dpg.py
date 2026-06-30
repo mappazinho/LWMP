@@ -50,6 +50,16 @@ AUDIO_MIN_NOTE_VELOCITY = 10
 OmniMidiEngine = None
 
 try:
+    from midi_engine import OmniMidiEngine
+    print("Loaded OmniMIDI engine.")
+except ImportError:
+    OmniMidiEngine = None
+    print("No OmniMIDI engine found.")
+except Exception as e:
+    OmniMidiEngine = None
+    print(f"Error importing OmniMidiEngine: {e}")
+
+try:
     from midi_engine_cython import BassMidiEngine
     print("Loaded Cython BASSMIDI engine.")
 except ImportError:
@@ -144,6 +154,10 @@ class DpgMidiPlayerApp:
         self.render_thread = None
         self.render_start_time_monotonic = 0.0
         self.render_stage_timing = {}
+        self._render_cancelled = threading.Event()
+        self._ffmpeg_processes = []
+        self._pending_confirm_yes = None
+        self._pending_confirm_no = None
         self.playback_lock = threading.Lock()
         self.process = None
         self.cpu_history = deque([0.0] * 100, maxlen=100)
@@ -1115,7 +1129,7 @@ class DpgMidiPlayerApp:
 
     def _build_ui(self):
         dpg.create_context()
-        dpg.create_viewport(title="LWMP - v1.0.5", width=1040, height=720)
+        dpg.create_viewport(title="LWMP - v1.2.0", width=1040, height=800)
 
         default_mode = self._normalize_backend_mode(CONFIG["audio"].get("omnimidi_load_preference", "path"))
         default_combo_label = self._get_combo_label_for_mode(default_mode)
@@ -1491,6 +1505,36 @@ class DpgMidiPlayerApp:
                 height=30,
                 callback=lambda: dpg.configure_item("message_window", show=False),
             )
+
+        with dpg.window(
+            tag="confirm_window",
+            label="Confirm",
+            modal=True,
+            show=False,
+            no_resize=True,
+            no_collapse=True,
+            width=460,
+            height=180,
+        ):
+            dpg.add_text("", tag="confirm_title", color=(223, 177, 103))
+            dpg.add_spacer(height=8)
+            dpg.add_text("", tag="confirm_body", wrap=420)
+            dpg.add_spacer(height=12)
+            with dpg.group(horizontal=True):
+                dpg.add_button(
+                    label="Yes",
+                    tag="confirm_yes_button",
+                    width=100,
+                    height=30,
+                    callback=self._on_confirm_yes,
+                )
+                dpg.add_button(
+                    label="No",
+                    tag="confirm_no_button",
+                    width=100,
+                    height=30,
+                    callback=self._on_confirm_no,
+                )
 
         with dpg.window(
             tag="library_window",
@@ -1990,6 +2034,34 @@ class DpgMidiPlayerApp:
             dpg.set_value("message_body", text)
         if dpg.does_item_exist("message_window"):
             dpg.configure_item("message_window", label=title, show=True)
+
+    def _show_confirm_dialog(self, title, text, on_yes, on_no=None):
+        self._pending_confirm_yes = on_yes
+        self._pending_confirm_no = on_no
+        if dpg.does_item_exist("confirm_title"):
+            dpg.set_value("confirm_title", title)
+        if dpg.does_item_exist("confirm_body"):
+            dpg.set_value("confirm_body", text)
+        if dpg.does_item_exist("confirm_window"):
+            dpg.configure_item("confirm_window", label=title, show=True)
+            self._center_modal("confirm_window", 460, 180)
+            dpg.focus_item("confirm_window")
+
+    def _on_confirm_yes(self, sender=None, app_data=None):
+        dpg.configure_item("confirm_window", show=False)
+        cb = self._pending_confirm_yes
+        self._pending_confirm_yes = None
+        self._pending_confirm_no = None
+        if cb:
+            cb()
+
+    def _on_confirm_no(self, sender=None, app_data=None):
+        dpg.configure_item("confirm_window", show=False)
+        cb = self._pending_confirm_no
+        self._pending_confirm_yes = None
+        self._pending_confirm_no = None
+        if cb:
+            cb()
 
     def _set_parse_progress_visible(self, visible):
         if dpg.does_item_exist("parse_progress_group"):
@@ -2534,6 +2606,9 @@ class DpgMidiPlayerApp:
         else:
             if self.controller.parsed_midi is None:
                 return
+            if self.controller.active_midi_backend is None:
+                self._message_warning("No Audio Backend", "No MIDI backend is loaded. Check your SoundFont or audio settings.")
+                return
             self._manual_stop_requested = False
             current_time = self.get_current_playback_time()
             self.controller.start_playback(current_time)
@@ -2981,7 +3056,7 @@ class DpgMidiPlayerApp:
                             status_on = 0x90 + channel
                             if self.controller.active_midi_backend:
                                 param = (vel << 8) | pitch
-                            self.controller.active_midi_backend.send_raw_event(status_on, param)
+                                self.controller.active_midi_backend.send_raw_event(status_on, param)
                             heapq.heappush(note_off_heap, (note["off_time"], pitch, channel))
 
                     while program_change_index < num_program_change_events and program_change_events[program_change_index][0] <= event_time_sec:
@@ -3042,6 +3117,15 @@ class DpgMidiPlayerApp:
             bundled_ffmpeg = self._bundled_ffmpeg_path()
             if bundled_ffmpeg:
                 dpg.set_value("render_ffmpeg_path", bundled_ffmpeg)
+        # Detect hardware encoders and update codec dropdown
+        ffmpeg_for_detect = dpg.get_value("render_ffmpeg_path").strip()
+        hw_labels = self._detect_hw_encoders(ffmpeg_for_detect) if ffmpeg_for_detect else []
+        codec_items = hw_labels + ["H.264", "H.265", "MPEG-4"]
+        saved_codec = str(self._render_cfg().get("codec", "H.264"))
+        if saved_codec not in codec_items:
+            saved_codec = hw_labels[0] if hw_labels else "H.264"
+        dpg.configure_item("render_codec", items=codec_items, default_value=saved_codec)
+
         if not dpg.get_value("render_output_path") and self.controller.parsed_midi:
             source_name = os.path.splitext(os.path.basename(self.controller.parsed_midi.filename))[0]
             default_path = os.path.join(os.path.dirname(self.controller.parsed_midi.filename), f"{source_name}_render.mp4")
@@ -3339,6 +3423,8 @@ class DpgMidiPlayerApp:
                 wav_file.setframerate(sample_rate)
 
                 while rendered_audio_time < total_duration:
+                    if self._render_cancelled.is_set():
+                        return
                     remaining = total_duration - rendered_audio_time
                     requested_seconds = min(chunk_seconds, remaining)
                     target_frames = max(1, int(round(requested_seconds * sample_rate)))
@@ -3372,12 +3458,49 @@ class DpgMidiPlayerApp:
             except Exception:
                 pass
 
+    _HW_CODEC_MAP = {
+        "H.264 (NVENC)":   (["-c:v", "h264_nvenc",  "-pix_fmt", "yuv420p"], ".mp4"),
+        "H.264 (QSV)":     (["-c:v", "h264_qsv",    "-pix_fmt", "yuv420p"], ".mp4"),
+        "H.264 (AMF)":     (["-c:v", "h264_amf",    "-pix_fmt", "yuv420p"], ".mp4"),
+        "H.265 (NVENC)":   (["-c:v", "hevc_nvenc",  "-pix_fmt", "yuv420p"], ".mp4"),
+        "H.265 (QSV)":     (["-c:v", "hevc_qsv",    "-pix_fmt", "yuv420p"], ".mp4"),
+        "H.265 (AMF)":     (["-c:v", "hevc_amf",    "-pix_fmt", "yuv420p"], ".mp4"),
+        "H.265":           (["-c:v", "libx265",     "-pix_fmt", "yuv420p"], ".mp4"),
+        "MPEG-4":          (["-c:v", "mpeg4"],                                     ".mp4"),
+    }
+
     def _codec_settings(self, codec_label):
-        if codec_label == "H.265":
-            return ["-c:v", "libx265", "-pix_fmt", "yuv420p"], ".mp4"
-        if codec_label == "MPEG-4":
-            return ["-c:v", "mpeg4"], ".mp4"
+        if codec_label in self._HW_CODEC_MAP:
+            return self._HW_CODEC_MAP[codec_label]
         return ["-c:v", "libx264", "-pix_fmt", "yuv420p"], ".mp4"
+    _HW_ENCODER_PROBES = [
+        ("h264_nvenc",  "H.264 (NVENC)"),
+        ("hevc_nvenc",  "H.265 (NVENC)"),
+        ("h264_qsv",    "H.264 (QSV)"),
+        ("hevc_qsv",    "H.265 (QSV)"),
+        ("h264_amf",    "H.264 (AMF)"),
+        ("hevc_amf",    "H.265 (AMF)"),
+    ]
+
+    def _detect_hw_encoders(self, ffmpeg_path):
+        """Return list of supported HW codec labels for the given ffmpeg binary."""
+        try:
+            result = subprocess.run(
+                [ffmpeg_path, "-encoders"],
+                capture_output=True, text=True, timeout=10,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+            )
+            out = result.stdout
+        except Exception:
+            return []
+        found = []
+        for encoder_name, label in self._HW_ENCODER_PROBES:
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] == encoder_name:
+                    found.append(label)
+                    break
+        return found
 
     def _render_video_stream_only(self, ffmpeg_bin, parsed_midi, settings, video_output_path):
         stage_start_time = time.monotonic()
@@ -3415,6 +3538,7 @@ class DpgMidiPlayerApp:
             stderr=subprocess.PIPE,
             bufsize=0,
         )
+        self._ffmpeg_processes.append(process)
         piano_roll = PianoRoll(settings["width"], settings["height"], CONFIG)
         piano_roll.set_export_mode(True)
         piano_roll.set_nps_spikes(getattr(self.controller, "max_nps_spikes", []))
@@ -3455,11 +3579,13 @@ class DpgMidiPlayerApp:
             total_frames = max(1, int(math.ceil(total_duration * settings["framerate"])))
 
             for frame_idx in range(total_frames):
+                if self._render_cancelled.is_set():
+                    break
                 current_time = min(total_duration, frame_idx / float(settings["framerate"]))
                 piano_roll.draw(current_time, present=False)
                 try:
                     process.stdin.write(piano_roll.capture_frame_rgb())
-                except BrokenPipeError:
+                except (BrokenPipeError, OSError, ValueError):
                     break
                 if process.poll() is not None:
                     break
@@ -3490,6 +3616,8 @@ class DpgMidiPlayerApp:
 
         process.wait()
         stderr_thread.join(timeout=2.0)
+        if self._render_cancelled.is_set():
+            return
         ffmpeg_stderr = b"".join(ffmpeg_stderr_chunks).decode("utf-8", errors="replace")
         if process.returncode != 0:
             raise RuntimeError(self._format_ffmpeg_error(ffmpeg_cmd, process.returncode, ffmpeg_stderr))
@@ -3532,8 +3660,25 @@ class DpgMidiPlayerApp:
             "Finalizing and writing video...",
         )
         process = subprocess.Popen(ffmpeg_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-        stderr_output = process.stderr.read().decode("utf-8", errors="replace") if process.stderr else ""
-        process.wait()
+        self._ffmpeg_processes.append(process)
+        try:
+            stderr_output = ""
+            if process.stderr:
+                try:
+                    stderr_output = process.stderr.read().decode("utf-8", errors="replace")
+                except Exception:
+                    pass
+            try:
+                process.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+        finally:
+            try:
+                self._ffmpeg_processes.remove(process)
+            except ValueError:
+                pass
+        if self._render_cancelled.is_set():
+            return
         if process.returncode != 0:
             raise RuntimeError(self._format_ffmpeg_error(ffmpeg_cmd, process.returncode, stderr_output))
 
@@ -3622,23 +3767,51 @@ class DpgMidiPlayerApp:
         dpg.set_value("render_output_path", output_path)
         dpg.set_value("render_stats_multiplier", str(stats_multiplier))
         dpg.set_value("render_spike_intensity", str(spike_intensity))
-        dpg.disable_item("start_render_button")
+        self._render_cancelled.clear()
+        self._ffmpeg_processes.clear()
+        dpg.configure_item("start_render_button", show=False)
         self._set_render_progress(0.0, "Preparing", "Preparing video render...")
         self.render_start_time_monotonic = time.monotonic()
         self.render_stage_timing = {}
         self.render_thread = threading.Thread(target=self._render_video_job, args=(settings,), daemon=True)
         self.render_thread.start()
 
+    def _terminate_process(self, proc, timeout=3.0):
+        """Gracefully terminate a subprocess; force-kill after timeout seconds."""
+        try:
+            if proc.poll() is not None:
+                return
+            proc.terminate()
+            try:
+                proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=2)
+        except Exception:
+            pass
+        finally:
+            try:
+                if os.name == 'nt':
+                    subprocess.call(
+                        ['taskkill', '/F', '/T', '/PID', str(proc.pid)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000),
+                    )
+            except Exception:
+                pass
+
     def _render_video_job(self, settings):
         ffmpeg_bin = self._resolve_ffmpeg_path(settings["ffmpeg_path"])
         if not ffmpeg_bin:
             self._queue_ui(self._set_render_progress, 0.0, "FFmpeg missing", "FFmpeg executable not found. Set a valid ffmpeg path.")
+            dpg.configure_item("start_render_button", show=True)
             self._queue_ui(dpg.enable_item, "start_render_button")
             return
 
         parsed_midi = self.controller.parsed_midi
         if parsed_midi is None:
             self._queue_ui(self._set_render_progress, 0.0, "No MIDI", "No parsed MIDI is available for rendering.")
+            dpg.configure_item("start_render_button", show=True)
             self._queue_ui(dpg.enable_item, "start_render_button")
             return
 
@@ -3661,6 +3834,8 @@ class DpgMidiPlayerApp:
                         "Rendering full audio track...",
                     )
                     self._render_audio_to_wav(wav_path, parsed_midi)
+                    if self._render_cancelled.is_set():
+                        raise InterruptedError("Render cancelled by user.")
                 else:
                     self._queue_ui(
                         self._render_progress_with_timing,
@@ -3673,6 +3848,9 @@ class DpgMidiPlayerApp:
                     )
 
                 self._render_video_stream_only(ffmpeg_bin, parsed_midi, settings, video_only_path)
+
+                if self._render_cancelled.is_set():
+                    raise InterruptedError("Render cancelled by user.")
 
                 if settings["render_audio"]:
                     self._finalize_render_output(
@@ -3692,6 +3870,9 @@ class DpgMidiPlayerApp:
                         parsed_midi.total_duration_sec,
                     )
 
+            if self._render_cancelled.is_set():
+                raise InterruptedError("Render cancelled by user.")
+
             total_elapsed = self._format_render_eta(time.monotonic() - self.render_start_time_monotonic)
             self._queue_ui(
                 self._set_render_progress,
@@ -3701,11 +3882,24 @@ class DpgMidiPlayerApp:
             )
             self._queue_ui(self.set_status, f"Render complete: {os.path.basename(output_path)}")
             self._queue_ui(self._message_info, "Render Complete", f"Video saved to:\n{output_path}")
+        except InterruptedError:
+            self._queue_ui(self._set_render_progress, 0.0, "Cancelled", "Render was cancelled.")
+            self._queue_ui(self.set_status, "Render cancelled")
+            self._queue_ui(dpg.configure_item, "render_window", show=True)
         except Exception as e:
             traceback.print_exc()
             self._queue_ui(self._set_render_progress, 0.0, "Render Failed", str(e))
             self._queue_ui(self._message_error, "Render Failed", str(e))
         finally:
+            for proc in list(self._ffmpeg_processes):
+                try:
+                    if proc.stdin and not proc.stdin.closed:
+                        proc.stdin.close()
+                except Exception:
+                    pass
+                self._terminate_process(proc)
+            self._ffmpeg_processes.clear()
+            dpg.configure_item("start_render_button", show=True)
             self._queue_ui(dpg.enable_item, "start_render_button")
 
     def run_piano_roll(self):

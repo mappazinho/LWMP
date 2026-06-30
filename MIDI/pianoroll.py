@@ -603,6 +603,8 @@ class PianoRoll:
         self.vbo_vertices = 0
         self.vbo_stream_data = 0
         self.vbo_stream_capacity_bytes = 0
+        self.pbo_ids = []
+        self._pbo_index = 0
         self.note_texture = 0
         self.note_edge_texture = 0
         self.u_note_texture_loc = -1
@@ -687,6 +689,8 @@ class PianoRoll:
         self.last_bloom_update_time = time.perf_counter()
         self.show_key_press_glow = bool(vis_cfg.get('show_key_press_glow', True))
         self.show_key_light_fade = bool(vis_cfg.get('show_key_light_fade', False))
+        self.show_glow_cull = bool(vis_cfg.get('show_glow_cull', True))
+        self.glow_cull_threshold = int(vis_cfg.get('glow_cull_threshold', 128))
         self.glow_fade_duration = 0.1
         self.nps_spikes = []
         self._spike_rank_map = {}
@@ -744,6 +748,7 @@ class PianoRoll:
         self.active_pitches_last_frame = set()
         self.last_visible_notes = None
         self.glow_trails = {}
+        self.glow_cull_factor = 1.0
         self.last_glow_time = None
         self.base_render_notes = None
         self.base_render_on_times = None
@@ -768,6 +773,7 @@ class PianoRoll:
         self.key_light_fade_checkbox_rect = None
         self.bloom_checkbox_rect = None
         self.spike_bloom_checkbox_rect = None
+        self.glow_cull_checkbox_rect = None
         self.glow_options_expanded = False
         self.color_button_size = 32
         self.controls_panel_expanded = False
@@ -827,6 +833,8 @@ class PianoRoll:
         vis_cfg['show_spike_bloom'] = bool(self.show_spike_bloom)
         vis_cfg['show_key_press_glow'] = bool(self.show_key_press_glow)
         vis_cfg['show_key_light_fade'] = bool(self.show_key_light_fade)
+        vis_cfg['show_glow_cull'] = bool(self.show_glow_cull)
+        vis_cfg['glow_cull_threshold'] = int(self.glow_cull_threshold)
         vis_cfg['seconds_before_cursor'] = float(self.window_seconds)
         vis_cfg['seconds_after_cursor'] = float(self.window_seconds)
         vis_cfg['scroll_speed'] = float(self.scroll_speed)
@@ -1148,6 +1156,8 @@ class PianoRoll:
             yield ("bloom_checkbox", self.bloom_checkbox_rect, "Toggle scene bloom")
         if self.glow_options_expanded and self.spike_bloom_checkbox_rect:
             yield ("spike_bloom_checkbox", self.spike_bloom_checkbox_rect, "Dynamically adjust bloom according to NPS")
+        if self.glow_options_expanded and self.glow_cull_checkbox_rect:
+            yield ("glow_cull_checkbox", self.glow_cull_checkbox_rect, "Fade out glow when many notes are active")
 
     def _update_hover_ui_state(self):
         if self.overlay_font is None:
@@ -1792,7 +1802,7 @@ class PianoRoll:
             18
         )
         panel_width = 190
-        panel_height = 130
+        panel_height = 155
         self.glow_options_panel_rect = pygame.Rect(
             self.glow_options_button_rect.x - (panel_width - self.glow_options_button_rect.width),
             self.glow_options_button_rect.y + self.glow_options_button_rect.height + 6,
@@ -1820,6 +1830,12 @@ class PianoRoll:
         self.spike_bloom_checkbox_rect = pygame.Rect(
             self.glow_options_panel_rect.x + 10,
             self.glow_options_panel_rect.y + 100,
+            16,
+            16
+        )
+        self.glow_cull_checkbox_rect = pygame.Rect(
+            self.glow_options_panel_rect.x + 10,
+            self.glow_options_panel_rect.y + 124,
             16,
             16
         )
@@ -2070,6 +2086,7 @@ class PianoRoll:
         self._upload_pending_midi_data()
         if self.show_glow and (self.show_key_press_glow or self.show_key_light_fade):
             self._update_glow_trails(current_time)
+            self._update_glow_cull()
         else:
             self.glow_trails.clear()
 
@@ -2117,9 +2134,68 @@ class PianoRoll:
         if present:
             pygame.display.flip()
 
+    def _init_pbo(self):
+        """Set up double-buffered PBOs for async GPU readback."""
+        try:
+            ids = glGenBuffers(2)
+            for buf_id in ids:
+                glBindBuffer(GL_PIXEL_PACK_BUFFER, buf_id)
+                glBufferData(GL_PIXEL_PACK_BUFFER, self.width * self.height * 3, None, GL_STREAM_READ)
+            glBindBuffer(GL_PIXEL_PACK_BUFFER, 0)
+            self.pbo_ids = list(ids)
+            self._pbo_index = 0
+            self._pbo_filled = False
+        except Exception:
+            self.pbo_ids = []
+
     def capture_frame_rgb(self):
-        pixel_bytes = glReadPixels(0, 0, self.width, self.height, GL_RGB, GL_UNSIGNED_BYTE)
-        frame = np.frombuffer(pixel_bytes, dtype=np.uint8).reshape((self.height, self.width, 3))
+        if not self.pbo_ids:
+            self._init_pbo()
+        if not self.pbo_ids:
+            # PBO init failed, fall back to synchronous read
+            pixel_bytes = glReadPixels(0, 0, self.width, self.height, GL_RGB, GL_UNSIGNED_BYTE)
+            frame = np.frombuffer(pixel_bytes, dtype=np.uint8).reshape((self.height, self.width, 3))
+            frame = np.flipud(frame)
+            return frame.tobytes()
+
+        w, h = self.width, self.height
+        size = w * h * 3
+        cur = self._pbo_index
+        nxt = 1 - cur
+
+        # Read current frame into PBO[cur] (async)
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, self.pbo_ids[cur])
+        glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, ctypes.c_void_p(0))
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0)
+
+        # First frame: PBO[nxt] has no data yet, use synchronous read
+        if not self._pbo_filled:
+            self._pbo_filled = True
+            self._pbo_index = nxt
+            pixel_bytes = glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE)
+            frame = np.frombuffer(pixel_bytes, dtype=np.uint8).reshape((h, w, 3))
+            frame = np.flipud(frame)
+            return frame.tobytes()
+
+        # Transfer previous frame from PBO[nxt]
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, self.pbo_ids[nxt])
+        ptr = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY)
+        if ptr is not None:
+            raw = bytes(ctypes.string_at(ptr, size))
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER)
+        else:
+            glUnmapBuffer(GL_PIXEL_PACK_BUFFER)
+            glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE)
+            raw = None
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, 0)
+
+        self._pbo_index = nxt
+
+        if raw is None:
+            pixel_bytes = glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE)
+            frame = np.frombuffer(pixel_bytes, dtype=np.uint8).reshape((h, w, 3))
+        else:
+            frame = np.frombuffer(raw, dtype=np.uint8).reshape((h, w, 3))
         frame = np.flipud(frame)
         return frame.tobytes()
 
@@ -2256,6 +2332,19 @@ class PianoRoll:
         glEnable(GL_BLEND)
         glDepthMask(GL_TRUE)
 
+    def _update_glow_cull(self):
+        """Adaptive glow culling - reduces glow when many notes are active."""
+        if not self.show_glow_cull:
+            self.glow_cull_factor = 1.0
+            return
+        total_notes = sum(t.get('live_count', 1) for t in self.glow_trails.values())
+        threshold = max(1, self.glow_cull_threshold)
+        if total_notes <= threshold:
+            self.glow_cull_factor = 1.0
+        else:
+            over = (total_notes - threshold) / threshold
+            self.glow_cull_factor = max(0.0, 1.0 - over)
+
     def _update_glow_trails(self, current_time):
         if self.last_glow_time is not None and current_time + 0.001 < self.last_glow_time:
             self.glow_trails.clear()
@@ -2269,28 +2358,40 @@ class PianoRoll:
                 pitch = int(note['pitch'])
                 track = int(note['track'])
                 color = self.channel_colors[track % 128]
+                on_time = float(note['on_time'])
                 if pitch not in active_pitch_data:
                     active_pitch_data[pitch] = {
                         'pitch': pitch,
                         'color_sum': np.array(color, dtype=np.float32),
                         'count': 1,
+                        'on_time': on_time,
                     }
                 else:
                     active_pitch_data[pitch]['color_sum'] += color
                     active_pitch_data[pitch]['count'] += 1
+                    if on_time > active_pitch_data[pitch]['on_time']:
+                        active_pitch_data[pitch]['on_time'] = on_time
 
             for pitch, pitch_data in active_pitch_data.items():
                 avg_color = pitch_data['color_sum'] / max(1, pitch_data['count'])
-                self.glow_trails[pitch] = {
-                    'pitch': pitch,
-                    'color': avg_color,
-                    'live_count': pitch_data['count'],
-                    'last_active_time': current_time,
-                }
+                existing = self.glow_trails.get(pitch)
+                note_on = pitch_data['on_time']
+                if existing and existing.get('on_time', 0.0) >= note_on:
+                    existing['live_count'] = pitch_data['count']
+                    existing['color'] = avg_color
+                    existing['fade_start_time'] = current_time
+                else:
+                    self.glow_trails[pitch] = {
+                        'pitch': pitch,
+                        'color': avg_color,
+                        'live_count': pitch_data['count'],
+                        'on_time': note_on,
+                        'fade_start_time': current_time,
+                    }
 
         expired_keys = []
         for key, trail in list(self.glow_trails.items()):
-            elapsed = max(0.0, current_time - trail['last_active_time'])
+            elapsed = max(0.0, current_time - trail.get('fade_start_time', current_time))
             fade = 1.0 - (elapsed / self.glow_fade_duration)
             if fade <= 0.0:
                 expired_keys.append(key)
@@ -2299,7 +2400,7 @@ class PianoRoll:
             self.glow_trails.pop(key, None)
 
     def _draw_active_note_glow_overlay(self, current_time):
-        if not self.glow_trails:
+        if not self.glow_trails or self.glow_cull_factor <= 0.01:
             return
 
         guide_y = self._get_guide_line_y()
@@ -2317,7 +2418,7 @@ class PianoRoll:
         glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
 
         for trail in self.glow_trails.values():
-            elapsed = max(0.0, current_time - trail['last_active_time'])
+            elapsed = max(0.0, current_time - trail.get('fade_start_time', current_time))
             fade = 1.0 - (elapsed / self.glow_fade_duration)
             if fade <= 0.0:
                 continue
@@ -2334,7 +2435,7 @@ class PianoRoll:
             radius_y = 16.0 if key_info['type'] == 'black' else 22.0
             live_boost = 1.18 if pitch in active_pitch_keys else 1.0
             repeat_boost = min(1.35, 1.0 + 0.14 * max(0, int(trail.get('live_count', 1)) - 1))
-            alpha_boost = live_boost * repeat_boost
+            alpha_boost = live_boost * repeat_boost * self.glow_cull_factor
 
             glBegin(GL_TRIANGLE_FAN)
             glColor4f(color[0], color[1], color[2], 0.52 * fade * alpha_boost)
@@ -2414,7 +2515,7 @@ class PianoRoll:
         trail = self.glow_trails.get(pitch)
         if not trail:
             return None, 0.0
-        elapsed = max(0.0, current_time - trail['last_active_time'])
+        elapsed = max(0.0, current_time - trail.get('fade_start_time', current_time))
         fade = 1.0 - (elapsed / self.glow_fade_duration)
         if fade <= 0.0:
             return None, 0.0
@@ -2658,6 +2759,10 @@ class PianoRoll:
                 return
             if self.glow_options_expanded and self.spike_bloom_checkbox_rect and self.spike_bloom_checkbox_rect.collidepoint(event.pos):
                 self.show_spike_bloom = not self.show_spike_bloom
+                self._save_visualizer_config()
+                return
+            if self.glow_options_expanded and self.glow_cull_checkbox_rect and self.glow_cull_checkbox_rect.collidepoint(event.pos):
+                self.show_glow_cull = not self.show_glow_cull
                 self._save_visualizer_config()
                 return
             if self.color_mode_button_rect and self.color_mode_button_rect.collidepoint(event.pos):
@@ -3326,6 +3431,7 @@ class PianoRoll:
             self._draw_text_overlay("Fade key lighting", px + 32, py + 54)
             self._draw_text_overlay("Bloom scene", px + 32, py + 78)
             self._draw_text_overlay("Spike bloom", px + 32, py + 102)
+            self._draw_text_overlay("Cull glow", px + 32, py + 126)
 
             if self.glow_options_checkbox_rect:
                 cbx, cby, cbw, cbh = (
@@ -3435,6 +3541,33 @@ class PianoRoll:
                     glEnd()
                 self._draw_hover_highlight(self.spike_bloom_checkbox_rect, self._get_hover_alpha("spike_bloom_checkbox"))
 
+            if self.glow_cull_checkbox_rect:
+                cbx, cby, cbw, cbh = (
+                    self.glow_cull_checkbox_rect.x,
+                    self.glow_cull_checkbox_rect.y,
+                    self.glow_cull_checkbox_rect.width,
+                    self.glow_cull_checkbox_rect.height,
+                )
+                glColor4f(0.12, 0.12, 0.16, 0.92)
+                glBegin(GL_QUADS)
+                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
+                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
+                glEnd()
+                glColor4f(0.72, 0.74, 0.80, 0.95)
+                glLineWidth(1.0)
+                glBegin(GL_LINE_LOOP)
+                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
+                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
+                glEnd()
+                if self.show_glow_cull:
+                    glColor4f(0.95, 0.78, 0.24, 0.95)
+                    glLineWidth(2.0)
+                    glBegin(GL_LINES)
+                    glVertex2f(cbx + 3, cby + 9); glVertex2f(cbx + 7, cby + 13)
+                    glVertex2f(cbx + 7, cby + 13); glVertex2f(cbx + 13, cby + 4)
+                    glEnd()
+                self._draw_hover_highlight(self.glow_cull_checkbox_rect, self._get_hover_alpha("glow_cull_checkbox"))
+
         self._draw_hover_tooltip()
         
         glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
@@ -3461,6 +3594,9 @@ class PianoRoll:
         if self.screen_bloom_vao:
             glDeleteVertexArrays(1, [self.screen_bloom_vao])
         glDeleteBuffers(2, [self.vbo_vertices, self.vbo_stream_data])
+        if self.pbo_ids:
+            glDeleteBuffers(2, self.pbo_ids)
+            self.pbo_ids = []
         if self.screen_bloom_vbo:
             glDeleteBuffers(1, [self.screen_bloom_vbo])
         if self.scene_depth_rbo:
@@ -3706,6 +3842,7 @@ class SkinBrowser(PianoRoll):
         self._init_slider_geometry()
         if self.show_glow and (self.show_key_press_glow or self.show_key_light_fade):
             self._update_glow_trails(current_time)
+            self._update_glow_cull()
         else:
             self.glow_trails.clear()
 

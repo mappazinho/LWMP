@@ -17,3 +17,4 @@ ffmpeg.exe
 *.dllsyndrv
 *.so
 *.dll
+.idea/
