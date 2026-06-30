@@ -34,6 +34,8 @@ Since proprietary audio binaries are not hosted in this repository, you must man
    * **Linux:** `libbass.so` and `libbassmidi.so`.
 
 ### For Windows
+**To compile cython modules, you require MSVC build tools which can be downloaded with the Visual Studio Installer**
+
 Just launch build.bat, and all dependencies and compilation happens automatically.  
 
 ### For Linux (tested, audio broken as of now!):
