@@ -29,7 +29,7 @@ Since proprietary audio binaries are not hosted in this repository, you must man
 
 1. Go to the [Un4seen BASS Website](https://www.un4seen.com/).
 2. Download the main **BASS** package and the **BASSMIDI** add-on package for your operating system.
-3. Extract the archives and place the following files directly inside your `MIDI/` source directory:
+3. Extract the archives and place the following files inside `MIDI/bassmidi' (make a new folder called bassmidi):
    * **Windows:** `bass.dll` and `bassmidi.dll`
    * **Linux:** `libbass.so` and `libbassmidi.so`.
 
