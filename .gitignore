@@ -15,3 +15,5 @@ dist/
 ffmpeg.exe
 *.ini
 *.dllsyndrv
+*.so
+*.dll
