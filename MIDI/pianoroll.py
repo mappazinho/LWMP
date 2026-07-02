@@ -388,16 +388,20 @@ uniform float u_glow_strength;
 void main() {
     vec4 texColor;
     float glow_mode = step(0.001, u_glow_strength);
-    if (v_is_pressed > 0.5) {
-        texColor = texture2D(u_texture_pressed, v_uv);
-        vec3 lit_base = texColor.rgb * (u_is_white_key ? 0.16 : 0.10);
-        vec3 normal_pressed = texColor.rgb * v_color;
+    {
+        vec4 pressed_tex = texture2D(u_texture_pressed, v_uv);
+        vec3 pressed_lit = pressed_tex.rgb * (u_is_white_key ? 0.16 : 0.10);
+        vec3 normal_pressed = pressed_tex.rgb * v_color;
         vec3 glow_pressed = normal_pressed * 0.82 + v_color * 0.28;
-        gl_FragColor = vec4(mix(normal_pressed, glow_pressed, glow_mode), texColor.a);
-    } else {
-        texColor = texture2D(u_texture_unpressed, v_uv);
-        vec3 lit_base = texColor.rgb * (u_is_white_key ? 0.08 : 0.04);
-        gl_FragColor = vec4(mix(texColor.rgb, lit_base, glow_mode), texColor.a);
+        vec3 pressed_result = mix(normal_pressed, glow_pressed, glow_mode);
+
+        vec4 unpressed_tex = texture2D(u_texture_unpressed, v_uv);
+        vec3 unpressed_lit = unpressed_tex.rgb * (u_is_white_key ? 0.08 : 0.04);
+        vec3 unpressed_result = mix(unpressed_tex.rgb, unpressed_lit, glow_mode);
+
+        float press_blend = clamp(v_is_pressed, 0.0, 1.0);
+        texColor = mix(unpressed_tex, pressed_tex, press_blend);
+        gl_FragColor = vec4(mix(unpressed_result, pressed_result, press_blend), texColor.a);
     }
 
     if (u_is_white_key) {
@@ -407,10 +411,9 @@ void main() {
         float border_y = border_size * fw_uv.y;
 
         if (v_uv.x < border_x || v_uv.x > 1.0 - border_x || v_uv.y < border_y || v_uv.y > 1.0 - border_y) {
-            vec3 border_color = mix(vec3(0.5, 0.5, 0.5), vec3(0.14, 0.14, 0.16), glow_mode);
-            if (v_is_pressed > 0.5) {
-                border_color = mix(vec3(0.2, 0.2, 0.2), vec3(0.18, 0.18, 0.20), glow_mode);
-            }
+            vec3 unpressed_border = mix(vec3(0.5, 0.5, 0.5), vec3(0.14, 0.14, 0.16), glow_mode);
+            vec3 pressed_border = mix(vec3(0.2, 0.2, 0.2), vec3(0.18, 0.18, 0.20), glow_mode);
+            vec3 border_color = mix(unpressed_border, pressed_border, clamp(v_is_pressed, 0.0, 1.0));
             gl_FragColor = vec4(border_color, texColor.a);
         }
     }
@@ -421,14 +424,14 @@ void main() {
         vec2 centered = abs(v_uv - vec2(0.5, 0.48));
         float spread = clamp(1.0 - max(centered.x * 1.45, centered.y * 1.08), 0.0, 1.0);
         float spill = pow(spread, 2.0);
-        float intensity = (v_is_pressed > 0.5 ? 0.90 : 0.62) * (0.82 + luminance * 0.55);
+        float intensity = mix(0.62, 0.90, clamp(v_is_pressed, 0.0, 1.0)) * (0.82 + luminance * 0.55);
         gl_FragColor.rgb += v_color * spill * intensity;
     }
 
-    if (v_is_pressed > 0.5 && glow_mode > 0.5) {
+    if (v_is_pressed > 0.01 && glow_mode > 0.5) {
         vec2 centered = abs(v_uv - vec2(0.5, 0.5));
         float glow = clamp(1.0 - max(centered.x * 1.6, centered.y * 2.0), 0.0, 1.0);
-        gl_FragColor.rgb += v_color * pow(glow, 2.0) * u_glow_strength * 0.82;
+        gl_FragColor.rgb += v_color * pow(glow, 2.0) * u_glow_strength * 0.82 * clamp(v_is_pressed, 0.0, 1.0);
     }
 }
 """
@@ -480,7 +483,7 @@ void main() {
 
     float top_lift = pow(clamp(1.0 - max(v_uv.y - 0.15, 0.0) * 1.2, 0.0, 1.0), 1.25);
     float edge_fade = smoothstep(0.0, 0.14, min(min(v_uv.x, 1.0 - v_uv.x), min(v_uv.y, 1.0 - v_uv.y)));
-    float pressed_boost = v_is_pressed > 0.5 ? 1.0 : 0.68;
+    float pressed_boost = mix(0.68, 1.0, clamp(v_is_pressed, 0.0, 1.0));
     float alpha = (halo * 0.42 + core * 0.14) * top_lift * edge_fade * pressed_boost * u_bloom_strength;
 
     if (alpha <= 0.001) {
@@ -2577,8 +2580,9 @@ class PianoRoll:
                 if trail_obj is None or fade <= 0.0:
                     continue
                 active_pitch_colors[pitch] = {
-                    'color': np.array(trail_obj['color'], dtype=np.float32) * fade,
+                    'color': np.array(trail_obj['color'], dtype=np.float32),
                     'on_time': -1.0,
+                    'press_fade': fade,
                 }
 
         key_light_colors = {}
@@ -2618,14 +2622,15 @@ class PianoRoll:
 
         for pitch, pitch_color_data in active_pitch_colors.items():
             active_color = np.clip(pitch_color_data['color'], 0.0, 1.0).astype(np.float32)
+            press_val = float(pitch_color_data.get('press_fade', 1.0))
             if pitch in self.white_key_pitch_map:
                 idx = self.white_key_pitch_map[pitch]
                 self.white_key_instance_data[idx]['color'] = active_color
-                self.white_key_instance_data[idx]['is_pressed'] = 1.0
+                self.white_key_instance_data[idx]['is_pressed'] = press_val
             elif pitch in self.black_key_pitch_map:
                 idx = self.black_key_pitch_map[pitch]
                 self.black_key_instance_data[idx]['color'] = active_color
-                self.black_key_instance_data[idx]['is_pressed'] = 1.0
+                self.black_key_instance_data[idx]['is_pressed'] = press_val
         
         self.active_pitches_last_frame = current_active_pitches
 
