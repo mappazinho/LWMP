@@ -207,17 +207,26 @@ void main() {
     vec2 fw = fwidth(v_pos);
     float texture_border_y = 1.5 * fw.y;
     vec4 texture_color;
+    bool is_edge = false;
     if (v_note_h < 4.0) {
         texture_color = texture2D(u_note_edge_texture, v_pos);
+        is_edge = true;
     } else {
         if (v_pos.y < texture_border_y || v_pos.y > 1.0 - texture_border_y) {
             texture_color = texture2D(u_note_edge_texture, v_pos);
+            is_edge = true;
         } else {
             texture_color = texture2D(u_note_texture, v_pos);
         }
     }
-    
-    vec4 final_color = texture_color * vec4(v_fragColor, 1.0);
+
+    vec4 final_color;
+    if (is_edge) {
+        float edge_bright = max(texture_color.r, max(texture_color.g, texture_color.b));
+        final_color = vec4(v_fragColor * max(edge_bright, 0.20), texture_color.a);
+    } else {
+        final_color = texture_color * vec4(v_fragColor, 1.0);
+    }
 
     float body_gradient = mix(0.92, 1.08, pow(clamp(1.0 - v_pos.y, 0.0, 1.0), 1.3));
     float center_soft = 1.0 - abs(v_pos.x - 0.5) * 1.2;
@@ -233,7 +242,7 @@ void main() {
     float left_edge = step(v_pos.x, outline_px_uv);
     float right_edge = step(1.0 - outline_px_uv, v_pos.x);
     if (left_edge + right_edge > 0.0) {
-        vec3 outline_color = vec3(0.08, 0.08, 0.10);
+        vec3 outline_color = v_fragColor * 0.35;
         final_color.rgb = outline_color;
     }
 
@@ -1405,7 +1414,7 @@ class PianoRoll:
             self.glow_options_expanded = False
             self.hover_tooltip_text = None
 
-    def init_pygame_and_gl(self, hidden=False):
+    def init_pygame_and_gl(self, hidden=False, disable_vsync=False):
         global _SKIN_DIR
         fresh_cfg = _load_skin_config()
         fresh_name = fresh_cfg.get("visualizer", {}).get("skin_name", "default")
@@ -1419,6 +1428,8 @@ class PianoRoll:
         flags = DOUBLEBUF | OPENGL | pygame.HWSURFACE
         if hidden and hasattr(pygame, "HIDDEN"):
             flags |= pygame.HIDDEN
+        if disable_vsync:
+            pygame.display.gl_set_attribute(pygame.GL_SWAP_CONTROL, 0)
         self.screen = pygame.display.set_mode((self.width, self.height), flags)
         pygame.display.set_caption("Piano Roll")
         self._init_slider_geometry()

@@ -156,6 +156,7 @@ class DpgMidiPlayerApp:
         self.render_stage_timing = {}
         self._render_cancelled = threading.Event()
         self._ffmpeg_processes = []
+        self._render_current_time = 0.0
         self._pending_confirm_yes = None
         self._pending_confirm_no = None
         self.playback_lock = threading.Lock()
@@ -1797,6 +1798,7 @@ class DpgMidiPlayerApp:
             dpg.add_spacer(height=8)
             with dpg.group(horizontal=True):
                 dpg.add_button(tag="start_render_button", label="Start Render", callback=self.start_render_video, width=150, height=32)
+                dpg.add_checkbox(tag='render_live_preview_checkbox', label='Live Preview', default_value=False)
 
         with dpg.window(
             tag="skin_window",
@@ -3568,9 +3570,10 @@ class DpgMidiPlayerApp:
 
         stderr_thread = threading.Thread(target=_drain_ffmpeg_stderr, daemon=True)
         stderr_thread.start()
+        live_preview = self._render_live_preview_enabled
         try:
             try:
-                piano_roll.init_pygame_and_gl(hidden=True)
+                piano_roll.init_pygame_and_gl(hidden=not live_preview, disable_vsync=live_preview)
             except Exception:
                 piano_roll.init_pygame_and_gl(hidden=False)
             notes_for_gpu = np.ascontiguousarray(parsed_midi.note_data_for_gpu)
@@ -3578,20 +3581,28 @@ class DpgMidiPlayerApp:
             total_duration = float(parsed_midi.total_duration_sec)
             total_frames = max(1, int(math.ceil(total_duration * settings["framerate"])))
 
+
             for frame_idx in range(total_frames):
                 if self._render_cancelled.is_set():
                     break
-                current_time = min(total_duration, frame_idx / float(settings["framerate"]))
+                current_time = min(total_duration, frame_idx / float(settings['framerate']))
+                self._render_current_time = current_time
                 piano_roll.draw(current_time, present=False)
                 try:
                     process.stdin.write(piano_roll.capture_frame_rgb())
                 except (BrokenPipeError, OSError, ValueError):
                     break
+                if live_preview:
+                    pygame.display.flip()
+                    for _ev in pygame.event.get():
+                        if _ev.type == pygame.QUIT:
+                            self._render_cancelled.set()
+                            break
                 if process.poll() is not None:
                     break
-                if frame_idx % max(1, settings["framerate"] // 2) == 0:
-                    fraction_start = 0.5 if settings["render_audio"] else 0.02
-                    fraction_span = 0.28 if settings["render_audio"] else 0.94
+                if frame_idx % max(1, settings['framerate'] // 2) == 0:
+                    fraction_start = 0.5 if settings['render_audio'] else 0.02
+                    fraction_span = 0.28 if settings['render_audio'] else 0.94
                     stage_fraction = (frame_idx + 1) / float(total_frames)
                     fraction = fraction_start + (fraction_span * ((frame_idx + 1) / float(total_frames)))
                     self._queue_ui(
@@ -3770,6 +3781,7 @@ class DpgMidiPlayerApp:
         self._render_cancelled.clear()
         self._ffmpeg_processes.clear()
         dpg.configure_item("start_render_button", show=False)
+        self._render_current_time = 0.0
         self._set_render_progress(0.0, "Preparing", "Preparing video render...")
         self.render_start_time_monotonic = time.monotonic()
         self.render_stage_timing = {}
@@ -3901,6 +3913,10 @@ class DpgMidiPlayerApp:
             self._ffmpeg_processes.clear()
             dpg.configure_item("start_render_button", show=True)
             self._queue_ui(dpg.enable_item, "start_render_button")
+
+    @property
+    def _render_live_preview_enabled(self):
+        return bool(dpg.does_item_exist("render_live_preview_checkbox") and dpg.get_value("render_live_preview_checkbox"))
 
     def run_piano_roll(self):
         piano_roll_instance = self.piano_roll
