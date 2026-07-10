@@ -475,6 +475,14 @@ cdef class BassMidiEngine:
         self.simulated_time = 0.0
         self.send_all_notes_off()
 
+    cpdef reset_for_prerender(self):
+        self.total_bytes_pushed = 0
+        if self.buffering_enabled and self.decode_stream:
+            self.f.ChannelSetPosition(self.decode_stream, 0, BASS_POS_BYTE)
+        self.current_event_idx = 0
+        self.simulated_time = 0.0
+        self.send_all_notes_off()
+
     cpdef set_voices(self, int voices):
         self.normal_voice_limit = voices
         cdef HSTREAM target = self.decode_stream if self.buffering_enabled else self.midi_stream
@@ -745,8 +753,6 @@ cdef class BassMidiEngine:
                     if queued_bytes == err_val:
                         break
 
-                    # BASS_StreamPutData accepts the full block and returns the
-                    # queue level, not the number of bytes consumed from this call.
                     total_written += read_bytes
                     remaining -= read_bytes
             

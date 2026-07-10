@@ -3,6 +3,8 @@ import ctypes
 import os
 import sys
 
+_BATCH_SEND_MAX = 512
+
 class DebugInfo(ctypes.Structure):
     _fields_ = [
         ('RenderingTime', ctypes.c_float),
@@ -30,6 +32,8 @@ class OmniMidiEngine:
         self._init_working_dir = None
         self.load_from_path = bool(load_from_path)
         self.backend_display_name = "OmniMIDI" if self.load_from_path else "Custom Synth"
+        self._batch_lib = None
+        self._send_direct_data_addr = None
 
         # Explicitly load winmm.dll from the system directory first.
         # This can sometimes help the synth hook into the correct multimedia functions.
@@ -113,6 +117,31 @@ class OmniMidiEngine:
         print(f"[Engine] {self.backend_display_name} API Stream initialized successfully.")
         self.is_initialized = True
 
+        self._load_batch_helper()
+
+    def _load_batch_helper(self):
+        synth_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+        batch_dll = os.path.join(synth_dir, "midi_batch_send.dll")
+        if not os.path.exists(batch_dll):
+            print("[Engine] midi_batch_send.dll not found; using Python batch fallback.")
+            return
+        try:
+            self._batch_lib = ctypes.cdll.LoadLibrary(batch_dll)
+            self._batch_lib.BatchSendDirectData.restype = ctypes.c_int
+            self._batch_lib.BatchSendDirectData.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_uint),
+                ctypes.c_int,
+            ]
+            self._send_direct_data_addr = ctypes.cast(
+                self.lib.SendDirectData, ctypes.c_void_p
+            ).value
+            print("[Engine] midi_batch_send.dll loaded; native batch send active.")
+        except Exception as e:
+            print(f"[Engine] Warning: Could not load batch helper: {e}")
+            self._batch_lib = None
+            self._send_direct_data_addr = None
+
     def get_cpu_usage(self):
         if self.debug_info_ptr:
             return self.debug_info_ptr[0].RenderingTime
@@ -142,17 +171,42 @@ class OmniMidiEngine:
         self.lib.ResetKDMAPIStream()
 
     def send_event_batch(self, events):
-        """Sends a batch of raw MIDI events using SendDirectData."""
-        if not self.is_initialized: return
+        """Sends a batch of raw MIDI events using SendDirectData.
+
+        When the native batch helper is available, packs messages into a C
+        array and dispatches them in a single ctypes call (chunked to avoid
+        large alloca overhead).  Falls back to per-event Python loop otherwise.
+        """
+        if not self.is_initialized or not events:
+            return
+
+        send_fn = self._send_direct_data_addr
+        batch_lib = self._batch_lib
+
+        if batch_lib is not None and send_fn is not None:
+            packed = []
+            for event, param in events:
+                status = event & 0xFF
+                velocity = (param >> 8) & 0xFF
+                if (status & 0xF0) == 0x90 and velocity < 20:
+                    continue
+                pitch = param & 0xFF
+                packed.append((velocity << 16) | (pitch << 8) | status)
+
+            if not packed:
+                return
+
+            arr_type = ctypes.c_uint * len(packed)
+            c_arr = arr_type(*packed)
+            batch_lib.BatchSendDirectData(send_fn, c_arr, len(packed))
+            return
+
         for e in events:
             event, param = e
-            
             status = event & 0xFF
             velocity = (param >> 8) & 0xFF
-
             if (status & 0xF0) == 0x90 and velocity < 20:
                 continue
-
             pitch = param & 0xFF
             message = (velocity << 16) | (pitch << 8) | status
             self.lib.SendDirectData(message)
