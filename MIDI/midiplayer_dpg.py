@@ -71,13 +71,6 @@ except Exception as e:
 
 CONFIG = setup_omnimidi_preference(load_config())
 
-_BUNDLED_FFMPEG_CANDIDATES = [
-    os.path.join(script_dir, "ffmpeg.exe"),
-    os.path.join(script_dir, "ffmpeg"),
-    os.path.join(parent_dir, "ffmpeg.exe"),
-    os.path.join(parent_dir, "ffmpeg"),
-]
-
 
 def _build_parser_result_payload(parser, use_disk_backing=False, result_queue=None):
     result_data = {

@@ -120,27 +120,33 @@ class OmniMidiEngine:
         self._load_batch_helper()
 
     def _load_batch_helper(self):
-        synth_dir = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
-        batch_dll = os.path.join(synth_dir, "midi_batch_send.dll")
-        if not os.path.exists(batch_dll):
-            print("[Engine] midi_batch_send.dll not found; using Python batch fallback.")
-            return
-        try:
-            self._batch_lib = ctypes.cdll.LoadLibrary(batch_dll)
-            self._batch_lib.BatchSendDirectData.restype = ctypes.c_int
-            self._batch_lib.BatchSendDirectData.argtypes = [
-                ctypes.c_void_p,
-                ctypes.POINTER(ctypes.c_uint),
-                ctypes.c_int,
-            ]
-            self._send_direct_data_addr = ctypes.cast(
-                self.lib.SendDirectData, ctypes.c_void_p
-            ).value
-            print("[Engine] midi_batch_send.dll loaded; native batch send active.")
-        except Exception as e:
-            print(f"[Engine] Warning: Could not load batch helper: {e}")
-            self._batch_lib = None
-            self._send_direct_data_addr = None
+        candidates = []
+        if getattr(sys, "frozen", False):
+            exe_dir = os.path.dirname(sys.executable)
+            meipass = getattr(sys, "_MEIPASS", exe_dir)
+            candidates.append(os.path.join(exe_dir, "midi_batch_send.dll"))
+            candidates.append(os.path.join(meipass, "midi_batch_send.dll"))
+            candidates.append(os.path.join(meipass, "MIDI", "midi_batch_send.dll"))
+        else:
+            candidates.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), "midi_batch_send.dll"))
+        for batch_dll in candidates:
+            if os.path.exists(batch_dll):
+                try:
+                    self._batch_lib = ctypes.cdll.LoadLibrary(batch_dll)
+                    self._batch_lib.BatchSendDirectData.restype = ctypes.c_int
+                    self._batch_lib.BatchSendDirectData.argtypes = [
+                        ctypes.c_void_p,
+                        ctypes.POINTER(ctypes.c_uint),
+                        ctypes.c_int,
+                    ]
+                    self._send_direct_data_addr = ctypes.cast(
+                        self.lib.SendDirectData, ctypes.c_void_p
+                    ).value
+                    print(f"[Engine] midi_batch_send.dll loaded from {batch_dll}; native batch send active.")
+                    return
+                except Exception as e:
+                    print(f"[Engine] Warning: Could not load batch helper from {batch_dll}: {e}")
+        print("[Engine] midi_batch_send.dll not found; using Python batch fallback.")
 
     def get_cpu_usage(self):
         if self.debug_info_ptr:

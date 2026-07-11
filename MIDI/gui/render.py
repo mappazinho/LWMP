@@ -1,5 +1,6 @@
 ﻿"""Auto-extracted mixin for DpgMidiPlayerApp."""
 import os
+import sys
 import threading
 import time
 import traceback
@@ -11,6 +12,22 @@ from collections import deque
 
 import numpy as np
 import dearpygui.dearpygui as dpg
+
+_script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_parent_dir = os.path.dirname(_script_dir)
+_BUNDLED_FFMPEG_CANDIDATES = [
+    os.path.join(_script_dir, "ffmpeg.exe"),
+    os.path.join(_script_dir, "ffmpeg"),
+    os.path.join(_parent_dir, "ffmpeg.exe"),
+    os.path.join(_parent_dir, "ffmpeg"),
+]
+if getattr(sys, "frozen", False):
+    _meipass = getattr(sys, "_MEIPASS", "")
+    if _meipass:
+        _BUNDLED_FFMPEG_CANDIDATES += [
+            os.path.join(_meipass, "ffmpeg.exe"),
+            os.path.join(_meipass, "ffmpeg"),
+        ]
 
 class RenderMixin:
     """Methods for render."""

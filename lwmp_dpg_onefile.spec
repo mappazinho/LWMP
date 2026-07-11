@@ -18,16 +18,38 @@ datas = [
 binaries = [
     (os.path.join(MIDI_DIR, "bassmidi", "bass.dll"), os.path.join("MIDI", "bassmidi")),
     (os.path.join(MIDI_DIR, "bassmidi", "bassmidi.dll"), os.path.join("MIDI", "bassmidi")),
+    (os.path.join(MIDI_DIR, "midi_batch_send.dll"), "."),
 ]
 
 hiddenimports = [
     "midi_parser_cython",
     "midi_engine_cython",
-    "bassmidi_engine",
+    "midi_engine",
     "player_controller",
-    "pianoroll",
     "config",
     "runtime_paths",
+    "vst_effects",
+    "piano",
+    "piano.pianoroll",
+    "piano.shaders",
+    "piano.skin_utils",
+    "piano.skin_browser",
+    "piano.note_utils",
+    "piano.bloom",
+    "piano.glow",
+    "piano.keyboard",
+    "piano.overlays",
+    "gui",
+    "gui.render",
+    "gui.playback",
+    "gui.transport",
+    "gui.soundfont",
+    "gui.library",
+    "gui.skin",
+    "gui.startup",
+    "gui.gui_config",
+    "gui.piano_roll",
+    "gui.nps_spikes",
 ]
 hiddenimports += collect_submodules("OpenGL")
 

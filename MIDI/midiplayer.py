@@ -11,7 +11,7 @@ MidiPlayerApp = None
 def _should_enable_log_console():
     if os.name != "nt":
         return False
-    if not any(arg.lower() == "-log" for arg in sys.argv[1:]):
+    if not any(arg.lower() in ("-log", "-console") for arg in sys.argv[1:]):
         return False
     if any(arg.startswith("--multiprocessing-fork") for arg in sys.argv[1:]):
         return False
@@ -41,14 +41,14 @@ def _enable_log_console():
     except OSError:
         pass
 
-    print("[LWMP] Log console enabled via -log")
+    print("[LWMP] Log console enabled")
 
 
 def main():
     multiprocessing.freeze_support()
     if _should_enable_log_console():
         _enable_log_console()
-        sys.argv = [sys.argv[0], *[arg for arg in sys.argv[1:] if arg.lower() != "-log"]]
+        sys.argv = [sys.argv[0], *[arg for arg in sys.argv[1:] if arg.lower() not in ("-log", "-console")]]
     from midiplayer_dpg import DpgMidiPlayerApp as _DpgMidiPlayerApp
     global MidiPlayerApp
     MidiPlayerApp = _DpgMidiPlayerApp
