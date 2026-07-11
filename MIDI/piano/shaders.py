@@ -14,6 +14,7 @@ uniform float u_guide_line_y;
 uniform float u_window_start;
 uniform float u_window_end;
 uniform float u_glow_strength;
+uniform float u_overclock;
 uniform vec3 u_colors[128];
 uniform vec2 u_pitch_layout[128];
 uniform int u_is_white_key[128];
@@ -22,6 +23,9 @@ varying vec3 v_fragColor;
 varying vec2 v_pos;
 varying float v_note_h;
 varying float v_note_w;
+varying float v_overclock_corrupt;
+
+float hash(float n) { return fract(sin(n) * 43758.5453); }
 
 void main() {
     float on_time = note_times.x;
@@ -42,8 +46,48 @@ void main() {
     vec2 instance_scale = vec2(key_layout.y, note_h);
     vec2 instance_offset = vec2(key_layout.x, note_y - note_h);
 
-    vec2 final_pos = pos * instance_scale +
-        instance_offset;
+    vec2 warped_pos = pos;
+
+    vec2 final_pos = warped_pos * instance_scale + instance_offset;
+
+    if (u_overclock > 0.001) {
+        float seed = float(pitch) * 1.618 + floor(on_time * 7.0) * 0.381;
+
+        float t0 = floor(u_time * 4.0);
+        float t1 = floor(u_time * 9.0);
+        float t2 = floor(u_time * 17.0);
+
+        float burst = step(0.55, hash(seed + t0 * 0.17)) * step(0.65, hash(seed * 3.1 + t1 * 0.31));
+        float flicker = step(0.45, hash(seed * 5.7 + t2 * 0.53));
+
+        float global_intensity = (burst * 0.7 + flicker * 0.3) * u_overclock;
+
+        float vseed = seed + pos.x * 17.3 + pos.y * 31.7;
+        float dx = (hash(vseed * 1.1 + t0) - 0.5) * 2.0;
+        float dy = (hash(vseed * 2.3 + t1) - 0.5) * 2.0;
+
+        float mag = global_intensity * mix(15.0, 120.0, hash(vseed * 3.7 + t2));
+        final_pos += vec2(dx, dy) * mag;
+
+        float slot = floor(u_time * 3.0);
+        float note_id = hash(seed * 13.71);
+        float target_id = hash(slot * 7.31);
+        float is_corrupted = 1.0 - smoothstep(0.0, 0.003, abs(note_id - target_id));
+
+        float slot_intensity = is_corrupted * u_overclock;
+
+        float sdx = (hash(vseed * 4.1 + slot) - 0.5) * 2.0;
+        float sdy = (hash(vseed * 5.3 + slot * 1.3) - 0.5) * 2.0;
+        float slot_mag = slot_intensity * mix(50.0, 350.0, hash(vseed * 6.7 + slot * 0.7));
+        final_pos += vec2(sdx, sdy) * slot_mag;
+
+        float warp_pull = slot_intensity * pos.x * pos.y;
+        final_pos = mix(final_pos, vec2(0.0, 0.0), warp_pull * mix(0.5, 1.0, hash(seed * 9.1 + slot)));
+
+        v_overclock_corrupt = max(global_intensity * 0.4, slot_intensity);
+    } else {
+        v_overclock_corrupt = 0.0;
+    }
 
     gl_Position = u_projection *
         vec4(final_pos, note_depth, 1.0);
@@ -62,10 +106,16 @@ varying vec3 v_fragColor;
 varying vec2 v_pos;
 varying float v_note_h;
 varying float v_note_w;
+varying float v_overclock_corrupt;
 
 uniform sampler2D u_note_texture;
 uniform sampler2D u_note_edge_texture;
 uniform float u_glow_strength;
+uniform float u_time;
+
+float hash21(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+}
 
 void main() {
     vec2 fw = fwidth(v_pos);
@@ -90,6 +140,23 @@ void main() {
         final_color = vec4(v_fragColor * max(edge_bright, 0.20), texture_color.a);
     } else {
         final_color = texture_color * vec4(v_fragColor, 1.0);
+    }
+
+    if (v_overclock_corrupt > 0.001) {
+        float shift = v_overclock_corrupt * 0.12;
+        vec3 corrupted = final_color.rgb;
+        corrupted.r = texture2D(u_note_texture, v_pos + vec2(shift, shift * 0.3)).r * v_fragColor.r;
+        corrupted.b = texture2D(u_note_texture, v_pos - vec2(shift * 0.7, -shift * 0.2)).b * v_fragColor.b;
+
+        float color_noise = hash21(v_pos * 100.0 + floor(u_time * 4.0));
+        vec3 injection = vec3(
+            step(0.75, color_noise) * 0.9,
+            step(0.55, color_noise) * 0.4,
+            step(0.35, color_noise) * 0.95
+        );
+        corrupted = mix(corrupted, injection, v_overclock_corrupt * 0.35);
+
+        final_color.rgb = mix(final_color.rgb, corrupted, v_overclock_corrupt);
     }
 
     float body_gradient = mix(0.92, 1.08, pow(clamp(1.0 - v_pos.y, 0.0, 1.0), 1.3));
@@ -224,14 +291,50 @@ attribute vec3 instance_color;
 
 uniform mat4 u_projection;
 uniform float u_keyboard_y;
+uniform float u_overclock;
+uniform float u_time;
 
 varying vec2 v_uv;
 varying float v_is_pressed;
 varying vec3 v_color;
 
+float kb_hash(float n) { return fract(sin(n) * 43758.5453); }
+
 void main() {
     vec2 final_pos = pos * instance_rect.zw + instance_rect.xy;
     final_pos.y += u_keyboard_y;
+
+    if (u_overclock > 0.001) {
+        float seed = instance_rect.x * 0.13 + instance_rect.y * 0.37;
+
+        float t0 = floor(u_time * 4.0);
+        float t1 = floor(u_time * 9.0);
+
+        float burst = step(0.55, kb_hash(seed + t0 * 0.17)) * step(0.65, kb_hash(seed * 3.1 + t1 * 0.31));
+        float flicker = step(0.45, kb_hash(seed * 5.7 + t1 * 0.53));
+
+        float global_intensity = (burst * 0.6 + flicker * 0.3) * u_overclock;
+
+        float vseed = seed + pos.x * 17.3 + pos.y * 31.7;
+        float dx = (kb_hash(vseed * 1.1 + t0) - 0.5) * 2.0;
+        float dy = (kb_hash(vseed * 2.3 + t1) - 0.5) * 2.0;
+
+        float mag = global_intensity * mix(8.0, 80.0, kb_hash(vseed * 3.7 + t0));
+        final_pos += vec2(dx, dy) * mag;
+
+        float slot = floor(u_time * 3.0);
+        float key_id = kb_hash(seed * 13.71);
+        float target_id = kb_hash(slot * 7.31 + 0.5);
+        float is_corrupted = 1.0 - smoothstep(0.0, 0.005, abs(key_id - target_id));
+
+        float slot_intensity = is_corrupted * u_overclock;
+
+        float sdx = (kb_hash(vseed * 4.1 + slot) - 0.5) * 2.0;
+        float sdy = (kb_hash(vseed * 5.3 + slot * 1.3) - 0.5) * 2.0;
+        float slot_mag = slot_intensity * mix(15.0, 150.0, kb_hash(vseed * 6.7 + slot * 0.7));
+        final_pos += vec2(sdx, sdy) * slot_mag;
+    }
+
     gl_Position = u_projection * vec4(final_pos, 0.0, 1.0);
     v_uv = vec2(pos.x, 1.0 - pos.y);
     v_is_pressed = instance_is_pressed;
@@ -308,14 +411,50 @@ attribute vec3 instance_color;
 
 uniform mat4 u_projection;
 uniform float u_keyboard_y;
+uniform float u_overclock;
+uniform float u_time;
 
 varying vec2 v_uv;
 varying float v_is_pressed;
 varying vec3 v_color;
 
+float kb_bloom_hash(float n) { return fract(sin(n) * 43758.5453); }
+
 void main() {
     vec2 final_pos = pos * instance_rect.zw + instance_rect.xy;
     final_pos.y += u_keyboard_y;
+
+    if (u_overclock > 0.001) {
+        float seed = instance_rect.x * 0.13 + instance_rect.y * 0.37;
+
+        float t0 = floor(u_time * 4.0);
+        float t1 = floor(u_time * 9.0);
+
+        float burst = step(0.55, kb_bloom_hash(seed + t0 * 0.17)) * step(0.65, kb_bloom_hash(seed * 3.1 + t1 * 0.31));
+        float flicker = step(0.45, kb_bloom_hash(seed * 5.7 + t1 * 0.53));
+
+        float global_intensity = (burst * 0.6 + flicker * 0.3) * u_overclock;
+
+        float vseed = seed + pos.x * 17.3 + pos.y * 31.7;
+        float dx = (kb_bloom_hash(vseed * 1.1 + t0) - 0.5) * 2.0;
+        float dy = (kb_bloom_hash(vseed * 2.3 + t1) - 0.5) * 2.0;
+
+        float mag = global_intensity * mix(8.0, 80.0, kb_bloom_hash(vseed * 3.7 + t0));
+        final_pos += vec2(dx, dy) * mag;
+
+        float slot = floor(u_time * 3.0);
+        float key_id = kb_bloom_hash(seed * 13.71);
+        float target_id = kb_bloom_hash(slot * 7.31 + 0.5);
+        float is_corrupted = 1.0 - smoothstep(0.0, 0.005, abs(key_id - target_id));
+
+        float slot_intensity = is_corrupted * u_overclock;
+
+        float sdx = (kb_bloom_hash(vseed * 4.1 + slot) - 0.5) * 2.0;
+        float sdy = (kb_bloom_hash(vseed * 5.3 + slot * 1.3) - 0.5) * 2.0;
+        float slot_mag = slot_intensity * mix(15.0, 150.0, kb_bloom_hash(vseed * 6.7 + slot * 0.7));
+        final_pos += vec2(sdx, sdy) * slot_mag;
+    }
+
     gl_Position = u_projection * vec4(final_pos, 0.0, 1.0);
     v_uv = vec2(pos.x, pos.y);
     v_is_pressed = instance_is_pressed;

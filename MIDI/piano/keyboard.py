@@ -120,6 +120,12 @@ class KeyboardMixin:
         keyboard_y = self.height - keyboard_height
         glUniform1f(glGetUniformLocation(self.keyboard_shader, "u_keyboard_y"), keyboard_y)
 
+        if self.u_keyboard_overclock_loc != -1:
+            glUniform1f(self.u_keyboard_overclock_loc, self.overclock_intensity)
+        keyboard_time_loc = glGetUniformLocation(self.keyboard_shader, "u_time")
+        if keyboard_time_loc != -1:
+            glUniform1f(keyboard_time_loc, self.last_frame_time)
+
         if len(self.white_key_instance_data) > 0:
             self.white_key_instance_data['is_pressed'].fill(0.0)
             self.white_key_instance_data['color'][:] = 0.0
@@ -204,6 +210,23 @@ class KeyboardMixin:
         
         self.active_pitches_last_frame = current_active_pitches
 
+        anesthesia_remove = getattr(self, 'anesthesia_remove', 0.0)
+        total_black = len(self.black_key_instance_data)
+        total_white = len(self.white_key_instance_data)
+
+        if anesthesia_remove > 0.001 and (total_black > 0 or total_white > 0):
+            if anesthesia_remove < 0.5:
+                black_frac = anesthesia_remove * 2.0
+                draw_black = max(0, int(total_black * (1.0 - black_frac)))
+                draw_white = total_white
+            else:
+                draw_black = 0
+                white_frac = (anesthesia_remove - 0.5) * 2.0
+                draw_white = max(0, int(total_white * (1.0 - white_frac)))
+        else:
+            draw_black = total_black
+            draw_white = total_white
+
         glUniform1i(self.u_is_white_key_loc, 1)
         
         glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, self.keyboard_textures['white_key'])
@@ -211,16 +234,16 @@ class KeyboardMixin:
         glBindVertexArray(self.keyboard_vao_white)
         glBindBuffer(GL_ARRAY_BUFFER, self.keyboard_vbo_white_keys)
         glBufferSubData(GL_ARRAY_BUFFER, 0, self.white_key_instance_data.nbytes, self.white_key_instance_data)
-        glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, len(self.white_key_instance_data))
+        glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, draw_white)
 
-        if len(self.black_key_instance_data) > 0:
+        if draw_black > 0:
             glUniform1i(self.u_is_white_key_loc, 0)
             glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, self.keyboard_textures['black_key'])
             glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, self.keyboard_textures['black_pressed'])
             glBindVertexArray(self.keyboard_vao_black)
             glBindBuffer(GL_ARRAY_BUFFER, self.keyboard_vbo_black_keys)
             glBufferSubData(GL_ARRAY_BUFFER, 0, self.black_key_instance_data.nbytes, self.black_key_instance_data)
-            glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, len(self.black_key_instance_data))
+            glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, draw_black)
         
         glBindVertexArray(0)
         glUseProgram(0)
@@ -242,15 +265,38 @@ class KeyboardMixin:
                 self.u_keyboard_bloom_strength_loc,
                 (self.bloom_base_strength if self.show_bloom else 0.0) * 0.82
             )
+        if self.u_keyboard_bloom_overclock_loc != -1:
+            glUniform1f(self.u_keyboard_bloom_overclock_loc, self.overclock_intensity)
+        keyboard_bloom_time_loc = glGetUniformLocation(self.keyboard_bloom_shader, "u_time")
+        if keyboard_bloom_time_loc != -1:
+            glUniform1f(keyboard_bloom_time_loc, self.last_frame_time)
 
         glUniform1i(self.u_keyboard_bloom_is_white_key_loc, 1)
         glBindVertexArray(self.keyboard_bloom_vao_white)
-        glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, len(self.white_key_instance_data))
 
-        if len(self.black_key_instance_data) > 0:
+        anesthesia_remove = getattr(self, 'anesthesia_remove', 0.0)
+        total_black = len(self.black_key_instance_data)
+        total_white = len(self.white_key_instance_data)
+
+        if anesthesia_remove > 0.001 and (total_black > 0 or total_white > 0):
+            if anesthesia_remove < 0.5:
+                black_frac = anesthesia_remove * 2.0
+                draw_black = max(0, int(total_black * (1.0 - black_frac)))
+                draw_white = total_white
+            else:
+                draw_black = 0
+                white_frac = (anesthesia_remove - 0.5) * 2.0
+                draw_white = max(0, int(total_white * (1.0 - white_frac)))
+        else:
+            draw_black = total_black
+            draw_white = total_white
+
+        glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, draw_white)
+
+        if draw_black > 0:
             glUniform1i(self.u_keyboard_bloom_is_white_key_loc, 0)
             glBindVertexArray(self.keyboard_bloom_vao_black)
-            glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, len(self.black_key_instance_data))
+            glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, draw_black)
 
         glBindVertexArray(0)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)

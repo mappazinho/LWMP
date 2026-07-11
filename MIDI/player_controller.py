@@ -203,12 +203,15 @@ class PlayerController:
                 break
         return messages
 
-    def normalize_parsed_payload(self, payload, start_padding=3.0, end_padding=3.0):
+    def normalize_parsed_payload(self, payload, start_padding=3.0, end_padding=3.0, progress_callback=None):
         self._release_parsed_midi_storage()
         payload = dict(payload)
         disk_backed_arrays = payload.pop("disk_backed_arrays", None)
         backing_temp_dir = payload.pop("backing_temp_dir", None)
         self.parsed_midi = types.SimpleNamespace(**payload)
+
+        if progress_callback:
+            progress_callback(0.95, "Normalizing...", "Loading data arrays...")
 
         if disk_backed_arrays:
             self.parsed_midi.note_data_for_gpu = np.load(
@@ -223,6 +226,9 @@ class PlayerController:
             )
             self.parsed_midi._backing_temp_dir = backing_temp_dir
 
+        if progress_callback:
+            progress_callback(0.96, "Normalizing...", "Applying time offsets...")
+
         if hasattr(self.parsed_midi, "note_data_for_gpu") and self.parsed_midi.note_data_for_gpu.size > 0:
             self.parsed_midi.note_data_for_gpu["on_time"] += start_padding
             self.parsed_midi.note_data_for_gpu["off_time"] += start_padding
@@ -230,6 +236,9 @@ class PlayerController:
         if self.parsed_midi.note_events_for_playback.size > 0:
             self.parsed_midi.note_events_for_playback["on_time"] += start_padding
             self.parsed_midi.note_events_for_playback["off_time"] += start_padding
+
+        if progress_callback:
+            progress_callback(0.97, "Normalizing...", "Processing events...")
 
         if hasattr(self.parsed_midi, "pitch_bend_events") and self.parsed_midi.pitch_bend_events:
             self.parsed_midi.pitch_bend_events = [
@@ -248,6 +257,9 @@ class PlayerController:
                 for t, c, cc, value in self.parsed_midi.control_change_events
             ]
 
+        if progress_callback:
+            progress_callback(0.975, "Normalizing...", "Building tempo map...")
+
         tempo_events = getattr(self.parsed_midi, "tempo_events", None) or [(0.0, 120.0)]
         self.parsed_midi.tempo_events = [
             (float(t) + start_padding, float(bpm)) for t, bpm in tempo_events
@@ -264,12 +276,18 @@ class PlayerController:
         if hasattr(self.parsed_midi, "total_duration_sec"):
             self.parsed_midi.total_duration_sec += start_padding + end_padding
 
+        if progress_callback:
+            progress_callback(0.98, "Normalizing...", "Sorting note data...")
+
         if self.parsed_midi.note_events_for_playback.size > 0:
             self.parsed_midi.sorted_off_times = np.sort(
                 self.parsed_midi.note_events_for_playback["off_time"].astype(np.float64, copy=True)
             )
         else:
             self.parsed_midi.sorted_off_times = np.empty((0,), dtype=np.float64)
+
+        if progress_callback:
+            progress_callback(0.99, "Normalizing...", "Computing NPS statistics...")
 
         self.total_song_notes = len(self.parsed_midi.note_events_for_playback)
         self.total_song_duration = self.parsed_midi.total_duration_sec

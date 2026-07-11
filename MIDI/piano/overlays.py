@@ -1,3 +1,4 @@
+import math
 import time
 import random
 import numpy as np
@@ -22,6 +23,12 @@ class OverlayMixin:
             yield ("glow_options", self.glow_options_button_rect, "Lighting options")
         if self.color_button_rect:
             yield ("color_button", self.color_button_rect, "Randomize note colors")
+        if self.fun_button_rect:
+            yield ("fun_button", self.fun_button_rect, "Fun")
+        if self.fun_options_expanded and self.overclock_checkbox_rect:
+            yield ("overclock_checkbox", self.overclock_checkbox_rect, "GPU artifact corruption effect")
+        if self.fun_options_expanded and self.anesthesia_checkbox_rect:
+            yield ("anesthesia_checkbox", self.anesthesia_checkbox_rect, "NPS-based note shrink and key removal")
         if self.glow_options_expanded and self.glow_options_checkbox_rect:
             yield ("glow_checkbox", self.glow_options_checkbox_rect, "Toggle glow on key press")
         if self.glow_options_expanded and self.key_light_fade_checkbox_rect:
@@ -253,6 +260,22 @@ class OverlayMixin:
                 return
             if self.color_button_rect and self.color_button_rect.collidepoint(event.pos):
                 self.randomize_colors()
+                return
+            if self.fun_button_rect and self.fun_button_rect.collidepoint(event.pos):
+                self.fun_options_expanded = not self.fun_options_expanded
+                return
+            if self.fun_options_expanded and self.overclock_checkbox_rect and self.overclock_checkbox_rect.collidepoint(event.pos):
+                self.overclock_mode = not self.overclock_mode
+                if not self.overclock_mode:
+                    self.overclock_intensity = 0.0
+                self._save_visualizer_config()
+                return
+            if self.fun_options_expanded and self.anesthesia_checkbox_rect and self.anesthesia_checkbox_rect.collidepoint(event.pos):
+                self.anesthesia_mode = not self.anesthesia_mode
+                if not self.anesthesia_mode:
+                    self.anesthesia_shrink = 0.0
+                    self.anesthesia_remove = 0.0
+                self._save_visualizer_config()
                 return
             if self.controls_panel_expanded and self.slider_rect and self.slider_rect.collidepoint(event.pos):
                 self.slider_dragging = True
@@ -701,6 +724,53 @@ class OverlayMixin:
             glEnd()
             self._draw_hover_highlight(self.color_button_rect, self._get_hover_alpha("color_button"))
 
+        if self.fun_button_rect:
+            bx, by = self.fun_button_rect.x, self.fun_button_rect.y
+            bs = self.color_button_size
+            glColor4f(0.15, 0.15, 0.2, 0.7)
+            glBegin(GL_QUADS)
+            glVertex2f(bx, by); glVertex2f(bx + bs, by)
+            glVertex2f(bx + bs, by + bs); glVertex2f(bx, by + bs)
+            glEnd()
+            cx, cy = bx + bs * 0.5, by + bs * 0.5
+            r = bs * 0.32
+            glColor4f(0.9, 0.35, 0.45, 0.9)
+            glBegin(GL_QUADS)
+            glVertex2f(cx - r, cy - r * 0.3)
+            glVertex2f(cx + r, cy - r * 0.3)
+            glVertex2f(cx + r, cy + r * 0.3)
+            glVertex2f(cx - r, cy + r * 0.3)
+            glEnd()
+            ribbon_w = r * 0.2
+            glColor4f(1.0, 0.85, 0.2, 0.9)
+            glBegin(GL_QUADS)
+            glVertex2f(cx - ribbon_w, by + bs * 0.2)
+            glVertex2f(cx + ribbon_w, by + bs * 0.2)
+            glVertex2f(cx + ribbon_w, by + bs * 0.8)
+            glVertex2f(cx - ribbon_w, by + bs * 0.8)
+            glEnd()
+            glBegin(GL_QUADS)
+            glVertex2f(bx + bs * 0.2, cy - ribbon_w)
+            glVertex2f(bx + bs * 0.8, cy - ribbon_w)
+            glVertex2f(bx + bs * 0.8, cy + ribbon_w)
+            glVertex2f(bx + bs * 0.2, cy + ribbon_w)
+            glEnd()
+            bow_r = r * 0.28
+            glColor4f(1.0, 0.85, 0.2, 0.9)
+            glBegin(GL_TRIANGLE_FAN)
+            glVertex2f(cx, cy)
+            for i in range(17):
+                angle = (i / 16.0) * 6.2831853
+                glVertex2f(cx + math.cos(angle) * bow_r, cy + math.sin(angle) * bow_r)
+            glEnd()
+            glColor4f(0.5, 0.5, 0.55, 0.8)
+            glLineWidth(1.0)
+            glBegin(GL_LINE_LOOP)
+            glVertex2f(bx, by); glVertex2f(bx + bs, by)
+            glVertex2f(bx + bs, by + bs); glVertex2f(bx, by + bs)
+            glEnd()
+            self._draw_hover_highlight(self.fun_button_rect, self._get_hover_alpha("fun_button"))
+
         if self.color_mode_button_rect:
             bx, by = self.color_mode_button_rect.x, self.color_mode_button_rect.y
             bs = self.color_button_size
@@ -834,6 +904,70 @@ class OverlayMixin:
                     glVertex2f(cbx + 7, cby + 13); glVertex2f(cbx + 13, cby + 4)
                     glEnd()
                 self._draw_hover_highlight(cb_rect, self._get_hover_alpha(hover_id))
+
+        if self.fun_options_expanded and self.fun_options_panel_rect:
+            px, py, pw, ph = self.fun_options_panel_rect
+            glColor4f(0.08, 0.08, 0.11, 0.92)
+            glBegin(GL_QUADS)
+            glVertex2f(px, py); glVertex2f(px + pw, py)
+            glVertex2f(px + pw, py + ph); glVertex2f(px, py + ph)
+            glEnd()
+            glColor4f(0.62, 0.64, 0.70, 0.95)
+            glLineWidth(1.0)
+            glBegin(GL_LINE_LOOP)
+            glVertex2f(px, py); glVertex2f(px + pw, py)
+            glVertex2f(px + pw, py + ph); glVertex2f(px, py + ph)
+            glEnd()
+
+            self._draw_text_overlay("Overclock Mode", px + 32, py + 30)
+
+            cb_rect = self.overclock_checkbox_rect
+            if cb_rect:
+                cbx, cby, cbw, cbh = cb_rect.x, cb_rect.y, cb_rect.width, cb_rect.height
+                glColor4f(0.12, 0.12, 0.16, 0.92)
+                glBegin(GL_QUADS)
+                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
+                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
+                glEnd()
+                glColor4f(0.72, 0.74, 0.80, 0.95)
+                glLineWidth(1.0)
+                glBegin(GL_LINE_LOOP)
+                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
+                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
+                glEnd()
+                if self.overclock_mode:
+                    glColor4f(0.95, 0.78, 0.24, 0.95)
+                    glLineWidth(2.0)
+                    glBegin(GL_LINES)
+                    glVertex2f(cbx + 3, cby + 9); glVertex2f(cbx + 7, cby + 13)
+                    glVertex2f(cbx + 7, cby + 13); glVertex2f(cbx + 13, cby + 4)
+                    glEnd()
+                self._draw_hover_highlight(cb_rect, self._get_hover_alpha("overclock_checkbox"))
+
+            self._draw_text_overlay("Anesthesia Mode", px + 32, py + 54)
+
+            cb_rect = self.anesthesia_checkbox_rect
+            if cb_rect:
+                cbx, cby, cbw, cbh = cb_rect.x, cb_rect.y, cb_rect.width, cb_rect.height
+                glColor4f(0.12, 0.12, 0.16, 0.92)
+                glBegin(GL_QUADS)
+                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
+                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
+                glEnd()
+                glColor4f(0.72, 0.74, 0.80, 0.95)
+                glLineWidth(1.0)
+                glBegin(GL_LINE_LOOP)
+                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
+                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
+                glEnd()
+                if self.anesthesia_mode:
+                    glColor4f(0.24, 0.78, 0.95, 0.95)
+                    glLineWidth(2.0)
+                    glBegin(GL_LINES)
+                    glVertex2f(cbx + 3, cby + 9); glVertex2f(cbx + 7, cby + 13)
+                    glVertex2f(cbx + 7, cby + 13); glVertex2f(cbx + 13, cby + 4)
+                    glEnd()
+                self._draw_hover_highlight(cb_rect, self._get_hover_alpha("anesthesia_checkbox"))
 
         self._draw_hover_tooltip()
         

@@ -215,7 +215,7 @@ cdef class MidiParser:
         self.preferred_color_mode = "track"
         self.preferred_color_mode = "track"
 
-    def count_total_events(self):
+    def count_total_events(self, progress_queue=None):
         """
         Quickly scans the MIDI file to count the total number of events
         without the overhead of full parsing. This is used for progress bars.
@@ -232,7 +232,18 @@ cdef class MidiParser:
             header_data = f.read(header_length)
             file_format, num_tracks, _ = struct.unpack('>HHH', header_data)
 
-            for _ in range(num_tracks):
+            for track_idx in range(num_tracks):
+                if progress_queue and num_tracks > 0:
+                    track_fraction = 0.05 * (track_idx / max(1, num_tracks))
+                    try:
+                        progress_queue.put(('progress', {
+                            "fraction": track_fraction,
+                            "overlay": f"Counting... {track_idx}/{num_tracks}",
+                            "detail": f"Scanning track {track_idx + 1:,} / {num_tracks:,}...",
+                        }))
+                    except Exception:
+                        pass
+
                 track_chunk_id = f.read(4)
                 if not track_chunk_id:
                     break

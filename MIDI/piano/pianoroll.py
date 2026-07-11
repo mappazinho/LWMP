@@ -60,6 +60,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.u_note_edge_texture_loc = -1
         self.u_is_white_key_notes_loc = -1
         self.u_glow_strength_loc = -1
+        self.u_overclock_loc = -1
         self.u_bloom_time_loc = -1
         self.u_bloom_scroll_speed_loc = -1
         self.u_bloom_pitch_layout_loc = -1
@@ -145,6 +146,8 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.last_bloom_update_time = time.perf_counter()
         self.show_key_press_glow = bool(vis_cfg.get('show_key_press_glow', True))
         self.show_key_light_fade = bool(vis_cfg.get('show_key_light_fade', False))
+        self.overclock_mode = bool(vis_cfg.get('overclock_mode', False))
+        self.anesthesia_mode = bool(vis_cfg.get('anesthesia_mode', False))
         self.glow_cull_threshold = int(vis_cfg.get('glow_cull_threshold', 128))
         self.glow_fade_duration = 0.1
         self.nps_spikes = []
@@ -199,6 +202,8 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.u_is_white_key_loc = -1
         self.u_keyboard_bloom_is_white_key_loc = -1
         self.u_keyboard_bloom_strength_loc = -1
+        self.u_keyboard_overclock_loc = -1
+        self.u_keyboard_bloom_overclock_loc = -1
         
         self.active_pitches_last_frame = set()
         self.last_visible_notes = None
@@ -221,6 +226,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         
         self.color_button_rect = None
         self.color_mode_button_rect = None
+        self.fun_button_rect = None
         self.glow_button_rect = None
         self.glow_options_button_rect = None
         self.glow_options_panel_rect = None
@@ -229,6 +235,16 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.bloom_checkbox_rect = None
         self.spike_bloom_checkbox_rect = None
         self.glow_options_expanded = False
+        self.fun_options_expanded = False
+        self.fun_options_panel_rect = None
+        self.overclock_mode = False
+        self.overclock_intensity = 0.0
+        self.anesthesia_mode = False
+        self.anesthesia_shrink = 0.0
+        self.anesthesia_remove = 0.0
+        self.anesthesia_checkbox_rect = None
+        self._fps_history = []
+        self._last_fps_time = time.perf_counter()
         self.color_button_size = 32
         self.controls_panel_expanded = False
         self.controls_toggle_rect = None
@@ -274,6 +290,8 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         vis_cfg['show_spike_bloom'] = bool(self.show_spike_bloom)
         vis_cfg['show_key_press_glow'] = bool(self.show_key_press_glow)
         vis_cfg['show_key_light_fade'] = bool(self.show_key_light_fade)
+        vis_cfg['overclock_mode'] = bool(self.overclock_mode)
+        vis_cfg['anesthesia_mode'] = bool(self.anesthesia_mode)
         vis_cfg['seconds_before_cursor'] = float(self.window_seconds)
         vis_cfg['seconds_after_cursor'] = float(self.window_seconds)
         vis_cfg['scroll_speed'] = float(self.scroll_speed)
@@ -462,6 +480,13 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                 
                 view_start = now - self.seconds_before_cursor
                 view_end = now + self.seconds_after_cursor
+
+                if self.anesthesia_mode and self.anesthesia_shrink > 0.001:
+                    window_scale = max(0.03, 1.0 - self.anesthesia_shrink)
+                    half_window = (self.seconds_before_cursor + self.seconds_after_cursor) * 0.5 * window_scale
+                    view_start = now - half_window
+                    view_end = now + half_window
+
                 search_start = view_start - self.max_note_duration
                 start_idx = np.searchsorted(self.render_on_times, search_start, side='left')
                 end_idx = np.searchsorted(self.render_on_times, view_end, side='right')
@@ -511,6 +536,13 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.capacity_warning_visible_count = 0
         view_start = current_time - self.seconds_before_cursor
         view_end = current_time + self.seconds_after_cursor
+
+        if self.anesthesia_mode and self.anesthesia_shrink > 0.001:
+            window_scale = max(0.005, 1.0 - self.anesthesia_shrink)
+            half_window = (self.seconds_before_cursor + self.seconds_after_cursor) * 0.5 * window_scale
+            view_start = current_time - half_window
+            view_end = current_time + half_window
+
         search_start = view_start - self.max_note_duration
         start_idx = np.searchsorted(self.render_on_times, search_start, side='left')
         end_idx = np.searchsorted(self.render_on_times, view_end, side='right')
@@ -828,10 +860,13 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.u_note_texture_loc = glGetUniformLocation(self.shader, "u_note_texture")
         self.u_note_edge_texture_loc = glGetUniformLocation(self.shader, "u_note_edge_texture")
         self.u_glow_strength_loc = glGetUniformLocation(self.shader, "u_glow_strength")
+        self.u_overclock_loc = glGetUniformLocation(self.shader, "u_overclock")
         glUniform1i(self.u_note_texture_loc, 0)
         glUniform1i(self.u_note_edge_texture_loc, 1)
         if self.u_glow_strength_loc != -1:
             glUniform1f(self.u_glow_strength_loc, self.glow_strength)
+        if self.u_overclock_loc != -1:
+            glUniform1f(self.u_overclock_loc, 0.0)
 
         if self.bloom_shader:
             glUseProgram(self.bloom_shader)
@@ -905,6 +940,12 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             keyboard_glow_loc = glGetUniformLocation(self.keyboard_shader, "u_glow_strength")
             if keyboard_glow_loc != -1:
                 glUniform1f(keyboard_glow_loc, self.glow_strength)
+            self.u_keyboard_overclock_loc = glGetUniformLocation(self.keyboard_shader, "u_overclock")
+            if self.u_keyboard_overclock_loc != -1:
+                glUniform1f(self.u_keyboard_overclock_loc, 0.0)
+            keyboard_time_loc = glGetUniformLocation(self.keyboard_shader, "u_time")
+            if keyboard_time_loc != -1:
+                glUniform1f(keyboard_time_loc, 0.0)
             if self.keyboard_bloom_shader:
                 glUseProgram(self.keyboard_bloom_shader)
                 glUniformMatrix4fv(glGetUniformLocation(self.keyboard_bloom_shader, "u_projection"), 1, GL_FALSE, self.projection_matrix.T)
@@ -913,6 +954,12 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                 self.u_keyboard_bloom_strength_loc = glGetUniformLocation(self.keyboard_bloom_shader, "u_bloom_strength")
                 if self.u_keyboard_bloom_strength_loc != -1:
                     glUniform1f(self.u_keyboard_bloom_strength_loc, (self.bloom_base_strength if self.show_bloom else 0.0) * 0.82)
+                self.u_keyboard_bloom_overclock_loc = glGetUniformLocation(self.keyboard_bloom_shader, "u_overclock")
+                if self.u_keyboard_bloom_overclock_loc != -1:
+                    glUniform1f(self.u_keyboard_bloom_overclock_loc, 0.0)
+                keyboard_bloom_time_loc = glGetUniformLocation(self.keyboard_bloom_shader, "u_time")
+                if keyboard_bloom_time_loc != -1:
+                    glUniform1f(keyboard_bloom_time_loc, 0.0)
 
         glUseProgram(0)
         
@@ -922,6 +969,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         
         margin = 10
         self.color_button_rect = pygame.Rect(self.width - self.color_button_size - margin, margin, self.color_button_size, self.color_button_size)
+        self.fun_button_rect = pygame.Rect(self.color_button_rect.x, self.color_button_rect.y + self.color_button_size + 6, self.color_button_size, self.color_button_size)
         self.color_mode_button_rect = pygame.Rect(self.color_button_rect.x - self.color_button_size - 8, margin, self.color_button_size, self.color_button_size)
         self.glow_button_rect = pygame.Rect(self.color_mode_button_rect.x - self.color_button_size - 8, margin, self.color_button_size, self.color_button_size)
         self.glow_options_button_rect = pygame.Rect(self.glow_button_rect.x, self.glow_button_rect.y + self.color_button_size + 6, self.color_button_size, 18)
@@ -937,9 +985,67 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.bloom_checkbox_rect = pygame.Rect(self.glow_options_panel_rect.x + 10, self.glow_options_panel_rect.y + 76, 16, 16)
         self.spike_bloom_checkbox_rect = pygame.Rect(self.glow_options_panel_rect.x + 10, self.glow_options_panel_rect.y + 100, 16, 16)
 
+        fun_panel_width = 190
+        fun_panel_height = 76
+        self.fun_options_panel_rect = pygame.Rect(
+            self.fun_button_rect.x - (fun_panel_width - self.fun_button_rect.width),
+            self.fun_button_rect.y + self.fun_button_rect.height + 6,
+            fun_panel_width, fun_panel_height
+        )
+        self.overclock_checkbox_rect = pygame.Rect(self.fun_options_panel_rect.x + 10, self.fun_options_panel_rect.y + 28, 16, 16)
+        self.anesthesia_checkbox_rect = pygame.Rect(self.fun_options_panel_rect.x + 10, self.fun_options_panel_rect.y + 52, 16, 16)
+
     def draw(self, current_time, present=True):
         """Draw the latest buffer provided by the data thread."""
         self.last_frame_time = current_time
+        now = time.perf_counter()
+        dt = now - self._last_fps_time
+        self._last_fps_time = now
+        if dt > 0:
+            self._fps_history.append(dt)
+            if len(self._fps_history) > 60:
+                self._fps_history.pop(0)
+        if self.overclock_mode:
+            if len(self._fps_history) >= 2:
+                avg_dt = sum(self._fps_history) / len(self._fps_history)
+                fps = 1.0 / avg_dt if avg_dt > 0 else 60.0
+                fps_intensity = max(0.0, min(1.0, (60.0 - fps) / 59.0))
+            else:
+                fps_intensity = 0.0
+            nps = self.live_nps_value
+            if nps < 10000:
+                nps_intensity = 0.0
+            elif nps < 50000:
+                nps_intensity = (nps - 10000) / 40000.0 * 0.1
+            elif nps < 200000:
+                nps_intensity = 0.1 + (nps - 50000) / 150000.0 * 0.2
+            else:
+                nps_intensity = 0.3
+            self.overclock_intensity = min(1.0, 0.05 + fps_intensity + nps_intensity)
+        elif not self.overclock_mode:
+            self.overclock_intensity = 0.0
+        if self.anesthesia_mode:
+            nps = self.live_nps_value
+            if nps < 50000:
+                self.anesthesia_shrink = 0.0
+                self.anesthesia_remove = 0.0
+            elif nps < 150000:
+                raw = (nps - 50000) / 100000.0
+                self.anesthesia_shrink = raw * raw * 0.7
+                self.anesthesia_remove = 0.0
+            elif nps < 200000:
+                self.anesthesia_shrink = 0.7 + (nps - 150000) / 50000.0 * 0.15
+                self.anesthesia_remove = min(1.0, (nps - 150000) / 50000.0)
+            elif nps < 1000000:
+                raw = (nps - 200000) / 800000.0
+                self.anesthesia_shrink = 0.85 + raw * 0.15
+                self.anesthesia_remove = 1.0
+            else:
+                self.anesthesia_shrink = 1.0
+                self.anesthesia_remove = 1.0
+        else:
+            self.anesthesia_shrink = 0.0
+            self.anesthesia_remove = 0.0
         self._init_slider_geometry()
         self._upload_pending_midi_data()
         if self.show_glow and (self.show_key_press_glow or self.show_key_light_fade):
@@ -1058,6 +1164,13 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             window_start = current_time - self.seconds_before_cursor
             window_end = current_time + self.seconds_after_cursor
 
+            if self.anesthesia_mode and self.anesthesia_shrink > 0.001:
+                window_scale = max(0.03, 1.0 - self.anesthesia_shrink)
+                mid = current_time
+                half_window = (self.seconds_before_cursor + self.seconds_after_cursor) * 0.5 * window_scale
+                window_start = mid - half_window
+                window_end = mid + half_window
+
             glEnable(GL_DEPTH_TEST)
             glDepthMask(GL_TRUE)
             glUseProgram(self.shader)
@@ -1067,6 +1180,8 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             glUniform1f(glGetUniformLocation(self.shader, "u_guide_line_y"), self._get_guide_line_y())
             glUniform1f(self.u_window_start_loc, window_start)
             glUniform1f(self.u_window_end_loc, window_end)
+            if self.u_overclock_loc != -1:
+                glUniform1f(self.u_overclock_loc, self.overclock_intensity)
 
             glActiveTexture(GL_TEXTURE0)
             glBindTexture(GL_TEXTURE_2D, self.note_texture)

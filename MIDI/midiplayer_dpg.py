@@ -112,7 +112,7 @@ def _build_parser_result_payload(parser, use_disk_backing=False, result_queue=No
 def run_parser_process(filepath, result_queue, fallback_event_threshold=0):
     try:
         parser = MidiParser(filepath)
-        total_events = parser.count_total_events()
+        total_events = parser.count_total_events(progress_queue=result_queue)
         result_queue.put(("total_events", total_events))
         parser.parse(
             result_queue,
@@ -1566,6 +1566,7 @@ class DpgMidiPlayerApp(
         dpg.configure_item("load_button", enabled=False)
         self.loading_total_events = 0
         self.loading_started_at = time.monotonic()
+        self.loading_has_real_progress = False
         self._set_parse_progress_visible(True)
         self._update_parse_progress(0.0, "Counting...", "Counting events...")
         self.loading_visible = True
@@ -1595,10 +1596,10 @@ class DpgMidiPlayerApp(
     def _poll_parser(self):
         if self._parse_normalize_thread and not self._parse_normalize_thread.is_alive():
             self._parse_normalize_thread = None
-        if self.loading_visible and self.loading_total_events <= 0:
+        if self.loading_visible and self.loading_total_events <= 0 and not self.loading_has_real_progress:
             pulse = (time.monotonic() - self.loading_started_at) % 1.0
             pulse_value = 0.15 + (0.7 * pulse)
-            self._update_parse_progress(pulse_value, "Counting...", "Counting events...")
+            self._update_parse_progress(pulse_value, "Counting...", "Scanning MIDI file...")
         try:
             for status, payload in self.controller.poll_parser_messages():
                 if status == "total_events":
@@ -1607,6 +1608,7 @@ class DpgMidiPlayerApp(
                         self._update_parse_progress(0.0, "0.0%", f"Found {int(payload or 0):,} events. Parsing...")
                 elif status == "progress":
                     if self.loading_visible:
+                        self.loading_has_real_progress = True
                         progress_payload = payload
                         if isinstance(progress_payload, dict):
                             if "fraction" in progress_payload:
@@ -1657,8 +1659,11 @@ class DpgMidiPlayerApp(
 
     def _normalize_parse_in_thread(self, payload):
         try:
+            def _normalizing_progress(fraction, overlay, detail):
+                self._queue_ui(self._update_parse_progress, fraction, overlay, detail, "Normalizing...")
             self.controller.normalize_parsed_payload(
-                payload, start_padding=3.0, end_padding=3.0
+                payload, start_padding=3.0, end_padding=3.0,
+                progress_callback=_normalizing_progress,
             )
             self.controller.clear_parse_job()
             self._queue_ui(self._on_parse_normalized)
