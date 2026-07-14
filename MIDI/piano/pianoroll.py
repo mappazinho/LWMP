@@ -148,6 +148,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.show_key_light_fade = bool(vis_cfg.get('show_key_light_fade', False))
         self.overclock_mode = bool(vis_cfg.get('overclock_mode', False))
         self.anesthesia_mode = bool(vis_cfg.get('anesthesia_mode', False))
+        self.hide_buttons = bool(vis_cfg.get('hide_buttons', False))
         self.glow_cull_threshold = int(vis_cfg.get('glow_cull_threshold', 128))
         self.glow_fade_duration = 0.1
         self.nps_spikes = []
@@ -292,6 +293,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         vis_cfg['show_key_light_fade'] = bool(self.show_key_light_fade)
         vis_cfg['overclock_mode'] = bool(self.overclock_mode)
         vis_cfg['anesthesia_mode'] = bool(self.anesthesia_mode)
+        vis_cfg['hide_buttons'] = bool(self.hide_buttons)
         vis_cfg['seconds_before_cursor'] = float(self.window_seconds)
         vis_cfg['seconds_after_cursor'] = float(self.window_seconds)
         vis_cfg['scroll_speed'] = float(self.scroll_speed)
@@ -482,10 +484,12 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                 view_end = now + self.seconds_after_cursor
 
                 if self.anesthesia_mode and self.anesthesia_shrink > 0.001:
+                    guide_y = self._get_guide_line_y()
+                    full_after = max(0.1, (self.height - guide_y) / max(1.0, self.scroll_speed))
+                    full_before = max(0.1, (guide_y - 20.0) / max(1.0, self.scroll_speed))
                     window_scale = max(0.03, 1.0 - self.anesthesia_shrink)
-                    half_window = (self.seconds_before_cursor + self.seconds_after_cursor) * 0.5 * window_scale
-                    view_start = now - half_window
-                    view_end = now + half_window
+                    view_start = now - full_before * window_scale
+                    view_end = now + full_after * window_scale
 
                 search_start = view_start - self.max_note_duration
                 start_idx = np.searchsorted(self.render_on_times, search_start, side='left')
@@ -538,10 +542,12 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         view_end = current_time + self.seconds_after_cursor
 
         if self.anesthesia_mode and self.anesthesia_shrink > 0.001:
+            guide_y = self._get_guide_line_y()
+            full_after = max(0.1, (self.height - guide_y) / max(1.0, self.scroll_speed))
+            full_before = max(0.1, (guide_y - 20.0) / max(1.0, self.scroll_speed))
             window_scale = max(0.005, 1.0 - self.anesthesia_shrink)
-            half_window = (self.seconds_before_cursor + self.seconds_after_cursor) * 0.5 * window_scale
-            view_start = current_time - half_window
-            view_end = current_time + half_window
+            view_start = current_time - full_before * window_scale
+            view_end = current_time + full_after * window_scale
 
         search_start = view_start - self.max_note_duration
         start_idx = np.searchsorted(self.render_on_times, search_start, side='left')
@@ -1165,11 +1171,12 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             window_end = current_time + self.seconds_after_cursor
 
             if self.anesthesia_mode and self.anesthesia_shrink > 0.001:
+                guide_y = self._get_guide_line_y()
+                full_after = max(0.1, (self.height - guide_y) / max(1.0, self.scroll_speed))
+                full_before = max(0.1, (guide_y - 20.0) / max(1.0, self.scroll_speed))
                 window_scale = max(0.03, 1.0 - self.anesthesia_shrink)
-                mid = current_time
-                half_window = (self.seconds_before_cursor + self.seconds_after_cursor) * 0.5 * window_scale
-                window_start = mid - half_window
-                window_end = mid + half_window
+                window_start = current_time - full_before * window_scale
+                window_end = current_time + full_after * window_scale
 
             glEnable(GL_DEPTH_TEST)
             glDepthMask(GL_TRUE)

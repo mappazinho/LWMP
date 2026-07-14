@@ -10,6 +10,8 @@ class OverlayMixin:
     """UI overlay drawing methods for PianoRoll: stats, sliders, buttons, tooltips, hover."""
 
     def _iter_hover_targets(self):
+        if self.hide_buttons:
+            return
         if (not self.controls_panel_expanded) and self.controls_toggle_rect:
             yield ("controls_toggle", self.controls_toggle_rect, "Open control panel")
         if self.controls_panel_expanded and self.controls_close_rect:
@@ -211,72 +213,73 @@ class OverlayMixin:
 
     def handle_slider_event(self, event):
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-            if (not self.controls_panel_expanded) and self.controls_toggle_rect and self.controls_toggle_rect.collidepoint(event.pos):
-                self.controls_panel_expanded = not self.controls_panel_expanded
-                self.slider_dragging = False
-                self.scroll_slider_dragging = False
-                self.fps_slider_dragging = False
-                return
-            if self.controls_panel_expanded and self.controls_close_rect and self.controls_close_rect.collidepoint(event.pos):
-                self.controls_panel_expanded = False
-                self.slider_dragging = False
-                self.scroll_slider_dragging = False
-                self.fps_slider_dragging = False
-                return
-            if self.glow_options_button_rect and self.glow_options_button_rect.collidepoint(event.pos):
-                self.glow_options_expanded = not self.glow_options_expanded
-                return
-            if self.glow_options_expanded and self.glow_options_checkbox_rect and self.glow_options_checkbox_rect.collidepoint(event.pos):
-                self.show_key_press_glow = not self.show_key_press_glow
-                if not self.show_key_press_glow and not self.show_key_light_fade:
-                    self.glow_trails.clear()
-                self._save_visualizer_config()
-                return
-            if self.glow_options_expanded and self.key_light_fade_checkbox_rect and self.key_light_fade_checkbox_rect.collidepoint(event.pos):
-                self.show_key_light_fade = not self.show_key_light_fade
-                if not self.show_key_press_glow and not self.show_key_light_fade:
-                    self.glow_trails.clear()
-                self._save_visualizer_config()
-                return
-            if self.glow_options_expanded and self.bloom_checkbox_rect and self.bloom_checkbox_rect.collidepoint(event.pos):
-                self.show_bloom = not self.show_bloom
-                self.bloom_strength = self.bloom_base_strength if self.show_bloom else 0.0
-                self.last_bloom_update_time = time.perf_counter()
-                if self.bloom_shader and self.u_bloom_strength_loc != -1:
-                    glUseProgram(self.bloom_shader)
-                    glUniform1f(self.u_bloom_strength_loc, self.bloom_strength)
-                    glUseProgram(0)
-                self._save_visualizer_config()
-                return
-            if self.glow_options_expanded and self.spike_bloom_checkbox_rect and self.spike_bloom_checkbox_rect.collidepoint(event.pos):
-                self.show_spike_bloom = not self.show_spike_bloom
-                self._save_visualizer_config()
-                return
-            if self.color_mode_button_rect and self.color_mode_button_rect.collidepoint(event.pos):
-                self.toggle_note_color_mode()
-                return
-            if self.glow_button_rect and self.glow_button_rect.collidepoint(event.pos):
-                self.toggle_glow()
-                return
-            if self.color_button_rect and self.color_button_rect.collidepoint(event.pos):
-                self.randomize_colors()
-                return
-            if self.fun_button_rect and self.fun_button_rect.collidepoint(event.pos):
-                self.fun_options_expanded = not self.fun_options_expanded
-                return
-            if self.fun_options_expanded and self.overclock_checkbox_rect and self.overclock_checkbox_rect.collidepoint(event.pos):
-                self.overclock_mode = not self.overclock_mode
-                if not self.overclock_mode:
-                    self.overclock_intensity = 0.0
-                self._save_visualizer_config()
-                return
-            if self.fun_options_expanded and self.anesthesia_checkbox_rect and self.anesthesia_checkbox_rect.collidepoint(event.pos):
-                self.anesthesia_mode = not self.anesthesia_mode
-                if not self.anesthesia_mode:
-                    self.anesthesia_shrink = 0.0
-                    self.anesthesia_remove = 0.0
-                self._save_visualizer_config()
-                return
+            if not self.hide_buttons:
+                if (not self.controls_panel_expanded) and self.controls_toggle_rect and self.controls_toggle_rect.collidepoint(event.pos):
+                    self.controls_panel_expanded = not self.controls_panel_expanded
+                    self.slider_dragging = False
+                    self.scroll_slider_dragging = False
+                    self.fps_slider_dragging = False
+                    return
+                if self.controls_panel_expanded and self.controls_close_rect and self.controls_close_rect.collidepoint(event.pos):
+                    self.controls_panel_expanded = False
+                    self.slider_dragging = False
+                    self.scroll_slider_dragging = False
+                    self.fps_slider_dragging = False
+                    return
+                if self.glow_options_button_rect and self.glow_options_button_rect.collidepoint(event.pos):
+                    self.glow_options_expanded = not self.glow_options_expanded
+                    return
+                if self.glow_options_expanded and self.glow_options_checkbox_rect and self.glow_options_checkbox_rect.collidepoint(event.pos):
+                    self.show_key_press_glow = not self.show_key_press_glow
+                    if not self.show_key_press_glow and not self.show_key_light_fade:
+                        self.glow_trails.clear()
+                    self._save_visualizer_config()
+                    return
+                if self.glow_options_expanded and self.key_light_fade_checkbox_rect and self.key_light_fade_checkbox_rect.collidepoint(event.pos):
+                    self.show_key_light_fade = not self.show_key_light_fade
+                    if not self.show_key_press_glow and not self.show_key_light_fade:
+                        self.glow_trails.clear()
+                    self._save_visualizer_config()
+                    return
+                if self.glow_options_expanded and self.bloom_checkbox_rect and self.bloom_checkbox_rect.collidepoint(event.pos):
+                    self.show_bloom = not self.show_bloom
+                    self.bloom_strength = self.bloom_base_strength if self.show_bloom else 0.0
+                    self.last_bloom_update_time = time.perf_counter()
+                    if self.bloom_shader and self.u_bloom_strength_loc != -1:
+                        glUseProgram(self.bloom_shader)
+                        glUniform1f(self.u_bloom_strength_loc, self.bloom_strength)
+                        glUseProgram(0)
+                    self._save_visualizer_config()
+                    return
+                if self.glow_options_expanded and self.spike_bloom_checkbox_rect and self.spike_bloom_checkbox_rect.collidepoint(event.pos):
+                    self.show_spike_bloom = not self.show_spike_bloom
+                    self._save_visualizer_config()
+                    return
+                if self.color_mode_button_rect and self.color_mode_button_rect.collidepoint(event.pos):
+                    self.toggle_note_color_mode()
+                    return
+                if self.glow_button_rect and self.glow_button_rect.collidepoint(event.pos):
+                    self.toggle_glow()
+                    return
+                if self.color_button_rect and self.color_button_rect.collidepoint(event.pos):
+                    self.randomize_colors()
+                    return
+                if self.fun_button_rect and self.fun_button_rect.collidepoint(event.pos):
+                    self.fun_options_expanded = not self.fun_options_expanded
+                    return
+                if self.fun_options_expanded and self.overclock_checkbox_rect and self.overclock_checkbox_rect.collidepoint(event.pos):
+                    self.overclock_mode = not self.overclock_mode
+                    if not self.overclock_mode:
+                        self.overclock_intensity = 0.0
+                    self._save_visualizer_config()
+                    return
+                if self.fun_options_expanded and self.anesthesia_checkbox_rect and self.anesthesia_checkbox_rect.collidepoint(event.pos):
+                    self.anesthesia_mode = not self.anesthesia_mode
+                    if not self.anesthesia_mode:
+                        self.anesthesia_shrink = 0.0
+                        self.anesthesia_remove = 0.0
+                    self._save_visualizer_config()
+                    return
             if self.controls_panel_expanded and self.slider_rect and self.slider_rect.collidepoint(event.pos):
                 self.slider_dragging = True
                 self._update_slider_from_pos(event.pos[0])
@@ -460,7 +463,10 @@ class OverlayMixin:
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
-        glColor4f(0.03, 0.03, 0.05, 0.62)
+        if self.stats_modification_enabled:
+            glColor4f(0.12, 0.03, 0.05, 0.62)
+        else:
+            glColor4f(0.03, 0.03, 0.05, 0.62)
         glBegin(GL_QUADS)
         glVertex2f(box_x, box_y); glVertex2f(box_x + box_w, box_y)
         glVertex2f(box_x + box_w, box_y + box_h); glVertex2f(box_x, box_y + box_h)
@@ -577,7 +583,7 @@ class OverlayMixin:
         glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
         self._update_hover_ui_state()
         handle_half = 6
-        if self.controls_panel_expanded and self.controls_panel_rect:
+        if self.controls_panel_expanded and self.controls_panel_rect and not self.hide_buttons:
             px, py, pw, ph = self.controls_panel_rect
             glColor4f(0.08, 0.08, 0.11, 0.88)
             glBegin(GL_QUADS)
@@ -591,7 +597,7 @@ class OverlayMixin:
             glVertex2f(px + pw, py + ph); glVertex2f(px, py + ph)
             glEnd()
 
-        if (not self.controls_panel_expanded) and self.controls_toggle_rect:
+        if (not self.controls_panel_expanded) and self.controls_toggle_rect and not self.hide_buttons:
             bx, by = self.controls_toggle_rect.x, self.controls_toggle_rect.y
             bs = self.controls_toggle_rect.width
             glColor4f(0.10, 0.10, 0.14, 0.82)
@@ -615,7 +621,7 @@ class OverlayMixin:
             glEnd()
             self._draw_hover_highlight(self.controls_toggle_rect, self._get_hover_alpha("controls_toggle"))
 
-        if self.controls_panel_expanded and self.controls_panel_rect:
+        if self.controls_panel_expanded and self.controls_panel_rect and not self.hide_buttons:
             if self.controls_close_rect:
                 bx, by = self.controls_close_rect.x, self.controls_close_rect.y
                 bs = self.controls_close_rect.width
@@ -677,7 +683,7 @@ class OverlayMixin:
                 glColor3f(0.95, 0.95, 0.95)
                 glBegin(GL_QUADS); glVertex2f(hx3 - handle_half, hy3 - handle_half); glVertex2f(hx3 + handle_half, hy3 - handle_half); glVertex2f(hx3 + handle_half, hy3 + handle_half); glVertex2f(hx3 - handle_half, hy3 + handle_half); glEnd()
 
-        if self.color_button_rect:
+        if self.color_button_rect and not self.hide_buttons:
             bx, by = self.color_button_rect.x, self.color_button_rect.y
             bs = self.color_button_size
             glColor4f(0.15, 0.15, 0.2, 0.7)
@@ -724,7 +730,7 @@ class OverlayMixin:
             glEnd()
             self._draw_hover_highlight(self.color_button_rect, self._get_hover_alpha("color_button"))
 
-        if self.fun_button_rect:
+        if self.fun_button_rect and not self.hide_buttons:
             bx, by = self.fun_button_rect.x, self.fun_button_rect.y
             bs = self.color_button_size
             glColor4f(0.15, 0.15, 0.2, 0.7)
@@ -771,7 +777,7 @@ class OverlayMixin:
             glEnd()
             self._draw_hover_highlight(self.fun_button_rect, self._get_hover_alpha("fun_button"))
 
-        if self.color_mode_button_rect:
+        if self.color_mode_button_rect and not self.hide_buttons:
             bx, by = self.color_mode_button_rect.x, self.color_mode_button_rect.y
             bs = self.color_button_size
             if self.note_color_mode == "channel":
@@ -793,7 +799,7 @@ class OverlayMixin:
             self._draw_text_overlay(label, bx + 11, by + 6, color=(240, 243, 248), alpha=0.98)
             self._draw_hover_highlight(self.color_mode_button_rect, self._get_hover_alpha("color_mode_button"))
 
-        if self.glow_button_rect:
+        if self.glow_button_rect and not self.hide_buttons:
             bx, by = self.glow_button_rect.x, self.glow_button_rect.y
             bs = self.color_button_size
             if self.show_glow:
@@ -834,7 +840,7 @@ class OverlayMixin:
             glEnd()
             self._draw_hover_highlight(self.glow_button_rect, self._get_hover_alpha("glow_button"))
 
-        if self.glow_options_button_rect:
+        if self.glow_options_button_rect and not self.hide_buttons:
             bx, by = self.glow_options_button_rect.x, self.glow_options_button_rect.y
             bw, bh = self.glow_options_button_rect.width, self.glow_options_button_rect.height
             glColor4f(0.12, 0.12, 0.16, 0.82)
@@ -856,7 +862,7 @@ class OverlayMixin:
             glEnd()
             self._draw_hover_highlight(self.glow_options_button_rect, self._get_hover_alpha("glow_options"))
 
-        if self.glow_options_expanded and self.glow_options_panel_rect:
+        if self.glow_options_expanded and self.glow_options_panel_rect and not self.hide_buttons:
             px, py, pw, ph = self.glow_options_panel_rect
             glColor4f(0.08, 0.08, 0.11, 0.92)
             glBegin(GL_QUADS)
@@ -905,7 +911,7 @@ class OverlayMixin:
                     glEnd()
                 self._draw_hover_highlight(cb_rect, self._get_hover_alpha(hover_id))
 
-        if self.fun_options_expanded and self.fun_options_panel_rect:
+        if self.fun_options_expanded and self.fun_options_panel_rect and not self.hide_buttons:
             px, py, pw, ph = self.fun_options_panel_rect
             glColor4f(0.08, 0.08, 0.11, 0.92)
             glBegin(GL_QUADS)

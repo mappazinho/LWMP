@@ -673,6 +673,12 @@ class DpgMidiPlayerApp(
                         default_value=bool(self._gui_cfg().get("show_pianoroll_stats_overlay", False)),
                         callback=self.on_pianoroll_stats_overlay_toggle,
                     )
+                    dpg.add_checkbox(
+                        tag="pianoroll_hide_buttons_checkbox",
+                        label="Hide all piano roll buttons",
+                        default_value=bool(self._gui_cfg().get("hide_buttons", False)),
+                        callback=self._on_hide_buttons_toggle,
+                    )
                     with dpg.table(header_row=False, resizable=False, policy=dpg.mvTable_SizingStretchProp, borders_innerV=True):
                         dpg.add_table_column(init_width_or_weight=1.0)
                         dpg.add_table_column(init_width_or_weight=1.0)

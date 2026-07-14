@@ -23,6 +23,14 @@ class PianoRollMixin:
         if self.piano_roll is not None:
             self.piano_roll.live_show_stats_overlay = enabled
 
+    def _on_hide_buttons_toggle(self, sender, app_data):
+        enabled = bool(app_data)
+        self._gui_cfg()["hide_buttons"] = enabled
+        self._save_config(self._CONFIG)
+        if self.piano_roll is not None:
+            self.piano_roll.hide_buttons = enabled
+            self.piano_roll._save_visualizer_config()
+
 
     def show_piano_roll_dialog(self):
         if self.piano_roll and self.piano_roll.app_running.is_set():
@@ -45,6 +53,7 @@ class PianoRollMixin:
         self.last_piano_roll_res = (width, height)
         self.piano_roll = self._PianoRoll(width, height, self._CONFIG)
         self.piano_roll.live_show_stats_overlay = bool(self._gui_cfg().get("show_pianoroll_stats_overlay", False))
+        self.piano_roll.hide_buttons = bool(self._gui_cfg().get("hide_buttons", False))
         self.piano_roll.set_live_stats(0, 0, 0.0, 0)
         if self.controller.parsed_midi is not None:
             self.piano_roll.set_stats_context(

@@ -69,22 +69,7 @@ void main() {
         float mag = global_intensity * mix(15.0, 120.0, hash(vseed * 3.7 + t2));
         final_pos += vec2(dx, dy) * mag;
 
-        float slot = floor(u_time * 3.0);
-        float note_id = hash(seed * 13.71);
-        float target_id = hash(slot * 7.31);
-        float is_corrupted = 1.0 - smoothstep(0.0, 0.003, abs(note_id - target_id));
-
-        float slot_intensity = is_corrupted * u_overclock;
-
-        float sdx = (hash(vseed * 4.1 + slot) - 0.5) * 2.0;
-        float sdy = (hash(vseed * 5.3 + slot * 1.3) - 0.5) * 2.0;
-        float slot_mag = slot_intensity * mix(50.0, 350.0, hash(vseed * 6.7 + slot * 0.7));
-        final_pos += vec2(sdx, sdy) * slot_mag;
-
-        float warp_pull = slot_intensity * pos.x * pos.y;
-        final_pos = mix(final_pos, vec2(0.0, 0.0), warp_pull * mix(0.5, 1.0, hash(seed * 9.1 + slot)));
-
-        v_overclock_corrupt = max(global_intensity * 0.4, slot_intensity);
+        v_overclock_corrupt = global_intensity * 0.4;
     } else {
         v_overclock_corrupt = 0.0;
     }
@@ -322,17 +307,6 @@ void main() {
         float mag = global_intensity * mix(8.0, 80.0, kb_hash(vseed * 3.7 + t0));
         final_pos += vec2(dx, dy) * mag;
 
-        float slot = floor(u_time * 3.0);
-        float key_id = kb_hash(seed * 13.71);
-        float target_id = kb_hash(slot * 7.31 + 0.5);
-        float is_corrupted = 1.0 - smoothstep(0.0, 0.005, abs(key_id - target_id));
-
-        float slot_intensity = is_corrupted * u_overclock;
-
-        float sdx = (kb_hash(vseed * 4.1 + slot) - 0.5) * 2.0;
-        float sdy = (kb_hash(vseed * 5.3 + slot * 1.3) - 0.5) * 2.0;
-        float slot_mag = slot_intensity * mix(15.0, 150.0, kb_hash(vseed * 6.7 + slot * 0.7));
-        final_pos += vec2(sdx, sdy) * slot_mag;
     }
 
     gl_Position = u_projection * vec4(final_pos, 0.0, 1.0);
@@ -442,17 +416,6 @@ void main() {
         float mag = global_intensity * mix(8.0, 80.0, kb_bloom_hash(vseed * 3.7 + t0));
         final_pos += vec2(dx, dy) * mag;
 
-        float slot = floor(u_time * 3.0);
-        float key_id = kb_bloom_hash(seed * 13.71);
-        float target_id = kb_bloom_hash(slot * 7.31 + 0.5);
-        float is_corrupted = 1.0 - smoothstep(0.0, 0.005, abs(key_id - target_id));
-
-        float slot_intensity = is_corrupted * u_overclock;
-
-        float sdx = (kb_bloom_hash(vseed * 4.1 + slot) - 0.5) * 2.0;
-        float sdy = (kb_bloom_hash(vseed * 5.3 + slot * 1.3) - 0.5) * 2.0;
-        float slot_mag = slot_intensity * mix(15.0, 150.0, kb_bloom_hash(vseed * 6.7 + slot * 0.7));
-        final_pos += vec2(sdx, sdy) * slot_mag;
     }
 
     gl_Position = u_projection * vec4(final_pos, 0.0, 1.0);
