@@ -220,6 +220,7 @@ class SkinBrowser(PianoRoll):
             self._update_glow_cull()
         else:
             self.glow_trails.clear()
+            self._split_fade_trails.clear()
 
         if self.all_notes_gpu is not None and len(self.all_notes_gpu) > 0:
             self.notes_to_draw = len(self.all_notes_gpu)

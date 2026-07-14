@@ -149,10 +149,15 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.overclock_mode = bool(vis_cfg.get('overclock_mode', False))
         self.anesthesia_mode = bool(vis_cfg.get('anesthesia_mode', False))
         self.hide_buttons = bool(vis_cfg.get('hide_buttons', False))
+        self.renderer_mode = str(vis_cfg.get('renderer_mode', 'default'))
+        self.renderer_modes = ['default', 'channel_split']
+        self.active_channels = []
+        self.num_active_lanes = 0
         self.glow_cull_threshold = int(vis_cfg.get('glow_cull_threshold', 128))
         self.glow_fade_duration = 0.1
         self.nps_spikes = []
         self._spike_rank_map = {}
+        self._split_fade_trails = {}
         self.spike_bloom_rise_duration = 1.75
         self.spike_bloom_fall_duration = 1.75
         self.spike_bloom_min_boost = 0.14
@@ -231,6 +236,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.glow_button_rect = None
         self.glow_options_button_rect = None
         self.glow_options_panel_rect = None
+        self.renderer_mode_button_rect = None
         self.glow_options_checkbox_rect = None
         self.key_light_fade_checkbox_rect = None
         self.bloom_checkbox_rect = None
@@ -294,6 +300,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         vis_cfg['overclock_mode'] = bool(self.overclock_mode)
         vis_cfg['anesthesia_mode'] = bool(self.anesthesia_mode)
         vis_cfg['hide_buttons'] = bool(self.hide_buttons)
+        vis_cfg['renderer_mode'] = str(self.renderer_mode)
         vis_cfg['seconds_before_cursor'] = float(self.window_seconds)
         vis_cfg['seconds_after_cursor'] = float(self.window_seconds)
         vis_cfg['scroll_speed'] = float(self.scroll_speed)
@@ -408,8 +415,11 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         """Prepare note data for the render thread."""
         self.get_current_time = get_current_time_func
         self.glow_trails.clear()
+        self._split_fade_trails.clear()
         self.last_glow_time = None
         self.base_render_notes, self.base_render_on_times = _build_base_render_data(all_notes_gpu)
+        self.active_channels = sorted(set(int(c) for c in np.unique(self.base_render_notes['padding'])))
+        self.num_active_lanes = len(self.active_channels)
         self.render_notes_by_mode = {}
         self.render_on_times_by_mode = {}
         active_mode = "channel" if self.note_color_mode == "channel" else "track"
@@ -705,7 +715,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         
         glEnableVertexAttribArray(note_times_loc); glVertexAttribPointer(note_times_loc, 2, GL_FLOAT, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(0)); glVertexAttribDivisor(note_times_loc, 1)
         glEnableVertexAttribArray(note_info_loc)
-        glVertexAttribPointer(note_info_loc, 3, GL_UNSIGNED_BYTE, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(8))
+        glVertexAttribPointer(note_info_loc, 4, GL_UNSIGNED_BYTE, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(8))
         glVertexAttribDivisor(note_info_loc, 1)
         glEnableVertexAttribArray(note_depth_loc)
         glVertexAttribPointer(note_depth_loc, 1, GL_FLOAT, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(12))
@@ -725,7 +735,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             glVertexAttribPointer(bloom_note_times_loc, 2, GL_FLOAT, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(0))
             glVertexAttribDivisor(bloom_note_times_loc, 1)
             glEnableVertexAttribArray(bloom_note_info_loc)
-            glVertexAttribPointer(bloom_note_info_loc, 3, GL_UNSIGNED_BYTE, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(8))
+            glVertexAttribPointer(bloom_note_info_loc, 4, GL_UNSIGNED_BYTE, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(8))
             glVertexAttribDivisor(bloom_note_info_loc, 1)
 
         if self.screen_bloom_shader:
@@ -874,6 +884,12 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         if self.u_overclock_loc != -1:
             glUniform1f(self.u_overclock_loc, 0.0)
 
+        self.u_renderer_mode_loc = glGetUniformLocation(self.shader, "u_renderer_mode")
+        self.u_render_channel_loc = glGetUniformLocation(self.shader, "u_render_channel")
+        self.u_lane_height_loc = glGetUniformLocation(self.shader, "u_lane_height")
+        self.u_lane_guide_ratio_loc = glGetUniformLocation(self.shader, "u_lane_guide_ratio")
+        self.u_channel_to_lane_loc = glGetUniformLocation(self.shader, "u_channel_to_lane")
+
         if self.bloom_shader:
             glUseProgram(self.bloom_shader)
             glUniformMatrix4fv(glGetUniformLocation(self.bloom_shader, "u_projection"), 1, GL_FALSE, self.projection_matrix.T)
@@ -896,6 +912,13 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                 glUniform1f(self.u_bloom_radius_loc, self.bloom_radius)
             if self.u_bloom_strength_loc != -1:
                 glUniform1f(self.u_bloom_strength_loc, self.bloom_strength)
+
+            self.u_bloom_renderer_mode_loc = glGetUniformLocation(self.bloom_shader, "u_renderer_mode")
+            self.u_bloom_render_channel_loc = glGetUniformLocation(self.bloom_shader, "u_render_channel")
+            self.u_bloom_lane_height_loc = glGetUniformLocation(self.bloom_shader, "u_lane_height")
+            self.u_bloom_lane_guide_ratio_loc = glGetUniformLocation(self.bloom_shader, "u_lane_guide_ratio")
+            self.u_bloom_channel_to_lane_loc = glGetUniformLocation(self.bloom_shader, "u_channel_to_lane")
+            glUniform1f(glGetUniformLocation(self.bloom_shader, "u_height"), float(self.height))
 
         if self.screen_bloom_shader:
             glUseProgram(self.screen_bloom_shader)
@@ -1001,6 +1024,10 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.overclock_checkbox_rect = pygame.Rect(self.fun_options_panel_rect.x + 10, self.fun_options_panel_rect.y + 28, 16, 16)
         self.anesthesia_checkbox_rect = pygame.Rect(self.fun_options_panel_rect.x + 10, self.fun_options_panel_rect.y + 52, 16, 16)
 
+        rm_label = "Channel Split" if self.renderer_mode == 'channel_split' else "Default"
+        rm_w = max(100, len(rm_label) * 8 + 20)
+        self.renderer_mode_button_rect = pygame.Rect(self.width // 2 - rm_w // 2, 6, rm_w, 22)
+
     def draw(self, current_time, present=True):
         """Draw the latest buffer provided by the data thread."""
         self.last_frame_time = current_time
@@ -1059,6 +1086,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             self._update_glow_cull()
         else:
             self.glow_trails.clear()
+            self._split_fade_trails.clear()
 
         if self.export_mode:
             visible_notes, count = self._slice_visible_notes_for_time(current_time)
@@ -1078,6 +1106,8 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                     glBufferSubData(GL_ARRAY_BUFFER, 0, visible_notes.nbytes, visible_notes)
             except queue.Empty:
                 pass
+
+        is_channel_split = self.renderer_mode == 'channel_split' and len(self.active_channels) > 0
 
         if self.show_bloom and self.screen_bloom_shader and self.scene_fbo:
             glBindFramebuffer(GL_FRAMEBUFFER, self.scene_fbo)
@@ -1166,6 +1196,8 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         glClearColor(self.background_color[0], self.background_color[1], self.background_color[2], 1.0)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
+        is_channel_split = self.renderer_mode == 'channel_split' and len(self.active_channels) > 0
+
         if self.notes_to_draw > 0 and self.render_notes_array is not None:
             window_start = current_time - self.seconds_before_cursor
             window_end = current_time + self.seconds_after_cursor
@@ -1184,33 +1216,169 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
 
             glUniform1f(self.u_time_loc, current_time)
             glUniform1f(self.u_scroll_speed_loc, self.scroll_speed)
-            glUniform1f(glGetUniformLocation(self.shader, "u_guide_line_y"), self._get_guide_line_y())
             glUniform1f(self.u_window_start_loc, window_start)
             glUniform1f(self.u_window_end_loc, window_end)
             if self.u_overclock_loc != -1:
-                glUniform1f(self.u_overclock_loc, self.overclock_intensity)
+                glUniform1f(self.u_overclock_loc, self.overclock_intensity if not is_channel_split else 0.0)
 
-            glActiveTexture(GL_TEXTURE0)
-            glBindTexture(GL_TEXTURE_2D, self.note_texture)
-            glActiveTexture(GL_TEXTURE1)
-            glBindTexture(GL_TEXTURE_2D, self.note_edge_texture)
+            active_ch = np.zeros(16, dtype=np.int32)
+            for ch in self.active_channels:
+                if 0 <= ch < 16:
+                    active_ch[ch] = 1
 
-            glBindVertexArray(self.vao)
-            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-            glDrawArraysInstanced(GL_TRIANGLES, 0, 6, self.notes_to_draw)
+            channel_to_lane = np.full(16, -1, dtype=np.int32)
+            for lane_idx, ch in enumerate(self.active_channels):
+                if 0 <= ch < 16:
+                    channel_to_lane[ch] = lane_idx
 
-            glBindVertexArray(0)
-            glUseProgram(0)
-            glBindBuffer(GL_ARRAY_BUFFER, 0)
-            glDisable(GL_DEPTH_TEST)
+            if is_channel_split:
+                visible = self.last_visible_notes[:self.notes_to_draw] if self.last_visible_notes is not None and self.notes_to_draw > 0 else None
 
-        if self.show_glow and self.show_key_press_glow:
-            self._draw_active_note_glow_overlay(current_time)
+                if visible is not None and len(visible) > 0:
+                    on_t = visible['on_time']
+                    off_t = visible['off_time']
+                    active_mask = (on_t <= current_time) & (off_t > current_time)
+                    active_notes = visible[active_mask]
+                    active_count = len(active_notes)
+                else:
+                    active_notes = None
+                    active_count = 0
 
-        if self.show_keyboard and self.keyboard_layout:
-            self._draw_keyboard_opengl(current_time)
+                num_lanes = len(self.active_channels)
+                lane_height = self.height / max(1, num_lanes)
 
-        if self.show_guide_line:
+                active_pairs = set()
+                if active_count > 0:
+                    for i in range(active_count):
+                        ch = int(active_notes[i]['padding'])
+                        p = int(active_notes[i]['pitch'])
+                        active_pairs.add((ch, p))
+
+                if self.show_key_light_fade:
+                    active_color_map = {}
+                    if active_count > 0:
+                        for i in range(active_count):
+                            note = active_notes[i]
+                            ch = int(note['padding'])
+                            p = int(note['pitch'])
+                            color = np.array(self.channel_colors[int(note['track']) % 128], dtype=np.float32)
+                            key = (ch, p)
+                            existing = active_color_map.get(key)
+                            if existing is None or float(note['on_time']) >= existing[1]:
+                                active_color_map[key] = (color, float(note['on_time']))
+
+                    for key, (color, _) in active_color_map.items():
+                        self._split_fade_trails[key] = {
+                            'color': color,
+                            'fade_start': current_time,
+                        }
+
+                    expired = []
+                    for key, trail in self._split_fade_trails.items():
+                        if key in active_pairs:
+                            continue
+                        elapsed = current_time - trail['fade_start']
+                        if elapsed > self.glow_fade_duration:
+                            expired.append(key)
+                    for key in expired:
+                        del self._split_fade_trails[key]
+
+                glUniform1i(self.u_renderer_mode_loc, 2)
+                glUniform1f(self.u_lane_height_loc, lane_height)
+                glUniform1f(self.u_lane_guide_ratio_loc, 0.82)
+                if self.u_channel_to_lane_loc != -1:
+                    glUniform1iv(self.u_channel_to_lane_loc, 16, channel_to_lane)
+
+                glDisable(GL_BLEND)
+                glActiveTexture(GL_TEXTURE0)
+                glBindTexture(GL_TEXTURE_2D, self.note_texture)
+                glActiveTexture(GL_TEXTURE1)
+                glBindTexture(GL_TEXTURE_2D, self.note_edge_texture)
+
+                if active_count > 0:
+                    glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
+                    glBufferSubData(GL_ARRAY_BUFFER, 0, active_notes.nbytes, active_notes)
+                    glBindVertexArray(self.vao)
+                    glDrawArraysInstanced(GL_TRIANGLES, 0, 6, active_count)
+                    glBindVertexArray(0)
+
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                glUseProgram(0)
+                glDisable(GL_DEPTH_TEST)
+
+                if self.show_key_light_fade and self._split_fade_trails:
+                    glEnable(GL_BLEND)
+                    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+                    glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); glOrtho(0, self.width, self.height, 0, -1, 1)
+                    glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
+                    cell_w = self.width / 128.0
+                    for (ch, p), trail in self._split_fade_trails.items():
+                        if (ch, p) in active_pairs:
+                            continue
+                        elapsed = current_time - trail['fade_start']
+                        fade = 1.0 - (elapsed / self.glow_fade_duration)
+                        if fade <= 0.0:
+                            continue
+                        if ch not in self.active_channels:
+                            continue
+                        lane_idx = self.active_channels.index(ch)
+                        r, g, b = trail['color']
+                        glColor4f(r, g, b, fade * 0.7)
+                        x0 = p * cell_w
+                        y0 = lane_idx * lane_height
+                        glBegin(GL_QUADS)
+                        glVertex2f(x0, y0)
+                        glVertex2f(x0 + cell_w, y0)
+                        glVertex2f(x0 + cell_w, y0 + lane_height)
+                        glVertex2f(x0, y0 + lane_height)
+                        glEnd()
+                    glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
+                    glDisable(GL_BLEND)
+
+                glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); glOrtho(0, self.width, self.height, 0, -1, 1)
+                glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
+                glLineWidth(0.5)
+                glColor4f(0.35, 0.35, 0.45, 0.15)
+                for row in range(17):
+                    y = int(row * lane_height)
+                    glBegin(GL_LINES)
+                    glVertex2f(0, y); glVertex2f(self.width, y)
+                    glEnd()
+                glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
+
+                for lane_idx, ch in enumerate(self.active_channels):
+                    y = int(lane_idx * lane_height)
+                    self._draw_text_overlay(f"CH {ch}", 6, y + 3, color=(160, 170, 190), alpha=0.6)
+
+            else:
+                glUniform1i(self.u_renderer_mode_loc, 0)
+                glUniform1f(glGetUniformLocation(self.shader, "u_guide_line_y"), self._get_guide_line_y())
+                if self.u_channel_to_lane_loc != -1:
+                    glUniform1iv(self.u_channel_to_lane_loc, 16, channel_to_lane)
+
+                glActiveTexture(GL_TEXTURE0)
+                glBindTexture(GL_TEXTURE_2D, self.note_texture)
+                glActiveTexture(GL_TEXTURE1)
+                glBindTexture(GL_TEXTURE_2D, self.note_edge_texture)
+
+                glBindVertexArray(self.vao)
+                glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
+                glDrawArraysInstanced(GL_TRIANGLES, 0, 6, self.notes_to_draw)
+
+                glBindVertexArray(0)
+                glUseProgram(0)
+                glBindBuffer(GL_ARRAY_BUFFER, 0)
+                glDisable(GL_DEPTH_TEST)
+
+        if is_channel_split:
+            pass
+        else:
+            if self.show_glow and self.show_key_press_glow:
+                self._draw_active_note_glow_overlay(current_time)
+            if self.show_keyboard and self.keyboard_layout:
+                self._draw_keyboard_opengl(current_time)
+
+        if not is_channel_split and self.show_guide_line:
             glDisable(GL_DEPTH_TEST)
             glUseProgram(0)
             glMatrixMode(GL_PROJECTION);glPushMatrix();glLoadIdentity();glOrtho(0,self.width,self.height,0,-1,1)
@@ -1219,6 +1387,82 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             guide_y = self._get_guide_line_y()
             glBegin(GL_LINES);glVertex2f(0, guide_y);glVertex2f(self.width, guide_y);glEnd()
             glPopMatrix();glMatrixMode(GL_PROJECTION);glPopMatrix();glMatrixMode(GL_MODELVIEW)
+
+    def _draw_keyboard_channel_lane(self, current_time, channel, lane_idx, lane_height):
+        if self.keyboard_shader == 0 or not self.keyboard_layout:
+            return
+        lane_top = lane_idx * lane_height
+        lane_bottom = lane_top + lane_height
+        kb_ratio = 0.18
+        kb_height = lane_height * kb_ratio
+        kb_y = lane_bottom - kb_height
+
+        orig_kb_h = self.keyboard_texture_info['white_key']['scaled_height']
+        if orig_kb_h <= 0:
+            return
+        scale = kb_height / orig_kb_h
+
+        glDisable(GL_DEPTH_TEST)
+        glEnable(GL_SCISSOR_TEST)
+        glScissor(0, int(lane_top), self.width, int(lane_height))
+
+        glUseProgram(self.keyboard_shader)
+        glUniform1f(glGetUniformLocation(self.keyboard_shader, "u_keyboard_y"), kb_y)
+        if self.u_keyboard_overclock_loc != -1:
+            glUniform1f(self.u_keyboard_overclock_loc, 0.0)
+        kb_time_loc = glGetUniformLocation(self.keyboard_shader, "u_time")
+        if kb_time_loc != -1:
+            glUniform1f(kb_time_loc, self.last_frame_time)
+
+        scaled_white = self.white_key_instance_data.copy()
+        scaled_black = self.black_key_instance_data.copy()
+        scaled_white['rect'][:, 1] = 0.0
+        scaled_white['rect'][:, 3] *= scale
+        scaled_black['rect'][:, 1] = 0.0
+        scaled_black['rect'][:, 3] *= scale
+
+        if len(scaled_white) > 0:
+            scaled_white['is_pressed'].fill(0.0)
+            scaled_white['color'][:] = 0.0
+        if len(scaled_black) > 0:
+            scaled_black['is_pressed'].fill(0.0)
+            scaled_black['color'][:] = 0.0
+
+        if self.last_visible_notes is not None and len(self.last_visible_notes) > 0:
+            ch_mask = self.last_visible_notes['padding'] == channel
+            ch_notes = self.last_visible_notes[ch_mask]
+            if len(ch_notes) > 0:
+                active_mask = (ch_notes['on_time'] <= current_time) & (ch_notes['off_time'] > current_time)
+                active_notes = ch_notes[active_mask]
+                for note in active_notes:
+                    pitch = int(note['pitch'])
+                    ch = int(note['padding'])
+                    color = np.array(self.channel_colors[ch % 128], dtype=np.float32)
+                    if pitch in self.white_key_pitch_map:
+                        idx = self.white_key_pitch_map[pitch]
+                        scaled_white[idx]['color'] = np.clip(color * 0.7, 0.0, 1.0)
+                        scaled_white[idx]['is_pressed'] = 1.0
+                    elif pitch in self.black_key_pitch_map:
+                        idx = self.black_key_pitch_map[pitch]
+                        scaled_black[idx]['color'] = np.clip(color * 0.7, 0.0, 1.0)
+                        scaled_black[idx]['is_pressed'] = 1.0
+
+        if len(scaled_white) > 0:
+            glBindVertexArray(self.keyboard_vao_white)
+            glBindBuffer(GL_ARRAY_BUFFER, self.keyboard_vbo_white_keys)
+            glBufferSubData(GL_ARRAY_BUFFER, 0, scaled_white.nbytes, scaled_white)
+            glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, len(scaled_white))
+
+        if len(scaled_black) > 0:
+            glBindVertexArray(self.keyboard_vao_black)
+            glBindBuffer(GL_ARRAY_BUFFER, self.keyboard_vbo_black_keys)
+            glBufferSubData(GL_ARRAY_BUFFER, 0, scaled_black.nbytes, scaled_black)
+            glDrawArraysInstanced(GL_TRIANGLE_FAN, 0, 4, len(scaled_black))
+
+        glBindVertexArray(0)
+        glUseProgram(0)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
+        glDisable(GL_SCISSOR_TEST)
 
     def cleanup(self):
         self.app_running.clear()

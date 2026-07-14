@@ -1,7 +1,7 @@
 VERT_SHADER = """#version 120
 attribute vec2 pos;
 attribute vec2 note_times;
-attribute vec3 note_info;
+attribute vec4 note_info;
 attribute float note_depth;
 
 uniform mat4 u_projection;
@@ -19,17 +19,25 @@ uniform vec3 u_colors[128];
 uniform vec2 u_pitch_layout[128];
 uniform int u_is_white_key[128];
 
+uniform int u_renderer_mode;
+uniform int u_render_channel;
+uniform float u_lane_height;
+uniform float u_lane_guide_ratio;
+uniform int u_channel_to_lane[16];
+
 varying vec3 v_fragColor;
 varying vec2 v_pos;
 varying float v_note_h;
 varying float v_note_w;
 varying float v_overclock_corrupt;
+varying float v_is_grid;
 
 float hash(float n) { return fract(sin(n) * 43758.5453); }
 
 void main() {
     float on_time = note_times.x;
     float off_time = note_times.y;
+    v_is_grid = 0.0;
     
     if (off_time < u_window_start || on_time > u_window_end) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
@@ -38,6 +46,56 @@ void main() {
     
     int pitch = int(note_info.x + 0.5);
     int track = int(note_info.z + 0.5);
+    int channel = int(note_info.w + 0.5);
+
+    if (u_renderer_mode == 1) {
+        int lane_idx = u_channel_to_lane[channel];
+        if (lane_idx < 0) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+        }
+        float lane_top = float(lane_idx) * u_lane_height;
+        float lane_guide_y = lane_top + u_lane_height * u_lane_guide_ratio;
+        float note_duration = max(off_time - on_time, 0.0001);
+        float note_h = max(1.0, note_duration * u_scroll_speed * (u_lane_height / u_height));
+        float note_y = lane_guide_y + (u_time - on_time) * u_scroll_speed * (u_lane_height / u_height);
+        vec2 key_layout = u_pitch_layout[pitch];
+        vec2 instance_scale = vec2(key_layout.y, note_h);
+        vec2 instance_offset = vec2(key_layout.x, note_y - note_h);
+        vec2 final_pos = pos * instance_scale + instance_offset;
+        gl_Position = u_projection * vec4(final_pos, note_depth, 1.0);
+        v_pos = pos;
+        v_note_h = note_h;
+        v_note_w = key_layout.y;
+        v_overclock_corrupt = 0.0;
+        int color_idx = int(mod(float(channel), 128.0));
+        v_fragColor = u_colors[color_idx] * 1.2;
+        return;
+    }
+
+    if (u_renderer_mode == 2) {
+        int lane_idx = u_channel_to_lane[channel];
+        if (lane_idx < 0) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+        }
+        float cell_w = u_width / 128.0;
+        float cell_h = u_height / 16.0;
+        float note_x = float(pitch) * cell_w;
+        float note_y = float(lane_idx) * cell_h;
+        vec2 instance_scale = vec2(cell_w, cell_h);
+        vec2 instance_offset = vec2(note_x, note_y);
+        vec2 final_pos = pos * instance_scale + instance_offset;
+        gl_Position = u_projection * vec4(final_pos, note_depth, 1.0);
+        v_pos = pos;
+        v_note_h = cell_h;
+        v_note_w = cell_w;
+        v_overclock_corrupt = 0.0;
+        v_is_grid = 1.0;
+        int color_idx = int(mod(float(track), 128.0));
+        v_fragColor = u_colors[color_idx] * 1.2;
+        return;
+    }
     
     float note_duration = max(off_time - on_time, 0.0001);
     float note_h = max(2.0, note_duration * u_scroll_speed);
@@ -92,6 +150,7 @@ varying vec2 v_pos;
 varying float v_note_h;
 varying float v_note_w;
 varying float v_overclock_corrupt;
+varying float v_is_grid;
 
 uniform sampler2D u_note_texture;
 uniform sampler2D u_note_edge_texture;
@@ -144,14 +203,15 @@ void main() {
         final_color.rgb = mix(final_color.rgb, corrupted, v_overclock_corrupt);
     }
 
-    float body_gradient = mix(0.92, 1.08, pow(clamp(1.0 - v_pos.y, 0.0, 1.0), 1.3));
+    float grid_boost = 1.0 + v_is_grid * 1.5;
+    float body_gradient = mix(0.92 - v_is_grid * 0.08, 1.08 + v_is_grid * 0.12, pow(clamp(1.0 - v_pos.y, 0.0, 1.0), 1.3));
     float center_soft = 1.0 - abs(v_pos.x - 0.5) * 1.2;
-    float center_gloss = clamp(center_soft, 0.0, 1.0) * 0.06;
+    float center_gloss = clamp(center_soft, 0.0, 1.0) * 0.06 * grid_boost;
     final_color.rgb *= body_gradient;
     final_color.rgb += v_fragColor * center_gloss;
 
     float top_band = 1.0 - smoothstep(0.0, max(0.012, 3.0 * fw.y), v_pos.y);
-    float top_glint = pow(top_band, 1.8) * 0.22;
+    float top_glint = pow(top_band, 1.8) * 0.22 * grid_boost;
     final_color.rgb += vec3(1.0, 1.0, 1.0) * top_glint;
 
     float outline_px_uv = 1.0 / max(v_note_w, 1.0);
@@ -177,7 +237,7 @@ void main() {
 BLOOM_VERT_SHADER = """#version 120
 attribute vec2 pos;
 attribute vec2 note_times;
-attribute vec3 note_info;
+attribute vec4 note_info;
 
 uniform mat4 u_projection;
 uniform float u_time;
@@ -188,6 +248,14 @@ uniform float u_window_end;
 uniform float u_bloom_radius;
 uniform vec3 u_colors[128];
 uniform vec2 u_pitch_layout[128];
+
+uniform int u_renderer_mode;
+uniform int u_render_channel;
+uniform float u_lane_height;
+uniform float u_lane_guide_ratio;
+uniform int u_channel_to_lane[16];
+uniform float u_height;
+uniform float u_width;
 
 varying vec3 v_bloom_color;
 varying vec2 v_bloom_uv;
@@ -205,10 +273,57 @@ void main() {
 
     int pitch = int(note_info.x + 0.5);
     int track = int(note_info.z + 0.5);
+    int channel = int(note_info.w + 0.5);
 
     float note_duration = max(off_time - on_time, 0.0001);
-    float note_h = max(2.0, note_duration * u_scroll_speed);
-    float note_y = u_guide_line_y + (u_time - on_time) * u_scroll_speed;
+    float note_h;
+    float note_y;
+
+    if (u_renderer_mode == 1) {
+        int lane_idx = u_channel_to_lane[channel];
+        if (lane_idx < 0 || channel != u_render_channel) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+        }
+        float lane_top = float(lane_idx) * u_lane_height;
+        float lane_guide_y = lane_top + u_lane_height * u_lane_guide_ratio;
+        note_h = max(1.0, note_duration * u_scroll_speed * (u_lane_height / u_height));
+        note_y = lane_guide_y + (u_time - on_time) * u_scroll_speed * (u_lane_height / u_height);
+    } else if (u_renderer_mode == 2) {
+        int lane_idx = u_channel_to_lane[channel];
+        if (lane_idx < 0) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+        }
+        float cell_w = u_width / 128.0;
+        float cell_h = u_height / 16.0;
+        note_h = cell_h;
+        note_y = float(lane_idx) * cell_h;
+        float pad_x = u_bloom_radius * 1.7;
+        float pad_y = min(max(u_bloom_radius * 1.9, 6.0), note_h * 0.34 + u_bloom_radius * 0.62);
+        vec2 expanded_scale = vec2(cell_w + 2.0 * pad_x, note_h + 2.0 * pad_y);
+        vec2 expanded_offset = vec2(float(pitch) * cell_w - pad_x, note_y - pad_y);
+        vec2 final_pos = pos * expanded_scale + expanded_offset;
+        gl_Position = u_projection * vec4(final_pos, 0.0, 1.0);
+        vec2 layout_size = vec2(cell_w, note_h);
+        v_bloom_uv = vec2(
+            (pos.x * expanded_scale.x - pad_x) / max(layout_size.x, 1.0),
+            (pos.y * expanded_scale.y - pad_y) / max(layout_size.y, 1.0)
+        );
+        v_note_h = note_h;
+        float pad_x2 = pad_x;
+        float pad_y2 = pad_y;
+        v_quad_uv = vec2(
+            (pos.x * expanded_scale.x - pad_x2) / max(cell_w + 2.0 * pad_x2, 1.0),
+            (pos.y * expanded_scale.y - pad_y2) / max(note_h + 2.0 * pad_y2, 1.0)
+        );
+        int color_idx2 = track;
+        v_bloom_color = u_colors[color_idx2];
+        return;
+    } else {
+        note_h = max(2.0, note_duration * u_scroll_speed);
+        note_y = u_guide_line_y + (u_time - on_time) * u_scroll_speed;
+    }
 
     vec2 layout = u_pitch_layout[pitch];
     float pad_x = u_bloom_radius * 1.7;
@@ -226,7 +341,12 @@ void main() {
     v_note_h = note_h;
     v_quad_uv = pos;
 
-    int color_idx = int(mod(float(track), 128.0));
+    int color_idx;
+    if (u_renderer_mode == 1) {
+        color_idx = int(mod(float(channel), 128.0));
+    } else {
+        color_idx = int(mod(float(track), 128.0));
+    }
     v_bloom_color = u_colors[color_idx] * 1.18;
 }
 """

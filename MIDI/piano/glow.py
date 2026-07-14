@@ -18,6 +18,7 @@ class GlowMixin:
     def _update_glow_trails(self, current_time):
         if self.last_glow_time is not None and current_time + 0.001 < self.last_glow_time:
             self.glow_trails.clear()
+            self._split_fade_trails.clear()
         self.last_glow_time = current_time
 
         active_pitch_data = {}

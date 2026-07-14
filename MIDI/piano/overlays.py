@@ -39,6 +39,8 @@ class OverlayMixin:
             yield ("bloom_checkbox", self.bloom_checkbox_rect, "Toggle scene bloom")
         if self.glow_options_expanded and self.spike_bloom_checkbox_rect:
             yield ("spike_bloom_checkbox", self.spike_bloom_checkbox_rect, "Dynamically adjust bloom according to NPS")
+        if self.renderer_mode_button_rect:
+            yield ("renderer_mode_button", self.renderer_mode_button_rect, "Switch renderer mode")
 
     def _update_hover_ui_state(self):
         if self.overlay_font is None:
@@ -152,9 +154,14 @@ class OverlayMixin:
         if tex_info is None:
             return
         pixel_data, width, height = tex_info
+        glPushAttrib(GL_ENABLE_BIT)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        glDisable(GL_TEXTURE_2D)
         glColor4f(1.0, 1.0, 1.0, max(0.0, min(1.0, float(alpha))))
         glWindowPos2i(int(x), int(self.height - y - height))
         glDrawPixels(width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixel_data)
+        glPopAttrib()
 
     def _format_time_overlay(self, seconds):
         total_seconds = max(0, int(seconds))
@@ -233,12 +240,14 @@ class OverlayMixin:
                     self.show_key_press_glow = not self.show_key_press_glow
                     if not self.show_key_press_glow and not self.show_key_light_fade:
                         self.glow_trails.clear()
+                        self._split_fade_trails.clear()
                     self._save_visualizer_config()
                     return
                 if self.glow_options_expanded and self.key_light_fade_checkbox_rect and self.key_light_fade_checkbox_rect.collidepoint(event.pos):
                     self.show_key_light_fade = not self.show_key_light_fade
                     if not self.show_key_press_glow and not self.show_key_light_fade:
                         self.glow_trails.clear()
+                        self._split_fade_trails.clear()
                     self._save_visualizer_config()
                     return
                 if self.glow_options_expanded and self.bloom_checkbox_rect and self.bloom_checkbox_rect.collidepoint(event.pos):
@@ -278,6 +287,11 @@ class OverlayMixin:
                     if not self.anesthesia_mode:
                         self.anesthesia_shrink = 0.0
                         self.anesthesia_remove = 0.0
+                    self._save_visualizer_config()
+                    return
+                if self.renderer_mode_button_rect and self.renderer_mode_button_rect.collidepoint(event.pos):
+                    idx = self.renderer_modes.index(self.renderer_mode) if self.renderer_mode in self.renderer_modes else 0
+                    self.renderer_mode = self.renderer_modes[(idx + 1) % len(self.renderer_modes)]
                     self._save_visualizer_config()
                     return
             if self.controls_panel_expanded and self.slider_rect and self.slider_rect.collidepoint(event.pos):
@@ -575,12 +589,32 @@ class OverlayMixin:
         glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
 
     def _draw_slider_overlay(self):
-        if not self.slider_rect:
-            return
         glDisable(GL_DEPTH_TEST)
         glUseProgram(0)
         glMatrixMode(GL_PROJECTION); glPushMatrix(); glLoadIdentity(); glOrtho(0, self.width, self.height, 0, -1, 1)
         glMatrixMode(GL_MODELVIEW); glPushMatrix(); glLoadIdentity()
+        if self.renderer_mode_button_rect and not self.hide_buttons:
+            bx, by = self.renderer_mode_button_rect.x, self.renderer_mode_button_rect.y
+            bw, bh = self.renderer_mode_button_rect.width, self.renderer_mode_button_rect.height
+            rm_hov = self.renderer_mode_button_rect.collidepoint(pygame.mouse.get_pos())
+            rm_bg = (0.26, 0.30, 0.40) if rm_hov else (0.16, 0.18, 0.24)
+            glColor4f(*rm_bg, 0.92)
+            glBegin(GL_QUADS)
+            glVertex2f(bx, by); glVertex2f(bx + bw, by)
+            glVertex2f(bx + bw, by + bh); glVertex2f(bx, by + bh)
+            glEnd()
+            rm_label = "Channel Split" if self.renderer_mode == 'channel_split' else "Default"
+            rm_tc = (110, 210, 255) if self.renderer_mode == 'channel_split' else (160, 170, 190)
+            self._draw_text_overlay(rm_label, bx + 10, by + 4, color=rm_tc, alpha=0.95)
+            glColor4f(0.35, 0.42, 0.58, 0.55)
+            glLineWidth(1.0)
+            glBegin(GL_LINE_LOOP)
+            glVertex2f(bx, by); glVertex2f(bx + bw, by)
+            glVertex2f(bx + bw, by + bh); glVertex2f(bx, by + bh)
+            glEnd()
+        if not self.slider_rect:
+            glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
+            return
         self._update_hover_ui_state()
         handle_half = 6
         if self.controls_panel_expanded and self.controls_panel_rect and not self.hide_buttons:

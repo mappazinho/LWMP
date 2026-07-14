@@ -183,7 +183,6 @@ class BloomMixin:
 
         glUniform1f(self.u_bloom_time_loc, current_time)
         glUniform1f(self.u_bloom_scroll_speed_loc, self.scroll_speed)
-        glUniform1f(glGetUniformLocation(self.bloom_shader, "u_guide_line_y"), self._get_guide_line_y())
         glUniform1f(self.u_bloom_window_start_loc, window_start)
         glUniform1f(self.u_bloom_window_end_loc, window_end)
         if self.u_bloom_radius_loc != -1:
@@ -191,9 +190,32 @@ class BloomMixin:
         if self.u_bloom_strength_loc != -1:
             glUniform1f(self.u_bloom_strength_loc, self.bloom_strength)
 
-        glBindVertexArray(self.bloom_vao)
-        glDrawArraysInstanced(GL_TRIANGLES, 0, 6, self.notes_to_draw)
-        glBindVertexArray(0)
+        is_channel_split = self.renderer_mode == 'channel_split' and len(self.active_channels) > 0
+
+        channel_to_lane = np.full(16, -1, dtype=np.int32)
+        for lane_idx, ch in enumerate(self.active_channels):
+            if 0 <= ch < 16:
+                channel_to_lane[ch] = lane_idx
+
+        if is_channel_split:
+            num_lanes = len(self.active_channels)
+            lane_height = self.height / max(1, num_lanes)
+            glUniform1i(self.u_bloom_renderer_mode_loc, 2)
+            glUniform1f(self.u_bloom_lane_height_loc, lane_height)
+            glUniform1f(self.u_bloom_lane_guide_ratio_loc, 0.82)
+            if self.u_bloom_channel_to_lane_loc != -1:
+                glUniform1iv(self.u_bloom_channel_to_lane_loc, 16, channel_to_lane)
+            glBindVertexArray(self.bloom_vao)
+            glDrawArraysInstanced(GL_TRIANGLES, 0, 6, self.notes_to_draw)
+            glBindVertexArray(0)
+        else:
+            glUniform1i(self.u_bloom_renderer_mode_loc, 0)
+            glUniform1f(glGetUniformLocation(self.bloom_shader, "u_guide_line_y"), self._get_guide_line_y())
+            if self.u_bloom_channel_to_lane_loc != -1:
+                glUniform1iv(self.u_bloom_channel_to_lane_loc, 16, channel_to_lane)
+            glBindVertexArray(self.bloom_vao)
+            glDrawArraysInstanced(GL_TRIANGLES, 0, 6, self.notes_to_draw)
+            glBindVertexArray(0)
 
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
         glUseProgram(0)
