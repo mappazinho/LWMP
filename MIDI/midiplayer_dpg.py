@@ -500,7 +500,7 @@ class DpgMidiPlayerApp(
 
     def _build_ui(self):
         dpg.create_context()
-        dpg.create_viewport(title="LWMP - v1.3.0", width=1040, height=800)
+        dpg.create_viewport(title="LWMP - v1.4.0", width=1040, height=820)
 
         default_mode = self._normalize_backend_mode(CONFIG["audio"].get("omnimidi_load_preference", "path"))
         default_combo_label = self._get_combo_label_for_mode(default_mode)
