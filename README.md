@@ -63,3 +63,5 @@ Requires Python 3.11+ for building!
 - [pygame](https://www.pygame.org/news) and [PyOpenGL](https://pyopengl.sourceforge.net/) for the piano roll renderer.
 - [DearPyGUI](https://github.com/hoffstadt/DearPyGui) for the modern GUI frontend.
 - [psutil](https://github.com/giampaolo/psutil) for CPU and memory statistics.
+
+  ## Note: This repository **fully** contains AI-generated slop code. I cannot deem myself the true owner of this code, considering the ethical implications with **fully** AI-generated code. This project was purely made for fun, so have at it 👍
