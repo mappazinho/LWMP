@@ -29,8 +29,6 @@ class OverlayMixin:
             yield ("fun_button", self.fun_button_rect, "Fun")
         if self.fun_options_expanded and self.overclock_checkbox_rect:
             yield ("overclock_checkbox", self.overclock_checkbox_rect, "GPU artifact corruption effect")
-        if self.fun_options_expanded and self.anesthesia_checkbox_rect:
-            yield ("anesthesia_checkbox", self.anesthesia_checkbox_rect, "NPS-based note shrink and key removal")
         if self.glow_options_expanded and self.glow_options_checkbox_rect:
             yield ("glow_checkbox", self.glow_options_checkbox_rect, "Toggle glow on key press")
         if self.glow_options_expanded and self.key_light_fade_checkbox_rect:
@@ -187,10 +185,7 @@ class OverlayMixin:
         bar_height = 6
         x = panel_x + 16
         y = panel_y + 42
-        self.slider_rect = pygame.Rect(x, y, bar_width, self.slider_area_height)
-        self.slider_bar = (x, y + (self.slider_area_height - bar_height) // 2, bar_width, bar_height)
-        self._recalc_slider_handle()
-        scroll_y = y + self.slider_area_height + 18
+        scroll_y = y
         self.scroll_slider_rect = pygame.Rect(x, scroll_y, bar_width, self.slider_area_height)
         self.scroll_slider_bar = (x, scroll_y + (self.slider_area_height - bar_height) // 2, bar_width, bar_height)
         self._recalc_scroll_slider_handle()
@@ -198,12 +193,6 @@ class OverlayMixin:
         self.fps_slider_rect = pygame.Rect(x, fps_y, bar_width, self.slider_area_height)
         self.fps_slider_bar = (x, fps_y + (self.slider_area_height - bar_height) // 2, bar_width, bar_height)
         self._recalc_fps_slider_handle()
-
-    def _recalc_slider_handle(self):
-        if not self.slider_rect: return
-        t = (self.window_seconds - self.slider_min) / (self.slider_max - self.slider_min)
-        t = max(0.0, min(1.0, t))
-        self.slider_handle_x = self.slider_rect.x + t * self.slider_rect.width
 
     def _recalc_scroll_slider_handle(self):
         if not self.scroll_slider_rect: return
@@ -223,13 +212,11 @@ class OverlayMixin:
             if not self.hide_buttons:
                 if (not self.controls_panel_expanded) and self.controls_toggle_rect and self.controls_toggle_rect.collidepoint(event.pos):
                     self.controls_panel_expanded = not self.controls_panel_expanded
-                    self.slider_dragging = False
                     self.scroll_slider_dragging = False
                     self.fps_slider_dragging = False
                     return
                 if self.controls_panel_expanded and self.controls_close_rect and self.controls_close_rect.collidepoint(event.pos):
                     self.controls_panel_expanded = False
-                    self.slider_dragging = False
                     self.scroll_slider_dragging = False
                     self.fps_slider_dragging = False
                     return
@@ -282,21 +269,11 @@ class OverlayMixin:
                         self.overclock_intensity = 0.0
                     self._save_visualizer_config()
                     return
-                if self.fun_options_expanded and self.anesthesia_checkbox_rect and self.anesthesia_checkbox_rect.collidepoint(event.pos):
-                    self.anesthesia_mode = not self.anesthesia_mode
-                    if not self.anesthesia_mode:
-                        self.anesthesia_shrink = 0.0
-                        self.anesthesia_remove = 0.0
-                    self._save_visualizer_config()
-                    return
                 if self.renderer_mode_button_rect and self.renderer_mode_button_rect.collidepoint(event.pos):
                     idx = self.renderer_modes.index(self.renderer_mode) if self.renderer_mode in self.renderer_modes else 0
                     self.renderer_mode = self.renderer_modes[(idx + 1) % len(self.renderer_modes)]
                     self._save_visualizer_config()
                     return
-            if self.controls_panel_expanded and self.slider_rect and self.slider_rect.collidepoint(event.pos):
-                self.slider_dragging = True
-                self._update_slider_from_pos(event.pos[0])
             if self.controls_panel_expanded and self.scroll_slider_rect and self.scroll_slider_rect.collidepoint(event.pos):
                 self.scroll_slider_dragging = True
                 self._update_scroll_slider_from_pos(event.pos[0])
@@ -304,11 +281,8 @@ class OverlayMixin:
                 self.fps_slider_dragging = True
                 self._update_fps_slider_from_pos(event.pos[0])
         elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-            self.slider_dragging = False
             self.scroll_slider_dragging = False
             self.fps_slider_dragging = False
-        elif event.type == pygame.MOUSEMOTION and self.slider_dragging:
-            self._update_slider_from_pos(event.pos[0])
         elif event.type == pygame.MOUSEMOTION and self.scroll_slider_dragging:
             self._update_scroll_slider_from_pos(event.pos[0])
         elif event.type == pygame.MOUSEMOTION and self.fps_slider_dragging:
@@ -346,17 +320,6 @@ class OverlayMixin:
 
         self._save_visualizer_config()
         print(f"Piano roll glow {'enabled' if self.show_glow else 'disabled'}.")
-
-    def _update_slider_from_pos(self, x_pos):
-        t = (x_pos - self.slider_rect.x) / float(self.slider_rect.width)
-        t = max(0.0, min(1.0, t))
-        new_val = self.slider_min + t * (self.slider_max - self.slider_min)
-        self.window_seconds = new_val
-        self.seconds_before_cursor = new_val
-        self.seconds_after_cursor = new_val
-        self._recalc_slider_handle()
-        self._save_visualizer_config()
-        self.force_data_update.set()
 
     def _update_scroll_slider_from_pos(self, x_pos):
         t = (x_pos - self.scroll_slider_rect.x) / float(self.scroll_slider_rect.width)
@@ -612,9 +575,6 @@ class OverlayMixin:
             glVertex2f(bx, by); glVertex2f(bx + bw, by)
             glVertex2f(bx + bw, by + bh); glVertex2f(bx, by + bh)
             glEnd()
-        if not self.slider_rect:
-            glPopMatrix(); glMatrixMode(GL_PROJECTION); glPopMatrix(); glMatrixMode(GL_MODELVIEW)
-            return
         self._update_hover_ui_state()
         handle_half = 6
         if self.controls_panel_expanded and self.controls_panel_rect and not self.hide_buttons:
@@ -678,20 +638,8 @@ class OverlayMixin:
                 glEnd()
                 self._draw_hover_highlight(self.controls_close_rect, self._get_hover_alpha("controls_close"))
 
-            self._draw_text_overlay("Note Length", self.slider_rect.x, self.slider_rect.y - 12)
             self._draw_text_overlay("Scroll Speed", self.scroll_slider_rect.x, self.scroll_slider_rect.y - 12)
             self._draw_text_overlay("FPS Cap", self.fps_slider_rect.x, self.fps_slider_rect.y - 12)
-
-            x, y, w, h = self.slider_bar
-            glColor3f(0.2, 0.2, 0.25)
-            glBegin(GL_QUADS); glVertex2f(x, y); glVertex2f(x + w, y); glVertex2f(x + w, y + h); glVertex2f(x, y + h); glEnd()
-            filled_w = (self.slider_handle_x - x)
-            glColor3f(0.4, 0.7, 0.9)
-            glBegin(GL_QUADS); glVertex2f(x, y); glVertex2f(x + filled_w, y); glVertex2f(x + filled_w, y + h); glVertex2f(x, y + h); glEnd()
-            hx = self.slider_handle_x
-            hy = y + h / 2
-            glColor3f(0.9, 0.9, 0.95)
-            glBegin(GL_QUADS); glVertex2f(hx - handle_half, hy - handle_half); glVertex2f(hx + handle_half, hy - handle_half); glVertex2f(hx + handle_half, hy + handle_half); glVertex2f(hx - handle_half, hy + handle_half); glEnd()
 
             if self.scroll_slider_bar:
                 x2, y2, w2, h2 = self.scroll_slider_bar
@@ -983,31 +931,6 @@ class OverlayMixin:
                     glVertex2f(cbx + 7, cby + 13); glVertex2f(cbx + 13, cby + 4)
                     glEnd()
                 self._draw_hover_highlight(cb_rect, self._get_hover_alpha("overclock_checkbox"))
-
-            self._draw_text_overlay("Anesthesia Mode", px + 32, py + 54)
-
-            cb_rect = self.anesthesia_checkbox_rect
-            if cb_rect:
-                cbx, cby, cbw, cbh = cb_rect.x, cb_rect.y, cb_rect.width, cb_rect.height
-                glColor4f(0.12, 0.12, 0.16, 0.92)
-                glBegin(GL_QUADS)
-                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
-                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
-                glEnd()
-                glColor4f(0.72, 0.74, 0.80, 0.95)
-                glLineWidth(1.0)
-                glBegin(GL_LINE_LOOP)
-                glVertex2f(cbx, cby); glVertex2f(cbx + cbw, cby)
-                glVertex2f(cbx + cbw, cby + cbh); glVertex2f(cbx, cby + cbh)
-                glEnd()
-                if self.anesthesia_mode:
-                    glColor4f(0.24, 0.78, 0.95, 0.95)
-                    glLineWidth(2.0)
-                    glBegin(GL_LINES)
-                    glVertex2f(cbx + 3, cby + 9); glVertex2f(cbx + 7, cby + 13)
-                    glVertex2f(cbx + 7, cby + 13); glVertex2f(cbx + 13, cby + 4)
-                    glEnd()
-                self._draw_hover_highlight(cb_rect, self._get_hover_alpha("anesthesia_checkbox"))
 
         self._draw_hover_tooltip()
         

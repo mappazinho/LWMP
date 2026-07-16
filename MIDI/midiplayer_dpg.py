@@ -84,48 +84,64 @@ def _build_parser_result_payload(parser, use_disk_backing=False, result_queue=No
         "preferred_color_mode": getattr(parser, "preferred_color_mode", "track"),
     }
     if use_disk_backing:
-        temp_dir = tempfile.mkdtemp(prefix="lwmp_parse_")
-        gpu_path = os.path.join(temp_dir, "note_data_for_gpu.npy")
-        playback_path = os.path.join(temp_dir, "note_events_for_playback.npy")
-        if result_queue is not None:
-            result_queue.put((
-                "progress",
-                {
-                    "fraction": 0.995,
-                    "overlay": "99.5%",
-                    "detail": "Preparing low-memory result transfer...",
-                },
-            ))
-        np.save(gpu_path, parser.note_data_for_gpu, allow_pickle=False)
-        np.save(playback_path, parser.note_events_for_playback, allow_pickle=False)
-        result_data["disk_backed_arrays"] = {
-            "note_data_for_gpu": gpu_path,
-            "note_events_for_playback": playback_path,
-        }
-        result_data["backing_temp_dir"] = temp_dir
+        disk_gpu = getattr(parser, "_disk_gpu_path", None)
+        disk_playback = getattr(parser, "_disk_playback_path", None)
+        disk_temp = getattr(parser, "_disk_temp_dir", None)
+        if disk_gpu and disk_playback and os.path.exists(disk_gpu) and os.path.exists(disk_playback):
+            result_data["disk_backed_arrays"] = {
+                "note_data_for_gpu": disk_gpu,
+                "note_events_for_playback": disk_playback,
+            }
+            result_data["backing_temp_dir"] = disk_temp
+        else:
+            temp_dir = tempfile.mkdtemp(prefix="lwmp_parse_")
+            gpu_path = os.path.join(temp_dir, "note_data_for_gpu.npy")
+            playback_path = os.path.join(temp_dir, "note_events_for_playback.npy")
+            if result_queue is not None:
+                result_queue.put((
+                    "progress",
+                    {
+                        "fraction": 0.995,
+                        "overlay": "99.5%",
+                        "detail": "Preparing low-memory result transfer...",
+                    },
+                ))
+            np.save(gpu_path, parser.note_data_for_gpu, allow_pickle=False)
+            np.save(playback_path, parser.note_events_for_playback, allow_pickle=False)
+            result_data["disk_backed_arrays"] = {
+                "note_data_for_gpu": gpu_path,
+                "note_events_for_playback": playback_path,
+            }
+            result_data["backing_temp_dir"] = temp_dir
     else:
         result_data["note_data_for_gpu"] = parser.note_data_for_gpu
         result_data["note_events_for_playback"] = parser.note_events_for_playback
     return result_data
 
 
-def run_parser_process(filepath, result_queue, fallback_event_threshold=0):
+def run_parser_process(filepath, result_queue, fallback_event_threshold=0, disk_backing_threshold=0):
     try:
         parser = MidiParser(filepath)
         total_events = parser.count_total_events(progress_queue=result_queue)
         result_queue.put(("total_events", total_events))
-        parser.parse(
-            result_queue,
-            total_events=total_events,
-            fallback_event_threshold=int(fallback_event_threshold or 0),
-        )
-        use_disk_backing = bool(fallback_event_threshold and total_events > int(fallback_event_threshold))
+        try:
+            parser.parse(
+                result_queue,
+                total_events=total_events,
+                fallback_event_threshold=int(fallback_event_threshold or 0),
+            )
+        except MemoryError:
+            result_queue.put(("memory_error", "Out of memory during low-memory parse."))
+            return
+        use_disk_backing = bool(disk_backing_threshold and total_events > int(disk_backing_threshold))
         result_data = _build_parser_result_payload(
             parser,
             use_disk_backing=use_disk_backing,
             result_queue=result_queue,
         )
         result_queue.put(("success", result_data))
+    except MemoryError:
+        result_queue.put(("memory_error", "Out of memory during MIDI parse."))
     except Exception as e:
         traceback.print_exc()
         result_queue.put(("error", str(e)))
@@ -203,6 +219,7 @@ class DpgMidiPlayerApp(
         self._cleaned_up = False
         self.startup_ready = False
         self.pending_midi_name = None
+        self._pending_retry_filepath = None
         self.has_bundled_omnimidi = os.path.exists(os.path.join(runtime_dir, "SYNTH.dll"))
         self.recommended_mode = "local" if self.has_bundled_omnimidi else "path"
         self.recommended_note_limit = 20_000_000
@@ -1387,6 +1404,79 @@ class DpgMidiPlayerApp(
         if cb:
             cb()
 
+    def _on_memory_error_retry(self):
+        filepath = self._pending_retry_filepath
+        self._pending_retry_filepath = None
+        if not filepath:
+            return
+        self._begin_load_file_retry(filepath)
+
+    def _on_memory_error_dismiss(self):
+        self._pending_retry_filepath = None
+        self.pending_midi_name = None
+        self._update_now_playing_header()
+        dpg.set_value("status_text", "Failed to load file (out of memory).")
+        dpg.configure_item("load_button", enabled=True)
+
+    def _play_alert_tone(self):
+        backend = self.controller.active_midi_backend
+        if not backend or not hasattr(backend, "send_event_batch"):
+            return
+        def _run():
+            try:
+                alert_notes = [
+                    (0x90, (100 << 8) | 76),
+                    (0x90, (100 << 8) | 72),
+                    (0x90, (100 << 8) | 67),
+                ]
+                alert_offs = [
+                    (0x80, (0 << 8) | 76),
+                    (0x80, (0 << 8) | 72),
+                    (0x80, (0 << 8) | 67),
+                ]
+                for note in alert_notes:
+                    backend.send_event_batch([note])
+                import time as _t
+                _t.sleep(0.15)
+                for note in alert_offs:
+                    backend.send_event_batch([note])
+            except Exception:
+                pass
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _begin_load_file_retry(self, filepath):
+        if self.controller.parser_process and self.controller.parser_process.is_alive():
+            self._message_warning("Busy", "Already parsing a file. Please wait.")
+            return
+        self.loading_visible = True
+        self.loading_total_events = 0
+        self.loading_started_at = time.monotonic()
+        self.loading_has_real_progress = False
+        self._set_parse_progress_visible(True)
+        self._update_parse_progress(0.0, "0%", "Retrying with disk-backed saving...")
+        self._queue_ui(self._start_parse_job_retry, filepath)
+
+    def _start_parse_job_retry(self, filepath):
+        if not self.loading_visible:
+            return
+        try:
+            self.controller.start_parse_job(
+                filepath,
+                multiprocessing.Queue,
+                multiprocessing.Process,
+                run_parser_process,
+                fallback_event_threshold=0,
+                disk_backing_threshold=0,
+            )
+        except Exception as e:
+            self.controller.clear_parse_job()
+            self._reset_parse_progress()
+            self._message_error("Error", f"Failed to start parser: {e}")
+            self.pending_midi_name = None
+            self._update_now_playing_header()
+            dpg.set_value("status_text", "Failed to start parser.")
+            dpg.configure_item("load_button", enabled=True)
+
     def _set_parse_progress_visible(self, visible):
         if dpg.does_item_exist("parse_progress_group"):
             dpg.configure_item("parse_progress_group", show=bool(visible))
@@ -1588,7 +1678,8 @@ class DpgMidiPlayerApp(
                 multiprocessing.Queue,
                 multiprocessing.Process,
                 run_parser_process,
-                fallback_event_threshold=self.recommended_note_limit * 2,
+                fallback_event_threshold=max(self.recommended_note_limit - 15_000_000, 0),
+                disk_backing_threshold=max(self.recommended_note_limit - 15_000_000, 0),
             )
         except Exception as e:
             self.controller.clear_parse_job()
@@ -1644,6 +1735,18 @@ class DpgMidiPlayerApp(
                         daemon=True,
                     )
                     self._parse_normalize_thread.start()
+                    return
+                elif status == "memory_error":
+                    self._reset_parse_progress()
+                    self.controller.clear_parse_job()
+                    self._pending_retry_filepath = self.pending_midi_name
+                    self._play_alert_tone()
+                    self._show_confirm_dialog(
+                        "Out of Memory",
+                        f"{payload}\n\nWould you like to retry with disk-backed saving?",
+                        on_yes=self._on_memory_error_retry,
+                        on_no=self._on_memory_error_dismiss,
+                    )
                     return
                 else:
                     self._reset_parse_progress()
@@ -1891,8 +1994,12 @@ class DpgMidiPlayerApp(
         polyphony = 0
 
         if parsed_midi:
-            on_times = parsed_midi.note_events_for_playback["on_time"]
-            played_idx = bisect.bisect_left(on_times, max(0.0, current_time))
+            on_times = getattr(parsed_midi, "note_events_for_playback", None)
+            if on_times is not None and len(on_times) > 0:
+                on_times = on_times["on_time"]
+                played_idx = bisect.bisect_left(on_times, max(0.0, current_time))
+            else:
+                played_idx = 0
             off_times = getattr(parsed_midi, "sorted_off_times", None)
             if off_times is not None and len(off_times) > 0:
                 ended_idx = bisect.bisect_right(off_times, max(0.0, current_time))

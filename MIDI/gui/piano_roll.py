@@ -101,7 +101,7 @@ class PianoRollMixin:
                 if now - last_caption_update_time > 0.2:
                     fps = clock.get_fps()
                     self._pygame.display.set_caption(
-                        f"Piano Roll - {fps:.1f} FPS - window {piano_roll_instance.window_seconds:.2f}s - scroll {piano_roll_instance.scroll_speed:.0f}"
+                        f"Piano Roll - {fps:.1f} FPS - scroll {piano_roll_instance.scroll_speed:.0f}"
                     )
                     last_caption_update_time = now
 

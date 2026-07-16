@@ -2,7 +2,7 @@ VERT_SHADER = """#version 120
 attribute vec2 pos;
 attribute vec2 note_times;
 attribute vec4 note_info;
-attribute float note_depth;
+attribute float note_depth_attr;
 
 uniform mat4 u_projection;
 uniform float u_time;
@@ -11,13 +11,10 @@ uniform float u_width;
 uniform float u_height;
 uniform float u_note_width;
 uniform float u_guide_line_y;
-uniform float u_window_start;
-uniform float u_window_end;
 uniform float u_glow_strength;
 uniform float u_overclock;
 uniform vec3 u_colors[128];
 uniform vec2 u_pitch_layout[128];
-uniform int u_is_white_key[128];
 
 uniform int u_renderer_mode;
 uniform int u_render_channel;
@@ -39,14 +36,10 @@ void main() {
     float off_time = note_times.y;
     v_is_grid = 0.0;
     
-    if (off_time < u_window_start || on_time > u_window_end) {
-        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-        return;
-    }
-    
     int pitch = int(note_info.x + 0.5);
     int track = int(note_info.z + 0.5);
     int channel = int(note_info.w + 0.5);
+    float note_depth = note_depth_attr;
 
     if (u_renderer_mode == 1) {
         int lane_idx = u_channel_to_lane[channel];
@@ -59,6 +52,10 @@ void main() {
         float note_duration = max(off_time - on_time, 0.0001);
         float note_h = max(1.0, note_duration * u_scroll_speed * (u_lane_height / u_height));
         float note_y = lane_guide_y + (u_time - on_time) * u_scroll_speed * (u_lane_height / u_height);
+        if (note_y < 0.0 || note_y - note_h > u_height) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+        }
         vec2 key_layout = u_pitch_layout[pitch];
         vec2 instance_scale = vec2(key_layout.y, note_h);
         vec2 instance_offset = vec2(key_layout.x, note_y - note_h);
@@ -80,7 +77,7 @@ void main() {
             return;
         }
         float cell_w = u_width / 128.0;
-        float cell_h = u_height / 16.0;
+        float cell_h = u_lane_height;
         float note_x = float(pitch) * cell_w;
         float note_y = float(lane_idx) * cell_h;
         vec2 instance_scale = vec2(cell_w, cell_h);
@@ -96,10 +93,15 @@ void main() {
         v_fragColor = u_colors[color_idx] * 1.2;
         return;
     }
-    
+
+
     float note_duration = max(off_time - on_time, 0.0001);
     float note_h = max(2.0, note_duration * u_scroll_speed);
     float note_y = u_guide_line_y + (u_time - on_time) * u_scroll_speed;
+    if (note_y < 0.0 || note_y - note_h > u_height) {
+        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+        return;
+    }
     vec2 key_layout = u_pitch_layout[pitch];
     vec2 instance_scale = vec2(key_layout.y, note_h);
     vec2 instance_offset = vec2(key_layout.x, note_y - note_h);
@@ -238,13 +240,12 @@ BLOOM_VERT_SHADER = """#version 120
 attribute vec2 pos;
 attribute vec2 note_times;
 attribute vec4 note_info;
+attribute float note_depth_attr;
 
 uniform mat4 u_projection;
 uniform float u_time;
 uniform float u_scroll_speed;
 uniform float u_guide_line_y;
-uniform float u_window_start;
-uniform float u_window_end;
 uniform float u_bloom_radius;
 uniform vec3 u_colors[128];
 uniform vec2 u_pitch_layout[128];
@@ -266,11 +267,6 @@ void main() {
     float on_time = note_times.x;
     float off_time = note_times.y;
 
-    if (off_time < u_window_start || on_time > u_window_end) {
-        gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-        return;
-    }
-
     int pitch = int(note_info.x + 0.5);
     int track = int(note_info.z + 0.5);
     int channel = int(note_info.w + 0.5);
@@ -289,6 +285,10 @@ void main() {
         float lane_guide_y = lane_top + u_lane_height * u_lane_guide_ratio;
         note_h = max(1.0, note_duration * u_scroll_speed * (u_lane_height / u_height));
         note_y = lane_guide_y + (u_time - on_time) * u_scroll_speed * (u_lane_height / u_height);
+        if (note_y < 0.0 || note_y - note_h > u_height) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+        }
     } else if (u_renderer_mode == 2) {
         int lane_idx = u_channel_to_lane[channel];
         if (lane_idx < 0) {
@@ -296,7 +296,7 @@ void main() {
             return;
         }
         float cell_w = u_width / 128.0;
-        float cell_h = u_height / 16.0;
+        float cell_h = u_lane_height;
         note_h = cell_h;
         note_y = float(lane_idx) * cell_h;
         float pad_x = u_bloom_radius * 1.7;
@@ -323,6 +323,10 @@ void main() {
     } else {
         note_h = max(2.0, note_duration * u_scroll_speed);
         note_y = u_guide_line_y + (u_time - on_time) * u_scroll_speed;
+        if (note_y < 0.0 || note_y - note_h > u_height) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+        }
     }
 
     vec2 layout = u_pitch_layout[pitch];

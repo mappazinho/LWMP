@@ -8,6 +8,8 @@ import numpy as np
 cimport numpy as np
 import time
 import cython
+import os
+import tempfile
 
 from libc.string cimport memcpy
 from libc.stdint cimport uint8_t, uint16_t, uint32_t, uint64_t
@@ -214,6 +216,9 @@ cdef class MidiParser:
         self.total_duration_sec = 0.0
         self.preferred_color_mode = "track"
         self.preferred_color_mode = "track"
+        self._disk_temp_dir = None
+        self._disk_gpu_path = None
+        self._disk_playback_path = None
 
     def count_total_events(self, progress_queue=None):
         """
@@ -794,6 +799,15 @@ cdef class MidiParser:
             self.preferred_color_mode = "track"
 
         temp_gpu_notes_vec = vector[GpuNote]()
+
+        _log(f"Writing {n_gpu_notes:,} GPU notes to disk to free memory...")
+        if self._disk_temp_dir is None:
+            self._disk_temp_dir = tempfile.mkdtemp(prefix="lwmp_parse_")
+        self._disk_gpu_path = os.path.join(self._disk_temp_dir, "note_data_for_gpu.npy")
+        np.save(self._disk_gpu_path, self.note_data_for_gpu, allow_pickle=False)
+        del self.note_data_for_gpu
+        self.note_data_for_gpu = np.empty((0,), dtype=GPU_NOTE_DTYPE)
+
         event_heap = vector[uint64_t]()
         track_states = vector[TrackState]()
         current_events = vector[RawEvent]()
@@ -949,6 +963,16 @@ cdef class MidiParser:
                    n_playback_events * sizeof(PlaybackEvent))
         else:
             self.note_events_for_playback = np.empty((0,), dtype=PLAYBACK_EVENT_DTYPE)
+
+        temp_playback_events_vec = vector[PlaybackEvent]()
+
+        _log(f"Writing {n_playback_events:,} playback events to disk to free memory...")
+        if self._disk_temp_dir is None:
+            self._disk_temp_dir = tempfile.mkdtemp(prefix="lwmp_parse_")
+        self._disk_playback_path = os.path.join(self._disk_temp_dir, "note_events_for_playback.npy")
+        np.save(self._disk_playback_path, self.note_events_for_playback, allow_pickle=False)
+        del self.note_events_for_playback
+        self.note_events_for_playback = np.empty((0,), dtype=PLAYBACK_EVENT_DTYPE)
 
         if temp_program_change_vec.size() > 0:
             self.program_change_events = [(temp_program_change_vec[i].on_time,

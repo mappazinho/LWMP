@@ -175,7 +175,7 @@ class BloomMixin:
         glEnable(GL_BLEND)
         glDepthMask(GL_TRUE)
 
-    def _draw_note_bloom(self, current_time, window_start, window_end):
+    def _draw_note_bloom(self, current_time):
         glDisable(GL_DEPTH_TEST)
         glDepthMask(GL_FALSE)
         glUseProgram(self.bloom_shader)
@@ -183,8 +183,6 @@ class BloomMixin:
 
         glUniform1f(self.u_bloom_time_loc, current_time)
         glUniform1f(self.u_bloom_scroll_speed_loc, self.scroll_speed)
-        glUniform1f(self.u_bloom_window_start_loc, window_start)
-        glUniform1f(self.u_bloom_window_end_loc, window_end)
         if self.u_bloom_radius_loc != -1:
             glUniform1f(self.u_bloom_radius_loc, self.bloom_radius)
         if self.u_bloom_strength_loc != -1:

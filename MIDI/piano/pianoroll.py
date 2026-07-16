@@ -26,7 +26,6 @@ from piano.skin_utils import (
 )
 from piano.note_utils import (
     RENDER_NOTE_DTYPE, _build_base_render_data, _build_render_data_for_mode,
-    _order_visible_notes_for_draw, _assign_note_depths,
 )
 from piano.bloom import BloomMixin
 from piano.glow import GlowMixin
@@ -65,8 +64,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.u_bloom_scroll_speed_loc = -1
         self.u_bloom_pitch_layout_loc = -1
         self.u_bloom_colors_loc = -1
-        self.u_bloom_window_start_loc = -1
-        self.u_bloom_window_end_loc = -1
         self.u_bloom_radius_loc = -1
         self.u_bloom_strength_loc = -1
         self.screen_bloom_shader = 0
@@ -97,7 +94,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.u_bloom_blur_direction_loc = -1
         
         self.all_notes_gpu = None
-        self.data_queue = queue.Queue(maxsize=2)
+        self.data_queue = queue.Queue(maxsize=1)
         self.app_running = threading.Event()
         self.app_running.set()
         self.force_data_update = threading.Event()
@@ -147,7 +144,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.show_key_press_glow = bool(vis_cfg.get('show_key_press_glow', True))
         self.show_key_light_fade = bool(vis_cfg.get('show_key_light_fade', False))
         self.overclock_mode = bool(vis_cfg.get('overclock_mode', False))
-        self.anesthesia_mode = bool(vis_cfg.get('anesthesia_mode', False))
         self.hide_buttons = bool(vis_cfg.get('hide_buttons', False))
         self.renderer_mode = str(vis_cfg.get('renderer_mode', 'default'))
         self.renderer_modes = ['default', 'channel_split']
@@ -163,17 +159,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.spike_bloom_min_boost = 0.14
         self.spike_bloom_max_boost = 0.48
         
-        self.slider_min = 0.2
-        self.slider_max = 5.0
-        
-        self.window_seconds = float(vis_cfg.get('seconds_before_cursor', 3.0))
-        self.seconds_before_cursor = self.window_seconds
-        self.seconds_after_cursor = self.window_seconds
-        
-        self.slider_dragging = False
-        self.slider_rect = None
-        self.slider_bar = None
-        self.slider_handle_x = 0.0
         self.slider_area_height = 30
         
         self.streaming_vbo_capacity = int(vis_cfg.get('streaming_vbo_capacity', 2000000))
@@ -246,10 +231,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.fun_options_panel_rect = None
         self.overclock_mode = False
         self.overclock_intensity = 0.0
-        self.anesthesia_mode = False
-        self.anesthesia_shrink = 0.0
-        self.anesthesia_remove = 0.0
-        self.anesthesia_checkbox_rect = None
         self._fps_history = []
         self._last_fps_time = time.perf_counter()
         self.color_button_size = 32
@@ -298,11 +279,8 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         vis_cfg['show_key_press_glow'] = bool(self.show_key_press_glow)
         vis_cfg['show_key_light_fade'] = bool(self.show_key_light_fade)
         vis_cfg['overclock_mode'] = bool(self.overclock_mode)
-        vis_cfg['anesthesia_mode'] = bool(self.anesthesia_mode)
         vis_cfg['hide_buttons'] = bool(self.hide_buttons)
         vis_cfg['renderer_mode'] = str(self.renderer_mode)
-        vis_cfg['seconds_before_cursor'] = float(self.window_seconds)
-        vis_cfg['seconds_after_cursor'] = float(self.window_seconds)
         vis_cfg['scroll_speed'] = float(self.scroll_speed)
         vis_cfg['fps_cap'] = int(self.fps_cap)
         vis_cfg['streaming_vbo_capacity'] = int(self.streaming_vbo_capacity)
@@ -375,19 +353,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.note_color_mode = "channel" if self.note_color_mode == "track" else "track"
         self._rebuild_color_mode_render_data()
         print(f"Piano roll note colors switched to {self.note_color_mode}.")
-
-    def _visible_slice_signature(self, visible_slice, visible_count):
-        if visible_count <= 0 or visible_slice is None or len(visible_slice) == 0:
-            return (0,)
-        first = visible_slice[0]
-        last = visible_slice[-1]
-        mid = visible_slice[visible_count // 2]
-        return (
-            int(visible_count),
-            float(first['on_time']), float(first['off_time']), int(first['pitch']), int(first['track']),
-            float(mid['on_time']), float(mid['off_time']), int(mid['pitch']), int(mid['track']),
-            float(last['on_time']), float(last['off_time']), int(last['pitch']), int(last['track']),
-        )
 
     def _smoothstep(self, edge0, edge1, x):
         if edge0 == edge1:
@@ -472,7 +437,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         print("MIDI data active on GPU thread.")
 
     def _data_streamer_thread(self):
-        """Background thread for slicing visible notes."""
+        """Background thread for computing the visible note index range."""
         last_update_time = -1.0
         while self.app_running.is_set():
             if self.get_current_time is None or self.render_notes_array is None:
@@ -489,106 +454,75 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                 last_update_time = now
                 self.capacity_warning_active = False
                 self.capacity_warning_visible_count = 0
-                
-                view_start = now - self.seconds_before_cursor
-                view_end = now + self.seconds_after_cursor
 
-                if self.anesthesia_mode and self.anesthesia_shrink > 0.001:
-                    guide_y = self._get_guide_line_y()
-                    full_after = max(0.1, (self.height - guide_y) / max(1.0, self.scroll_speed))
-                    full_before = max(0.1, (guide_y - 20.0) / max(1.0, self.scroll_speed))
-                    window_scale = max(0.03, 1.0 - self.anesthesia_shrink)
-                    view_start = now - full_before * window_scale
-                    view_end = now + full_after * window_scale
+                guide_y = self._get_guide_line_y()
+                past_visible = max(0.1, guide_y / max(1.0, self.scroll_speed))
+                future_visible = max(0.1, (self.height - guide_y) / max(1.0, self.scroll_speed))
+                view_start = now - past_visible
+                view_end = now + future_visible + 2.0
 
-                search_start = view_start - self.max_note_duration
-                start_idx = np.searchsorted(self.render_on_times, search_start, side='left')
-                end_idx = np.searchsorted(self.render_on_times, view_end, side='right')
-                candidates = self.render_notes_array[start_idx:end_idx]
-                
-                if len(candidates) > 0:
-                    mask = candidates['off_time'] > view_start
-                    visible_slice = candidates[mask]
-                    visible_count = len(visible_slice)
-                else:
-                    visible_slice = candidates
-                    visible_count = 0
-                
-                if visible_count > self.streaming_vbo_capacity:
-                    self.capacity_warning_active = True
-                    self.capacity_warning_visible_count = int(visible_count)
-                    active_or_distance = np.where(
-                        visible_slice['on_time'] <= now,
-                        np.where(visible_slice['off_time'] > now, 0.0, now - visible_slice['off_time']),
-                        visible_slice['on_time'] - now,
+                on_start = np.searchsorted(self.render_on_times, view_start, side='left')
+                on_end = np.searchsorted(self.render_on_times, view_end, side='right')
+
+                sustained_extra = None
+                if on_start > 0:
+                    lookback_start = max(0, np.searchsorted(self.render_on_times, view_start - 60.0, side='left'))
+                    if lookback_start < on_start:
+                        candidate_view = self.render_notes_array[lookback_start:on_start]
+                        sustained_mask = candidate_view['off_time'] > now
+                        if np.any(sustained_mask):
+                            sustained_extra = candidate_view[sustained_mask]
+
+                if sustained_extra is not None:
+                    combined = np.ascontiguousarray(
+                        np.concatenate([sustained_extra, self.render_notes_array[on_start:on_end]])
                     )
-                    keep_idx = np.argpartition(active_or_distance, self.streaming_vbo_capacity - 1)[:self.streaming_vbo_capacity]
-                    visible_slice = visible_slice[np.sort(keep_idx)]
-                    visible_count = self.streaming_vbo_capacity
-                visible_slice = _order_visible_notes_for_draw(visible_slice, self.is_white_key_data)
+                    self.last_stream_signature = None
+                    try:
+                        self.data_queue.put((combined,), block=True, timeout=0.1)
+                    except queue.Full:
+                        print("Piano roll queue is full, frame skipped.")
+                else:
+                    visible_count = on_end - on_start
+                    if self.last_stream_signature is not None and self.last_stream_signature == (on_start, on_end):
+                        time.sleep(0.005)
+                        continue
+                    self.last_stream_signature = (on_start, on_end)
+                    try:
+                        self.data_queue.put((on_start, visible_count), block=True, timeout=0.1)
+                    except queue.Full:
+                        print("Piano roll queue is full, frame skipped.")
 
-                visible_slice_contiguous = np.ascontiguousarray(visible_slice)
-                _assign_note_depths(visible_slice_contiguous)
-                visible_signature = self._visible_slice_signature(visible_slice_contiguous, visible_count)
-                if visible_signature == self.last_stream_signature:
-                    time.sleep(0.005)
-                    continue
-                self.last_stream_signature = visible_signature
-
-                try:
-                    self.data_queue.put((visible_slice_contiguous, visible_count), block=True, timeout=0.1)
-                except queue.Full:
-                    print("Piano roll queue is full, frame skipped.")
-            
             time.sleep(0.005)
+
+    def _find_sustained_notes(self, on_start, current_time, view_start, lookback=60.0):
+        if self.render_notes_array is None or on_start <= 0:
+            return None
+        lookback_start = max(0, np.searchsorted(self.render_on_times, view_start - lookback, side='left'))
+        if lookback_start >= on_start:
+            return None
+        candidate_view = self.render_notes_array[lookback_start:on_start]
+        sustained_mask = candidate_view['off_time'] > current_time
+        if not np.any(sustained_mask):
+            return None
+        return candidate_view[sustained_mask]
 
     def _slice_visible_notes_for_time(self, current_time):
         if self.render_notes_array is None or self.render_on_times is None:
-            return np.empty(0, dtype=RENDER_NOTE_DTYPE), 0
+            return 0, 0
 
         self.capacity_warning_active = False
         self.capacity_warning_visible_count = 0
-        view_start = current_time - self.seconds_before_cursor
-        view_end = current_time + self.seconds_after_cursor
+        guide_y = self._get_guide_line_y()
+        past_visible = max(0.1, guide_y / max(1.0, self.scroll_speed))
+        future_visible = max(0.1, (self.height - guide_y) / max(1.0, self.scroll_speed))
+        view_start = current_time - past_visible
+        view_end = current_time + future_visible
 
-        if self.anesthesia_mode and self.anesthesia_shrink > 0.001:
-            guide_y = self._get_guide_line_y()
-            full_after = max(0.1, (self.height - guide_y) / max(1.0, self.scroll_speed))
-            full_before = max(0.1, (guide_y - 20.0) / max(1.0, self.scroll_speed))
-            window_scale = max(0.005, 1.0 - self.anesthesia_shrink)
-            view_start = current_time - full_before * window_scale
-            view_end = current_time + full_after * window_scale
-
-        search_start = view_start - self.max_note_duration
+        search_start = view_start
         start_idx = np.searchsorted(self.render_on_times, search_start, side='left')
         end_idx = np.searchsorted(self.render_on_times, view_end, side='right')
-        candidates = self.render_notes_array[start_idx:end_idx]
-
-        if len(candidates) > 0:
-            mask = candidates['off_time'] > view_start
-            visible_slice = candidates[mask]
-            visible_count = len(visible_slice)
-        else:
-            visible_slice = candidates
-            visible_count = 0
-
-        if visible_count > self.streaming_vbo_capacity:
-            self.capacity_warning_active = True
-            self.capacity_warning_visible_count = int(visible_count)
-            active_or_distance = np.where(
-                visible_slice['on_time'] <= current_time,
-                np.where(visible_slice['off_time'] > current_time, 0.0, current_time - visible_slice['off_time']),
-                visible_slice['on_time'] - current_time,
-            )
-            keep_idx = np.argpartition(active_or_distance, self.streaming_vbo_capacity - 1)[:self.streaming_vbo_capacity]
-            visible_slice = visible_slice[np.sort(keep_idx)]
-            visible_count = self.streaming_vbo_capacity
-
-        visible_slice = _order_visible_notes_for_draw(visible_slice, self.is_white_key_data)
-        visible_count = len(visible_slice)
-        visible_slice_contiguous = np.ascontiguousarray(visible_slice)
-        _assign_note_depths(visible_slice_contiguous)
-        return visible_slice_contiguous, visible_count
+        return start_idx, end_idx - start_idx
 
     def init_pygame_and_gl(self, hidden=False, disable_vsync=False):
         import piano.skin_utils as _su
@@ -698,7 +632,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         pos_loc = glGetAttribLocation(self.shader, "pos")
         note_times_loc = glGetAttribLocation(self.shader, "note_times")
         note_info_loc = glGetAttribLocation(self.shader, "note_info")
-        note_depth_loc = glGetAttribLocation(self.shader, "note_depth")
+        note_depth_loc = glGetAttribLocation(self.shader, "note_depth_attr")
 
         self.vbo_vertices = glGenBuffers(1)
         glBindBuffer(GL_ARRAY_BUFFER, self.vbo_vertices)
@@ -717,14 +651,16 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         glEnableVertexAttribArray(note_info_loc)
         glVertexAttribPointer(note_info_loc, 4, GL_UNSIGNED_BYTE, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(8))
         glVertexAttribDivisor(note_info_loc, 1)
-        glEnableVertexAttribArray(note_depth_loc)
-        glVertexAttribPointer(note_depth_loc, 1, GL_FLOAT, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(12))
-        glVertexAttribDivisor(note_depth_loc, 1)
+        if note_depth_loc != -1:
+            glEnableVertexAttribArray(note_depth_loc)
+            glVertexAttribPointer(note_depth_loc, 1, GL_FLOAT, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(12))
+            glVertexAttribDivisor(note_depth_loc, 1)
 
         if self.bloom_shader:
             bloom_pos_loc = glGetAttribLocation(self.bloom_shader, "pos")
             bloom_note_times_loc = glGetAttribLocation(self.bloom_shader, "note_times")
             bloom_note_info_loc = glGetAttribLocation(self.bloom_shader, "note_info")
+            bloom_note_depth_loc = glGetAttribLocation(self.bloom_shader, "note_depth_attr")
             self.bloom_vao = glGenVertexArrays(1)
             glBindVertexArray(self.bloom_vao)
             glBindBuffer(GL_ARRAY_BUFFER, self.vbo_vertices)
@@ -737,6 +673,10 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             glEnableVertexAttribArray(bloom_note_info_loc)
             glVertexAttribPointer(bloom_note_info_loc, 4, GL_UNSIGNED_BYTE, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(8))
             glVertexAttribDivisor(bloom_note_info_loc, 1)
+            if bloom_note_depth_loc != -1:
+                glEnableVertexAttribArray(bloom_note_depth_loc)
+                glVertexAttribPointer(bloom_note_depth_loc, 1, GL_FLOAT, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(12))
+                glVertexAttribDivisor(bloom_note_depth_loc, 1)
 
         if self.screen_bloom_shader:
             screen_pos_loc = glGetAttribLocation(self.screen_bloom_shader, "pos")
@@ -857,8 +797,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.u_colors_loc = glGetUniformLocation(self.shader, "u_colors")
         self.u_pitch_layout_loc = glGetUniformLocation(self.shader, "u_pitch_layout")
         self.u_is_white_key_notes_loc = glGetUniformLocation(self.shader, "u_is_white_key")
-        self.u_window_start_loc = glGetUniformLocation(self.shader, "u_window_start")
-        self.u_window_end_loc = glGetUniformLocation(self.shader, "u_window_end")
         
         glUniform1f(glGetUniformLocation(self.shader, "u_scroll_speed"), self.scroll_speed)
         glUniform1f(glGetUniformLocation(self.shader, "u_width"), float(self.width))
@@ -868,10 +806,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         
         if self.u_is_white_key_notes_loc != -1 and self.is_white_key_data is not None:
             glUniform1iv(self.u_is_white_key_notes_loc, 128, self.is_white_key_data)
-        if self.u_window_start_loc != -1:
-            glUniform1f(self.u_window_start_loc, 0.0)
-        if self.u_window_end_loc != -1:
-            glUniform1f(self.u_window_end_loc, 0.0)
 
         self.u_note_texture_loc = glGetUniformLocation(self.shader, "u_note_texture")
         self.u_note_edge_texture_loc = glGetUniformLocation(self.shader, "u_note_edge_texture")
@@ -897,17 +831,11 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             self.u_bloom_scroll_speed_loc = glGetUniformLocation(self.bloom_shader, "u_scroll_speed")
             self.u_bloom_pitch_layout_loc = glGetUniformLocation(self.bloom_shader, "u_pitch_layout")
             self.u_bloom_colors_loc = glGetUniformLocation(self.bloom_shader, "u_colors")
-            self.u_bloom_window_start_loc = glGetUniformLocation(self.bloom_shader, "u_window_start")
-            self.u_bloom_window_end_loc = glGetUniformLocation(self.bloom_shader, "u_window_end")
             self.u_bloom_radius_loc = glGetUniformLocation(self.bloom_shader, "u_bloom_radius")
             self.u_bloom_strength_loc = glGetUniformLocation(self.bloom_shader, "u_bloom_strength")
             glUniform1f(self.u_bloom_scroll_speed_loc, self.scroll_speed)
             glUniform1f(glGetUniformLocation(self.bloom_shader, "u_guide_line_y"), self._get_guide_line_y())
             glUniform2fv(self.u_bloom_pitch_layout_loc, 128, self.pitch_layout_data)
-            if self.u_bloom_window_start_loc != -1:
-                glUniform1f(self.u_bloom_window_start_loc, 0.0)
-            if self.u_bloom_window_end_loc != -1:
-                glUniform1f(self.u_bloom_window_end_loc, 0.0)
             if self.u_bloom_radius_loc != -1:
                 glUniform1f(self.u_bloom_radius_loc, self.bloom_radius)
             if self.u_bloom_strength_loc != -1:
@@ -1022,7 +950,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             fun_panel_width, fun_panel_height
         )
         self.overclock_checkbox_rect = pygame.Rect(self.fun_options_panel_rect.x + 10, self.fun_options_panel_rect.y + 28, 16, 16)
-        self.anesthesia_checkbox_rect = pygame.Rect(self.fun_options_panel_rect.x + 10, self.fun_options_panel_rect.y + 52, 16, 16)
 
         rm_label = "Channel Split" if self.renderer_mode == 'channel_split' else "Default"
         rm_w = max(100, len(rm_label) * 8 + 20)
@@ -1057,28 +984,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             self.overclock_intensity = min(1.0, 0.05 + fps_intensity + nps_intensity)
         elif not self.overclock_mode:
             self.overclock_intensity = 0.0
-        if self.anesthesia_mode:
-            nps = self.live_nps_value
-            if nps < 50000:
-                self.anesthesia_shrink = 0.0
-                self.anesthesia_remove = 0.0
-            elif nps < 150000:
-                raw = (nps - 50000) / 100000.0
-                self.anesthesia_shrink = raw * raw * 0.7
-                self.anesthesia_remove = 0.0
-            elif nps < 200000:
-                self.anesthesia_shrink = 0.7 + (nps - 150000) / 50000.0 * 0.15
-                self.anesthesia_remove = min(1.0, (nps - 150000) / 50000.0)
-            elif nps < 1000000:
-                raw = (nps - 200000) / 800000.0
-                self.anesthesia_shrink = 0.85 + raw * 0.15
-                self.anesthesia_remove = 1.0
-            else:
-                self.anesthesia_shrink = 1.0
-                self.anesthesia_remove = 1.0
-        else:
-            self.anesthesia_shrink = 0.0
-            self.anesthesia_remove = 0.0
         self._init_slider_geometry()
         self._upload_pending_midi_data()
         if self.show_glow and (self.show_key_press_glow or self.show_key_light_fade):
@@ -1089,21 +994,50 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             self._split_fade_trails.clear()
 
         if self.export_mode:
-            visible_notes, count = self._slice_visible_notes_for_time(current_time)
-            self.last_visible_notes = visible_notes
+            start_idx, count = self._slice_visible_notes_for_time(current_time)
             self.notes_to_draw = count
-            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
             if count > 0:
-                glBufferSubData(GL_ARRAY_BUFFER, 0, visible_notes.nbytes, visible_notes)
+                self.last_visible_notes = self.render_notes_array[start_idx:start_idx + count]
+            else:
+                self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
+            guide_y = self._get_guide_line_y()
+            past_visible = max(0.1, guide_y / max(1.0, self.scroll_speed))
+            view_start = current_time - past_visible
+            sustained_extra = self._find_sustained_notes(start_idx, current_time, view_start)
+            if sustained_extra is not None:
+                combined = np.ascontiguousarray(np.concatenate([sustained_extra, self.last_visible_notes]))
+                self.last_visible_notes = combined
+                self.notes_to_draw = len(combined)
+            if self.notes_to_draw > 0:
+                n = self.notes_to_draw
+                self.last_visible_notes['depth'] = np.arange(1, n + 1, dtype=np.float32) / (n + 1.0)
+                glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
+                glBufferData(GL_ARRAY_BUFFER, self.last_visible_notes.nbytes, self.last_visible_notes, GL_DYNAMIC_DRAW)
         else:
             try:
                 queue_data = self.data_queue.get_nowait()
-                visible_notes, count = queue_data
-                self.last_visible_notes = visible_notes
-                self.notes_to_draw = count
-                glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                if count > 0:
-                    glBufferSubData(GL_ARRAY_BUFFER, 0, visible_notes.nbytes, visible_notes)
+                if isinstance(queue_data[0], np.ndarray):
+                    combined = queue_data[0]
+                    self.notes_to_draw = len(combined)
+                    if self.notes_to_draw > 0:
+                        n = self.notes_to_draw
+                        combined['depth'] = np.arange(1, n + 1, dtype=np.float32) / (n + 1.0)
+                        self.last_visible_notes = combined
+                        glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
+                        glBufferData(GL_ARRAY_BUFFER, combined.nbytes, combined, GL_DYNAMIC_DRAW)
+                    else:
+                        self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
+                else:
+                    start_idx, count = queue_data
+                    self.notes_to_draw = count
+                    if count > 0:
+                        self.last_visible_notes = self.render_notes_array[start_idx:start_idx + count]
+                        n = count
+                        self.last_visible_notes['depth'] = np.arange(1, n + 1, dtype=np.float32) / (n + 1.0)
+                        glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
+                        glBufferData(GL_ARRAY_BUFFER, self.last_visible_notes.nbytes, self.last_visible_notes, GL_DYNAMIC_DRAW)
+                    else:
+                        self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
             except queue.Empty:
                 pass
 
@@ -1199,16 +1133,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         is_channel_split = self.renderer_mode == 'channel_split' and len(self.active_channels) > 0
 
         if self.notes_to_draw > 0 and self.render_notes_array is not None:
-            window_start = current_time - self.seconds_before_cursor
-            window_end = current_time + self.seconds_after_cursor
-
-            if self.anesthesia_mode and self.anesthesia_shrink > 0.001:
-                guide_y = self._get_guide_line_y()
-                full_after = max(0.1, (self.height - guide_y) / max(1.0, self.scroll_speed))
-                full_before = max(0.1, (guide_y - 20.0) / max(1.0, self.scroll_speed))
-                window_scale = max(0.03, 1.0 - self.anesthesia_shrink)
-                window_start = current_time - full_before * window_scale
-                window_end = current_time + full_after * window_scale
 
             glEnable(GL_DEPTH_TEST)
             glDepthMask(GL_TRUE)
@@ -1216,8 +1140,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
 
             glUniform1f(self.u_time_loc, current_time)
             glUniform1f(self.u_scroll_speed_loc, self.scroll_speed)
-            glUniform1f(self.u_window_start_loc, window_start)
-            glUniform1f(self.u_window_end_loc, window_end)
             if self.u_overclock_loc != -1:
                 glUniform1f(self.u_overclock_loc, self.overclock_intensity if not is_channel_split else 0.0)
 
@@ -1297,7 +1219,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
 
                 if active_count > 0:
                     glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                    glBufferSubData(GL_ARRAY_BUFFER, 0, active_notes.nbytes, active_notes)
+                    glBufferData(GL_ARRAY_BUFFER, active_notes.nbytes, active_notes, GL_DYNAMIC_DRAW)
                     glBindVertexArray(self.vao)
                     glDrawArraysInstanced(GL_TRIANGLES, 0, 6, active_count)
                     glBindVertexArray(0)

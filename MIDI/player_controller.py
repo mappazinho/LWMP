@@ -178,11 +178,11 @@ class PlayerController:
         if self.active_midi_backend and hasattr(self.active_midi_backend, "stop"):
             self.active_midi_backend.stop()
 
-    def start_parse_job(self, filepath, queue_factory, process_factory, process_target, fallback_event_threshold=0):
+    def start_parse_job(self, filepath, queue_factory, process_factory, process_target, fallback_event_threshold=0, disk_backing_threshold=0):
         self.parser_queue = queue_factory()
         self.parser_process = process_factory(
             target=process_target,
-            args=(filepath, self.parser_queue, int(fallback_event_threshold or 0)),
+            args=(filepath, self.parser_queue, int(fallback_event_threshold or 0), int(disk_backing_threshold or 0)),
             daemon=True,
         )
         self.parser_process.start()
@@ -299,41 +299,29 @@ class PlayerController:
             return 0, []
 
         on_times = note_events["on_time"]
-        left = 0
-        max_count = 0
-        counts = [0] * len(on_times)
+        n = len(on_times)
 
-        for right in range(len(on_times)):
-            while on_times[right] - on_times[left] > 1.0:
-                left += 1
-            window_count = right - left + 1
-            counts[right] = window_count
-            if window_count > max_count:
-                max_count = window_count
+        left_indices = np.searchsorted(on_times, on_times - 1.0, side='left')
+        counts = np.arange(n, dtype=np.int64) - left_indices + 1
+        max_count = int(counts.max())
 
-        candidates = []
-        i = 0
-        n = len(counts)
-        while i < n:
-            plateau_start = i
-            plateau_value = counts[i]
-            while i + 1 < n and counts[i + 1] == plateau_value:
-                i += 1
-            plateau_end = i
+        diff_left = np.empty(n, dtype=counts.dtype)
+        diff_left[0] = -1
+        diff_left[1:] = counts[:-1]
+        diff_right = np.empty(n, dtype=counts.dtype)
+        diff_right[:-1] = counts[1:]
+        diff_right[-1] = -1
 
-            left_value = counts[plateau_start - 1] if plateau_start > 0 else -1
-            right_value = counts[plateau_end + 1] if plateau_end + 1 < n else -1
-            is_peak = (plateau_value > left_value and plateau_value >= right_value) or (
-                plateau_value >= left_value and plateau_value > right_value
-            )
-            if is_peak and plateau_value > 0:
-                center_index = (plateau_start + plateau_end) // 2
-                candidates.append((float(on_times[center_index]), int(plateau_value)))
-            i += 1
+        is_peak = ((counts > diff_left) & (counts >= diff_right)) | (
+            (counts >= diff_left) & (counts > diff_right)
+        )
+        peak_indices = np.where(is_peak & (counts > 0))[0]
 
-        if not candidates:
-            max_index = max(range(len(counts)), key=lambda idx: counts[idx])
-            candidates = [(float(on_times[max_index]), int(counts[max_index]))]
+        if len(peak_indices) == 0:
+            best_idx = int(counts.argmax())
+            candidates = [(float(on_times[best_idx]), int(counts[best_idx]))]
+        else:
+            candidates = [(float(on_times[i]), int(counts[i])) for i in peak_indices]
 
         selected = []
         for spike_time, spike_value in sorted(candidates, key=lambda item: (-item[1], item[0])):
