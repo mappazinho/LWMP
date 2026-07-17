@@ -2197,6 +2197,11 @@ class DpgMidiPlayerApp(
 
         if self.render_thread and self.render_thread.is_alive():
             print("Cleanup: render thread still active, continuing shutdown without waiting.")
+
+        self.controller.playing = False
+        self.controller.paused = False
+        if self.playback_thread and self.playback_thread.is_alive():
+            self.playback_thread.join(2.0)
         self.controller.shutdown()
 
     def run(self):

@@ -26,6 +26,7 @@ from piano.skin_utils import (
 )
 from piano.note_utils import (
     RENDER_NOTE_DTYPE, _build_base_render_data, _build_render_data_for_mode,
+    _assign_layer_depth,
 )
 from piano.bloom import BloomMixin
 from piano.glow import GlowMixin
@@ -1010,7 +1011,8 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                 self.notes_to_draw = len(combined)
             if self.notes_to_draw > 0:
                 n = self.notes_to_draw
-                self.last_visible_notes['depth'] = np.arange(1, n + 1, dtype=np.float32) / (n + 1.0)
+                base_depth = np.arange(1, n + 1, dtype=np.float32) / (n + 1.0)
+                _assign_layer_depth(self.last_visible_notes, base_depth)
                 glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
                 glBufferData(GL_ARRAY_BUFFER, self.last_visible_notes.nbytes, self.last_visible_notes, GL_DYNAMIC_DRAW)
         else:
@@ -1021,7 +1023,8 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                     self.notes_to_draw = len(combined)
                     if self.notes_to_draw > 0:
                         n = self.notes_to_draw
-                        combined['depth'] = np.arange(1, n + 1, dtype=np.float32) / (n + 1.0)
+                        base_depth = np.arange(1, n + 1, dtype=np.float32) / (n + 1.0)
+                        _assign_layer_depth(combined, base_depth)
                         self.last_visible_notes = combined
                         glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
                         glBufferData(GL_ARRAY_BUFFER, combined.nbytes, combined, GL_DYNAMIC_DRAW)
@@ -1033,7 +1036,8 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                     if count > 0:
                         self.last_visible_notes = self.render_notes_array[start_idx:start_idx + count]
                         n = count
-                        self.last_visible_notes['depth'] = np.arange(1, n + 1, dtype=np.float32) / (n + 1.0)
+                        base_depth = np.arange(1, n + 1, dtype=np.float32) / (n + 1.0)
+                        _assign_layer_depth(self.last_visible_notes, base_depth)
                         glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
                         glBufferData(GL_ARRAY_BUFFER, self.last_visible_notes.nbytes, self.last_visible_notes, GL_DYNAMIC_DRAW)
                     else:

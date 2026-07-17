@@ -25,6 +25,15 @@ def _pack_render_notes(notes_array):
     return packed
 
 
+SHARP_BITMASK = 0x54A
+
+
+def _assign_layer_depth(notes, base_depth):
+    pitch_mod = notes['pitch'].astype(np.uint32) % 12
+    sharp_mask = ((np.uint32(1) << pitch_mod) & np.uint32(SHARP_BITMASK)) != 0
+    notes['depth'] = np.where(sharp_mask, 0.5 + base_depth * 0.5, base_depth * 0.5)
+
+
 def _build_base_render_data(all_notes_gpu):
     render_sort_idx = np.argsort(all_notes_gpu['on_time'], kind='stable')
     sorted_notes = all_notes_gpu[render_sort_idx]

@@ -67,10 +67,20 @@ class PlayerController:
 
     def _release_parsed_midi_storage(self):
         temp_dir = getattr(self.parsed_midi, "_backing_temp_dir", None) if self.parsed_midi is not None else None
+        if self.parsed_midi is not None:
+            for attr in ('note_data_for_gpu', 'note_events_for_playback', 'sorted_off_times', 'tempo_times', 'tempo_bpms'):
+                try:
+                    setattr(self.parsed_midi, attr, None)
+                except Exception:
+                    pass
         self.parsed_midi = None
-        if temp_dir:
-            gc.collect()
-            shutil.rmtree(temp_dir, ignore_errors=True)
+        gc.collect()
+        gc.collect()
+        if temp_dir and os.path.isdir(temp_dir):
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
 
     def init_midi_backends(
         self,
