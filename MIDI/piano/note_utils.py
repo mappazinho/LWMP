@@ -7,7 +7,6 @@ RENDER_NOTE_DTYPE = np.dtype([
     ('velocity', 'u1'),
     ('track', 'u1'),
     ('padding', 'u1'),
-    ('depth', 'f4'),
 ])
 
 
@@ -21,17 +20,7 @@ def _pack_render_notes(notes_array):
     packed['velocity'] = notes_array['velocity']
     packed['track'] = notes_array['track']
     packed['padding'] = notes_array['padding']
-    packed['depth'] = 0.0
     return packed
-
-
-SHARP_BITMASK = 0x54A
-
-
-def _assign_layer_depth(notes, base_depth):
-    pitch_mod = notes['pitch'].astype(np.uint32) % 12
-    sharp_mask = ((np.uint32(1) << pitch_mod) & np.uint32(SHARP_BITMASK)) != 0
-    notes['depth'] = np.where(sharp_mask, 0.5 + base_depth * 0.5, base_depth * 0.5)
 
 
 def _build_base_render_data(all_notes_gpu):

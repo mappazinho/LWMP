@@ -27,7 +27,6 @@ from piano.skin_utils import (
 )
 from piano.note_utils import (
     RENDER_NOTE_DTYPE, _build_base_render_data, _build_render_data_for_mode,
-    _assign_layer_depth,
 )
 from piano.bloom import BloomMixin
 from piano.glow import GlowMixin
@@ -643,7 +642,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         pos_loc = glGetAttribLocation(self.shader, "pos")
         note_times_loc = glGetAttribLocation(self.shader, "note_times")
         note_info_loc = glGetAttribLocation(self.shader, "note_info")
-        note_depth_loc = glGetAttribLocation(self.shader, "note_depth_attr")
 
         self.vbo_vertices = glGenBuffers(1)
         glBindBuffer(GL_ARRAY_BUFFER, self.vbo_vertices)
@@ -662,16 +660,11 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         glEnableVertexAttribArray(note_info_loc)
         glVertexAttribPointer(note_info_loc, 4, GL_UNSIGNED_BYTE, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(8))
         glVertexAttribDivisor(note_info_loc, 1)
-        if note_depth_loc != -1:
-            glEnableVertexAttribArray(note_depth_loc)
-            glVertexAttribPointer(note_depth_loc, 1, GL_FLOAT, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(12))
-            glVertexAttribDivisor(note_depth_loc, 1)
 
         if self.bloom_shader:
             bloom_pos_loc = glGetAttribLocation(self.bloom_shader, "pos")
             bloom_note_times_loc = glGetAttribLocation(self.bloom_shader, "note_times")
             bloom_note_info_loc = glGetAttribLocation(self.bloom_shader, "note_info")
-            bloom_note_depth_loc = glGetAttribLocation(self.bloom_shader, "note_depth_attr")
             self.bloom_vao = glGenVertexArrays(1)
             glBindVertexArray(self.bloom_vao)
             glBindBuffer(GL_ARRAY_BUFFER, self.vbo_vertices)
@@ -684,10 +677,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             glEnableVertexAttribArray(bloom_note_info_loc)
             glVertexAttribPointer(bloom_note_info_loc, 4, GL_UNSIGNED_BYTE, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(8))
             glVertexAttribDivisor(bloom_note_info_loc, 1)
-            if bloom_note_depth_loc != -1:
-                glEnableVertexAttribArray(bloom_note_depth_loc)
-                glVertexAttribPointer(bloom_note_depth_loc, 1, GL_FLOAT, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(12))
-                glVertexAttribDivisor(bloom_note_depth_loc, 1)
 
         if self.screen_bloom_shader:
             screen_pos_loc = glGetAttribLocation(self.screen_bloom_shader, "pos")
@@ -1018,11 +1007,8 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                 self.last_visible_notes = combined
                 self.notes_to_draw = len(combined)
             if self.notes_to_draw > 0:
-                n = self.notes_to_draw
-                base_depth = np.arange(1, n + 1, dtype=np.float32) / (n + 1.0)
-                _assign_layer_depth(self.last_visible_notes, base_depth)
                 glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                glBufferData(GL_ARRAY_BUFFER, self.last_visible_notes.nbytes, self.last_visible_notes, GL_DYNAMIC_DRAW)
+                glBufferSubData(GL_ARRAY_BUFFER, 0, self.last_visible_notes.nbytes, self.last_visible_notes)
         else:
             try:
                 queue_data = self.data_queue.get_nowait()
@@ -1030,12 +1016,9 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                     combined = queue_data[0]
                     self.notes_to_draw = len(combined)
                     if self.notes_to_draw > 0:
-                        n = self.notes_to_draw
-                        base_depth = np.arange(1, n + 1, dtype=np.float32) / (n + 1.0)
-                        _assign_layer_depth(combined, base_depth)
                         self.last_visible_notes = combined
                         glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                        glBufferData(GL_ARRAY_BUFFER, combined.nbytes, combined, GL_DYNAMIC_DRAW)
+                        glBufferSubData(GL_ARRAY_BUFFER, 0, combined.nbytes, combined)
                     else:
                         self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
                 else:
@@ -1043,11 +1026,8 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                     self.notes_to_draw = count
                     if count > 0:
                         self.last_visible_notes = self.render_notes_array[start_idx:start_idx + count]
-                        n = count
-                        base_depth = np.arange(1, n + 1, dtype=np.float32) / (n + 1.0)
-                        _assign_layer_depth(self.last_visible_notes, base_depth)
                         glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                        glBufferData(GL_ARRAY_BUFFER, self.last_visible_notes.nbytes, self.last_visible_notes, GL_DYNAMIC_DRAW)
+                        glBufferSubData(GL_ARRAY_BUFFER, 0, self.last_visible_notes.nbytes, self.last_visible_notes)
                     else:
                         self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
             except queue.Empty:
@@ -1232,7 +1212,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
 
                 if active_count > 0:
                     glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                    glBufferData(GL_ARRAY_BUFFER, active_notes.nbytes, active_notes, GL_DYNAMIC_DRAW)
+                    glBufferSubData(GL_ARRAY_BUFFER, 0, active_notes.nbytes, active_notes)
                     glBindVertexArray(self.vao)
                     glDrawArraysInstanced(GL_TRIANGLES, 0, 6, active_count)
                     glBindVertexArray(0)

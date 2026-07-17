@@ -77,10 +77,19 @@ class PlayerController:
         gc.collect()
         gc.collect()
         if temp_dir and os.path.isdir(temp_dir):
+            for f in os.listdir(temp_dir):
+                fp = os.path.join(temp_dir, f)
+                try:
+                    os.remove(fp)
+                except Exception:
+                    pass
             try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+                os.rmdir(temp_dir)
             except Exception:
-                pass
+                try:
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                except Exception:
+                    pass
 
     def init_midi_backends(
         self,

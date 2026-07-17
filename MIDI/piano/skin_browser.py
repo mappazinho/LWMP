@@ -67,7 +67,6 @@ class SkinBrowser(PianoRoll):
             n['pitch'] = pitch
             n['velocity'] = 100
             n['track'] = note_idx % 16
-            n['depth'] = 0.0
             notes.append(n)
             note_idx += 1
         if notes:

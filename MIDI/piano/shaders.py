@@ -1,8 +1,8 @@
 VERT_SHADER = """#version 120
+#extension GL_EXT_draw_instanced : enable
 attribute vec2 pos;
 attribute vec2 note_times;
 attribute vec4 note_info;
-attribute float note_depth_attr;
 
 uniform mat4 u_projection;
 uniform float u_time;
@@ -39,7 +39,9 @@ void main() {
     int pitch = int(note_info.x + 0.5);
     int track = int(note_info.z + 0.5);
     int channel = int(note_info.w + 0.5);
-    float note_depth = note_depth_attr;
+    int pitch_mod = int(mod(note_info.x, 12.0));
+    float note_depth = (pitch_mod == 1 || pitch_mod == 3 || pitch_mod == 6 || pitch_mod == 8 || pitch_mod == 10) ? 0.75 : 0.25;
+    note_depth += min(float(gl_InstanceID) * (1.0 / 1000000.0), 0.24);
 
     if (u_renderer_mode == 1) {
         int lane_idx = u_channel_to_lane[channel];
@@ -213,9 +215,7 @@ void main() {
     final_color.rgb *= body_gradient;
     final_color.rgb += v_fragColor * center_gloss;
 
-    float top_band = 1.0 - smoothstep(0.0, max(0.012, 3.0 * fw.y), v_pos.y);
-    float top_glint = pow(top_band, 1.8) * 0.22 * grid_boost;
-    final_color.rgb += vec3(1.0, 1.0, 1.0) * top_glint;
+
 
     float outline_px_uv = 1.0 / max(v_note_w, 1.0);
     float left_edge = step(v_pos.x, outline_px_uv);
@@ -241,7 +241,6 @@ BLOOM_VERT_SHADER = """#version 120
 attribute vec2 pos;
 attribute vec2 note_times;
 attribute vec4 note_info;
-attribute float note_depth_attr;
 
 uniform mat4 u_projection;
 uniform float u_time;
