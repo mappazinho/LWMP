@@ -214,17 +214,32 @@ class PlayerController:
             progress_callback(0.95, "Normalizing...", "Loading data arrays...")
 
         if disk_backed_arrays:
-            self.parsed_midi.note_data_for_gpu = np.load(
-                disk_backed_arrays["note_data_for_gpu"],
-                mmap_mode="r+",
-                allow_pickle=False,
-            )
-            self.parsed_midi.note_events_for_playback = np.load(
-                disk_backed_arrays["note_events_for_playback"],
-                mmap_mode="r+",
-                allow_pickle=False,
-            )
-            self.parsed_midi._backing_temp_dir = backing_temp_dir
+            try:
+                try:
+                    self.parsed_midi.note_data_for_gpu = np.load(
+                        disk_backed_arrays["note_data_for_gpu"],
+                        mmap_mode="r+",
+                    )
+                except Exception as e:
+                    print(f"Failed to mmap GPU note data, loading without mmap: {e}")
+                    self.parsed_midi.note_data_for_gpu = np.load(
+                        disk_backed_arrays["note_data_for_gpu"],
+                    )
+                try:
+                    self.parsed_midi.note_events_for_playback = np.load(
+                        disk_backed_arrays["note_events_for_playback"],
+                        mmap_mode="r+",
+                    )
+                except Exception as e:
+                    print(f"Failed to mmap playback events, loading without mmap: {e}")
+                    self.parsed_midi.note_events_for_playback = np.load(
+                        disk_backed_arrays["note_events_for_playback"],
+                    )
+                self.parsed_midi._backing_temp_dir = backing_temp_dir
+            except Exception:
+                if backing_temp_dir:
+                    shutil.rmtree(backing_temp_dir, ignore_errors=True)
+                raise
 
         if progress_callback:
             progress_callback(0.96, "Normalizing...", "Applying time offsets...")
@@ -518,3 +533,4 @@ class PlayerController:
             self.parser_process.terminate()
             self.parser_process.join(0.1)
         self.clear_parse_job()
+        self._release_parsed_midi_storage()

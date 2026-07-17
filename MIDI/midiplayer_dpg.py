@@ -72,7 +72,7 @@ except Exception as e:
 CONFIG = setup_omnimidi_preference(load_config())
 
 
-def _build_parser_result_payload(parser, use_disk_backing=False, result_queue=None):
+def _build_parser_result_payload(parser, result_queue=None):
     result_data = {
         "filename": parser.filename,
         "ticks_per_beat": parser.ticks_per_beat,
@@ -83,43 +83,49 @@ def _build_parser_result_payload(parser, use_disk_backing=False, result_queue=No
         "control_change_events": getattr(parser, "control_change_events", []),
         "preferred_color_mode": getattr(parser, "preferred_color_mode", "track"),
     }
-    if use_disk_backing:
-        disk_gpu = getattr(parser, "_disk_gpu_path", None)
-        disk_playback = getattr(parser, "_disk_playback_path", None)
-        disk_temp = getattr(parser, "_disk_temp_dir", None)
-        if disk_gpu and disk_playback and os.path.exists(disk_gpu) and os.path.exists(disk_playback):
-            result_data["disk_backed_arrays"] = {
-                "note_data_for_gpu": disk_gpu,
-                "note_events_for_playback": disk_playback,
-            }
-            result_data["backing_temp_dir"] = disk_temp
-        else:
-            temp_dir = tempfile.mkdtemp(prefix="lwmp_parse_")
-            gpu_path = os.path.join(temp_dir, "note_data_for_gpu.npy")
-            playback_path = os.path.join(temp_dir, "note_events_for_playback.npy")
-            if result_queue is not None:
-                result_queue.put((
-                    "progress",
-                    {
-                        "fraction": 0.995,
-                        "overlay": "99.5%",
-                        "detail": "Preparing low-memory result transfer...",
-                    },
-                ))
-            np.save(gpu_path, parser.note_data_for_gpu, allow_pickle=False)
-            np.save(playback_path, parser.note_events_for_playback, allow_pickle=False)
-            result_data["disk_backed_arrays"] = {
-                "note_data_for_gpu": gpu_path,
-                "note_events_for_playback": playback_path,
-            }
-            result_data["backing_temp_dir"] = temp_dir
+    disk_gpu = getattr(parser, "_disk_gpu_path", None)
+    disk_playback = getattr(parser, "_disk_playback_path", None)
+    disk_temp = getattr(parser, "_disk_temp_dir", None)
+    if disk_gpu and disk_playback and os.path.exists(disk_gpu) and os.path.exists(disk_playback):
+        result_data["disk_backed_arrays"] = {
+            "note_data_for_gpu": disk_gpu,
+            "note_events_for_playback": disk_playback,
+        }
+        result_data["backing_temp_dir"] = disk_temp
     else:
-        result_data["note_data_for_gpu"] = parser.note_data_for_gpu
-        result_data["note_events_for_playback"] = parser.note_events_for_playback
+        temp_dir = tempfile.mkdtemp(prefix="lwmp_parse_")
+        gpu_path = os.path.join(temp_dir, "note_data_for_gpu.npy")
+        playback_path = os.path.join(temp_dir, "note_events_for_playback.npy")
+        if result_queue is not None:
+            result_queue.put((
+                "progress",
+                {
+                    "fraction": 0.995,
+                    "overlay": "99.5%",
+                    "detail": "Preparing result transfer...",
+                },
+            ))
+        np.save(gpu_path, parser.note_data_for_gpu, allow_pickle=False)
+        np.save(playback_path, parser.note_events_for_playback, allow_pickle=False)
+        result_data["disk_backed_arrays"] = {
+            "note_data_for_gpu": gpu_path,
+            "note_events_for_playback": playback_path,
+        }
+        result_data["backing_temp_dir"] = temp_dir
     return result_data
 
 
+def _cleanup_parser_temp_dir(parser):
+    temp_dir = getattr(parser, "_disk_temp_dir", None)
+    if temp_dir:
+        try:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
 def run_parser_process(filepath, result_queue, fallback_event_threshold=0, disk_backing_threshold=0):
+    parser = None
     try:
         parser = MidiParser(filepath)
         total_events = parser.count_total_events(progress_queue=result_queue)
@@ -131,18 +137,21 @@ def run_parser_process(filepath, result_queue, fallback_event_threshold=0, disk_
                 fallback_event_threshold=int(fallback_event_threshold or 0),
             )
         except MemoryError:
+            _cleanup_parser_temp_dir(parser)
             result_queue.put(("memory_error", "Out of memory during low-memory parse."))
             return
-        use_disk_backing = bool(disk_backing_threshold and total_events > int(disk_backing_threshold))
         result_data = _build_parser_result_payload(
             parser,
-            use_disk_backing=use_disk_backing,
             result_queue=result_queue,
         )
         result_queue.put(("success", result_data))
     except MemoryError:
+        if parser:
+            _cleanup_parser_temp_dir(parser)
         result_queue.put(("memory_error", "Out of memory during MIDI parse."))
     except Exception as e:
+        if parser:
+            _cleanup_parser_temp_dir(parser)
         traceback.print_exc()
         result_queue.put(("error", str(e)))
 
@@ -1465,8 +1474,8 @@ class DpgMidiPlayerApp(
                 multiprocessing.Queue,
                 multiprocessing.Process,
                 run_parser_process,
-                fallback_event_threshold=0,
-                disk_backing_threshold=0,
+                fallback_event_threshold=1,
+                disk_backing_threshold=1,
             )
         except Exception as e:
             self.controller.clear_parse_job()
@@ -1632,9 +1641,7 @@ class DpgMidiPlayerApp(
 
         self._prepare_for_new_midi_load()
         self.reset_playback_state()
-        self.controller.parsed_midi = None
-        self.controller.total_song_notes = 0
-        self.controller.total_song_duration = 0.0
+        self.controller.unload_midi()
         self.pending_midi_name = None
         self._update_now_playing_header()
         dpg.set_value("time_text", "00:00 / 00:00")
@@ -1739,14 +1746,11 @@ class DpgMidiPlayerApp(
                 elif status == "memory_error":
                     self._reset_parse_progress()
                     self.controller.clear_parse_job()
-                    self._pending_retry_filepath = self.pending_midi_name
-                    self._play_alert_tone()
-                    self._show_confirm_dialog(
-                        "Out of Memory",
-                        f"{payload}\n\nWould you like to retry with disk-backed saving?",
-                        on_yes=self._on_memory_error_retry,
-                        on_no=self._on_memory_error_dismiss,
-                    )
+                    self._message_error("Out of Memory", str(payload))
+                    self.pending_midi_name = None
+                    self._update_now_playing_header()
+                    dpg.set_value("status_text", "Failed to load file (out of memory).")
+                    dpg.configure_item("load_button", enabled=True)
                     return
                 else:
                     self._reset_parse_progress()
