@@ -1,3 +1,4 @@
+import math
 import pygame
 from pygame.locals import DOUBLEBUF, OPENGL
 from OpenGL.GL import *
@@ -62,7 +63,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.u_glow_strength_loc = -1
         self.u_overclock_loc = -1
         self.u_bloom_time_loc = -1
-        self.u_bloom_scroll_speed_loc = -1
+        self.u_bloom_timespan_loc = -1
         self.u_bloom_pitch_layout_loc = -1
         self.u_bloom_colors_loc = -1
         self.u_bloom_radius_loc = -1
@@ -264,6 +265,15 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.stats_modification_enabled = False
         self.stats_selected_spike = None
         self.stats_spike_intensity = 1.0
+
+    def _get_timespan(self):
+        return max(0.001, self._get_guide_line_y() / max(1.0, self.scroll_speed))
+
+    def _get_quantized_time(self, current_time):
+        guide_y = self._get_guide_line_y()
+        timespan = self._get_timespan()
+        sec_per_px = timespan / max(1.0, guide_y)
+        return math.floor(current_time / max(1e-10, sec_per_px)) * sec_per_px
 
     def _get_guide_line_y(self):
         if self.show_keyboard and 'white_key' in self.keyboard_texture_info:
@@ -514,10 +524,10 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
 
         self.capacity_warning_active = False
         self.capacity_warning_visible_count = 0
+        timespan = self._get_timespan()
         guide_y = self._get_guide_line_y()
-        past_visible = max(0.1, guide_y / max(1.0, self.scroll_speed))
-        future_visible = max(0.1, (self.height - guide_y) / max(1.0, self.scroll_speed))
-        view_start = current_time - past_visible
+        future_visible = max(0.1, (self.height - guide_y) * timespan / max(1.0, guide_y))
+        view_start = current_time - timespan
         view_end = current_time + future_visible
 
         search_start = view_start
@@ -794,12 +804,12 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         ], dtype=np.float32)
         glUniformMatrix4fv(glGetUniformLocation(self.shader, "u_projection"), 1, GL_FALSE, self.projection_matrix.T)
         self.u_time_loc = glGetUniformLocation(self.shader, "u_time")
-        self.u_scroll_speed_loc = glGetUniformLocation(self.shader, "u_scroll_speed")
+        self.u_timespan_loc = glGetUniformLocation(self.shader, "u_timespan")
         self.u_colors_loc = glGetUniformLocation(self.shader, "u_colors")
         self.u_pitch_layout_loc = glGetUniformLocation(self.shader, "u_pitch_layout")
         self.u_is_white_key_notes_loc = glGetUniformLocation(self.shader, "u_is_white_key")
         
-        glUniform1f(glGetUniformLocation(self.shader, "u_scroll_speed"), self.scroll_speed)
+        glUniform1f(glGetUniformLocation(self.shader, "u_timespan"), self._get_timespan())
         glUniform1f(glGetUniformLocation(self.shader, "u_width"), float(self.width))
         glUniform1f(glGetUniformLocation(self.shader, "u_height"), float(self.height))
         glUniform1f(glGetUniformLocation(self.shader, "u_guide_line_y"), self._get_guide_line_y())
@@ -829,12 +839,12 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             glUseProgram(self.bloom_shader)
             glUniformMatrix4fv(glGetUniformLocation(self.bloom_shader, "u_projection"), 1, GL_FALSE, self.projection_matrix.T)
             self.u_bloom_time_loc = glGetUniformLocation(self.bloom_shader, "u_time")
-            self.u_bloom_scroll_speed_loc = glGetUniformLocation(self.bloom_shader, "u_scroll_speed")
+            self.u_bloom_timespan_loc = glGetUniformLocation(self.bloom_shader, "u_timespan")
             self.u_bloom_pitch_layout_loc = glGetUniformLocation(self.bloom_shader, "u_pitch_layout")
             self.u_bloom_colors_loc = glGetUniformLocation(self.bloom_shader, "u_colors")
             self.u_bloom_radius_loc = glGetUniformLocation(self.bloom_shader, "u_bloom_radius")
             self.u_bloom_strength_loc = glGetUniformLocation(self.bloom_shader, "u_bloom_strength")
-            glUniform1f(self.u_bloom_scroll_speed_loc, self.scroll_speed)
+            glUniform1f(self.u_bloom_timespan_loc, self._get_timespan())
             glUniform1f(glGetUniformLocation(self.bloom_shader, "u_guide_line_y"), self._get_guide_line_y())
             glUniform2fv(self.u_bloom_pitch_layout_loc, 128, self.pitch_layout_data)
             if self.u_bloom_radius_loc != -1:
@@ -1001,9 +1011,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                 self.last_visible_notes = self.render_notes_array[start_idx:start_idx + count]
             else:
                 self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
-            guide_y = self._get_guide_line_y()
-            past_visible = max(0.1, guide_y / max(1.0, self.scroll_speed))
-            view_start = current_time - past_visible
+            view_start = self._get_quantized_time(current_time) - self._get_timespan()
             sustained_extra = self._find_sustained_notes(start_idx, current_time, view_start)
             if sustained_extra is not None:
                 combined = np.ascontiguousarray(np.concatenate([sustained_extra, self.last_visible_notes]))
@@ -1142,8 +1150,9 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             glDepthMask(GL_TRUE)
             glUseProgram(self.shader)
 
-            glUniform1f(self.u_time_loc, current_time)
-            glUniform1f(self.u_scroll_speed_loc, self.scroll_speed)
+            rnd_time = self._get_quantized_time(current_time)
+            glUniform1f(self.u_time_loc, rnd_time)
+            glUniform1f(self.u_timespan_loc, self._get_timespan())
             if self.u_overclock_loc != -1:
                 glUniform1f(self.u_overclock_loc, self.overclock_intensity if not is_channel_split else 0.0)
 
@@ -1309,9 +1318,30 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             glUseProgram(0)
             glMatrixMode(GL_PROJECTION);glPushMatrix();glLoadIdentity();glOrtho(0,self.width,self.height,0,-1,1)
             glMatrixMode(GL_MODELVIEW);glPushMatrix();glLoadIdentity()
-            glLineWidth(2.0);glColor3f(0.8,0.0,0.0)
             guide_y = self._get_guide_line_y()
-            glBegin(GL_LINES);glVertex2f(0, guide_y);glVertex2f(self.width, guide_y);glEnd()
+            kb_area_h = self.height - guide_y
+            transition_h = max(3.0, kb_area_h * 0.02)
+            ribbon_h = kb_area_h * 0.05
+            spacer_h = 2.0
+            total_h = transition_h + ribbon_h + spacer_h
+            top_y = guide_y - total_h
+            bg = self.background_color
+            glBegin(GL_QUADS)
+            glColor4f(bg[0], bg[1], bg[2], 1.0); glVertex2f(0, top_y)
+            glColor4f(bg[0], bg[1], bg[2], 1.0); glVertex2f(self.width, top_y)
+            glColor4f(0.03, 0.03, 0.05, 1.0); glVertex2f(self.width, top_y + transition_h)
+            glColor4f(0.03, 0.03, 0.05, 1.0); glVertex2f(0, top_y + transition_h)
+            glEnd()
+            glBegin(GL_QUADS)
+            ry = top_y + transition_h
+            glColor3f(0.55, 0.08, 0.06); glVertex2f(0, ry)
+            glColor3f(0.55, 0.08, 0.06); glVertex2f(self.width, ry)
+            glColor3f(0.35, 0.04, 0.03); glVertex2f(self.width, ry + ribbon_h)
+            glColor3f(0.35, 0.04, 0.03); glVertex2f(0, ry + ribbon_h)
+            glEnd()
+            sy = ry + ribbon_h
+            glColor3f(0.08, 0.08, 0.12)
+            glBegin(GL_QUADS); glVertex2f(0, sy); glVertex2f(self.width, sy); glVertex2f(self.width, sy + spacer_h); glVertex2f(0, sy + spacer_h); glEnd()
             glPopMatrix();glMatrixMode(GL_PROJECTION);glPopMatrix();glMatrixMode(GL_MODELVIEW)
 
     def _draw_keyboard_channel_lane(self, current_time, channel, lane_idx, lane_height):

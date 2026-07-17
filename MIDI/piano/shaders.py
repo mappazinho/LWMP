@@ -6,7 +6,7 @@ attribute float note_depth_attr;
 
 uniform mat4 u_projection;
 uniform float u_time;
-uniform float u_scroll_speed;
+uniform float u_timespan;
 uniform float u_width;
 uniform float u_height;
 uniform float u_note_width;
@@ -49,10 +49,11 @@ void main() {
         }
         float lane_top = float(lane_idx) * u_lane_height;
         float lane_guide_y = lane_top + u_lane_height * u_lane_guide_ratio;
+        float note_area_h = lane_guide_y - lane_top;
         float note_duration = max(off_time - on_time, 0.0001);
-        float note_h = max(1.0, note_duration * u_scroll_speed * (u_lane_height / u_height));
-        float note_y = lane_guide_y + (u_time - on_time) * u_scroll_speed * (u_lane_height / u_height);
-        if (note_y < 0.0 || note_y - note_h > u_height) {
+        float note_h = max(1.0, note_area_h * note_duration / u_timespan);
+        float note_y = lane_top + note_area_h * (1.0 + (u_time - on_time) / u_timespan);
+        if (note_y < lane_top || note_y - note_h > u_height) {
             gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
             return;
         }
@@ -96,8 +97,8 @@ void main() {
 
 
     float note_duration = max(off_time - on_time, 0.0001);
-    float note_h = max(2.0, note_duration * u_scroll_speed);
-    float note_y = u_guide_line_y + (u_time - on_time) * u_scroll_speed;
+    float note_h = max(2.0, u_guide_line_y * note_duration / u_timespan);
+    float note_y = u_guide_line_y * (1.0 + (u_time - on_time) / u_timespan);
     if (note_y < 0.0 || note_y - note_h > u_height) {
         gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
         return;
@@ -244,7 +245,7 @@ attribute float note_depth_attr;
 
 uniform mat4 u_projection;
 uniform float u_time;
-uniform float u_scroll_speed;
+uniform float u_timespan;
 uniform float u_guide_line_y;
 uniform float u_bloom_radius;
 uniform vec3 u_colors[128];
@@ -283,9 +284,10 @@ void main() {
         }
         float lane_top = float(lane_idx) * u_lane_height;
         float lane_guide_y = lane_top + u_lane_height * u_lane_guide_ratio;
-        note_h = max(1.0, note_duration * u_scroll_speed * (u_lane_height / u_height));
-        note_y = lane_guide_y + (u_time - on_time) * u_scroll_speed * (u_lane_height / u_height);
-        if (note_y < 0.0 || note_y - note_h > u_height) {
+        float note_area_h = lane_guide_y - lane_top;
+        note_h = max(1.0, note_area_h * note_duration / u_timespan);
+        note_y = lane_top + note_area_h * (1.0 + (u_time - on_time) / u_timespan);
+        if (note_y < lane_top || note_y - note_h > u_height) {
             gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
             return;
         }
@@ -321,8 +323,8 @@ void main() {
         v_bloom_color = u_colors[color_idx2];
         return;
     } else {
-        note_h = max(2.0, note_duration * u_scroll_speed);
-        note_y = u_guide_line_y + (u_time - on_time) * u_scroll_speed;
+        note_h = max(2.0, u_guide_line_y * note_duration / u_timespan);
+        note_y = u_guide_line_y * (1.0 + (u_time - on_time) / u_timespan);
         if (note_y < 0.0 || note_y - note_h > u_height) {
             gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
             return;

@@ -181,8 +181,9 @@ class BloomMixin:
         glUseProgram(self.bloom_shader)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE)
 
-        glUniform1f(self.u_bloom_time_loc, current_time)
-        glUniform1f(self.u_bloom_scroll_speed_loc, self.scroll_speed)
+        rnd_time = self._get_quantized_time(current_time)
+        glUniform1f(self.u_bloom_time_loc, rnd_time)
+        glUniform1f(self.u_bloom_timespan_loc, self._get_timespan())
         if self.u_bloom_radius_loc != -1:
             glUniform1f(self.u_bloom_radius_loc, self.bloom_radius)
         if self.u_bloom_strength_loc != -1:
