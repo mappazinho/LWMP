@@ -86,13 +86,20 @@ def _build_parser_result_payload(parser, result_queue=None):
     disk_gpu = getattr(parser, "_disk_gpu_path", None)
     disk_playback = getattr(parser, "_disk_playback_path", None)
     disk_temp = getattr(parser, "_disk_temp_dir", None)
-    if disk_gpu and disk_playback and os.path.exists(disk_gpu) and os.path.exists(disk_playback):
-        result_data["disk_backed_arrays"] = {
-            "note_data_for_gpu": disk_gpu,
-            "note_events_for_playback": disk_playback,
-        }
-        result_data["backing_temp_dir"] = disk_temp
-    else:
+    if (disk_gpu and disk_playback and os.path.exists(disk_gpu) and os.path.exists(disk_playback)):
+        try:
+            _test = np.load(disk_gpu, mmap_mode=None, allow_pickle=True)
+            del _test
+            _test = np.load(disk_playback, mmap_mode=None, allow_pickle=True)
+            del _test
+            result_data["disk_backed_arrays"] = {
+                "note_data_for_gpu": disk_gpu,
+                "note_events_for_playback": disk_playback,
+            }
+            result_data["backing_temp_dir"] = disk_temp
+        except Exception:
+            disk_gpu = None
+    if not result_data.get("disk_backed_arrays"):
         temp_dir = tempfile.mkdtemp(prefix="lwmp_parse_")
         gpu_path = os.path.join(temp_dir, "note_data_for_gpu.npy")
         playback_path = os.path.join(temp_dir, "note_events_for_playback.npy")
