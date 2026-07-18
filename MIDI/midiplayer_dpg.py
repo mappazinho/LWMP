@@ -1626,8 +1626,6 @@ class DpgMidiPlayerApp(
                 self.piano_roll_thread.join(2.0)
             self.piano_roll = None
             self.piano_roll_thread = None
-        else:
-            self.was_piano_roll_open_before_unload = False
 
     def load_file(self, filepath=None):
         if not self.startup_ready:
@@ -1784,6 +1782,8 @@ class DpgMidiPlayerApp(
             self._queue_ui(self._on_parse_normalize_error, str(e))
 
     def _on_parse_normalized(self):
+        if self.controller.parsed_midi is None:
+            return
         self._reset_parse_progress()
         self._update_now_playing_header()
         dpg.set_value("status_text", "Ready to play.")
@@ -1810,7 +1810,8 @@ class DpgMidiPlayerApp(
         self.reset_graph_history()
 
         if self.was_piano_roll_open_before_unload and self.last_piano_roll_res and PianoRoll:
-            self.launch_piano_roll(*self.last_piano_roll_res)
+            if self.controller.parsed_midi is not None:
+                self.launch_piano_roll(*self.last_piano_roll_res)
         self.was_piano_roll_open_before_unload = False
 
     def _on_parse_normalize_error(self, error_str):
@@ -1829,6 +1830,11 @@ class DpgMidiPlayerApp(
             self.controller.playing = False
             if self.playback_thread and self.playback_thread.is_alive():
                 self.playback_thread.join(0.1)
+
+        self.loading_visible = False
+        self._parse_normalize_thread = None
+        self._reset_parse_progress()
+        self.controller.clear_parse_job()
 
         if self.piano_roll and self.piano_roll.app_running.is_set():
             self.was_piano_roll_open_before_unload = True

@@ -243,22 +243,24 @@ class PlayerController:
                 try:
                     self.parsed_midi.note_data_for_gpu = np.load(
                         disk_backed_arrays["note_data_for_gpu"],
-                        mmap_mode="r+",
+                        mmap_mode="r+", allow_pickle=True,
                     )
                 except Exception as e:
                     print(f"Failed to mmap GPU note data, loading without mmap: {e}")
                     self.parsed_midi.note_data_for_gpu = np.load(
                         disk_backed_arrays["note_data_for_gpu"],
+                        allow_pickle=True,
                     )
                 try:
                     self.parsed_midi.note_events_for_playback = np.load(
                         disk_backed_arrays["note_events_for_playback"],
-                        mmap_mode="r+",
+                        mmap_mode="r+", allow_pickle=True,
                     )
                 except Exception as e:
                     print(f"Failed to mmap playback events, loading without mmap: {e}")
                     self.parsed_midi.note_events_for_playback = np.load(
                         disk_backed_arrays["note_events_for_playback"],
+                        allow_pickle=True,
                     )
                 self.parsed_midi._backing_temp_dir = backing_temp_dir
             except Exception:
