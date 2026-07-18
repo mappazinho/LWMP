@@ -70,7 +70,7 @@ class PianoRollMixin:
         dpg.disable_item("skin_button")
 
         if self.controller.parsed_midi:
-            notes_for_gpu = np.ascontiguousarray(self.controller.parsed_midi.note_data_for_gpu)
+            notes_for_gpu = self.controller.parsed_midi.note_data_for_gpu.copy()
             threading.Timer(
                 0.5,
                 lambda: self.piano_roll.load_midi(notes_for_gpu, self.get_current_playback_time_thread_safe),

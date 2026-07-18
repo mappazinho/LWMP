@@ -1623,7 +1623,7 @@ class DpgMidiPlayerApp(
             self.was_piano_roll_open_before_unload = True
             self.piano_roll.app_running.clear()
             if self.piano_roll_thread and self.piano_roll_thread.is_alive():
-                self.piano_roll_thread.join(0.2)
+                self.piano_roll_thread.join(2.0)
             self.piano_roll = None
             self.piano_roll_thread = None
         else:
@@ -1830,6 +1830,15 @@ class DpgMidiPlayerApp(
             if self.playback_thread and self.playback_thread.is_alive():
                 self.playback_thread.join(0.1)
 
+        if self.piano_roll and self.piano_roll.app_running.is_set():
+            self.was_piano_roll_open_before_unload = True
+            self.piano_roll.app_running.clear()
+            if self.piano_roll_thread and self.piano_roll_thread.is_alive():
+                self.piano_roll_thread.join(2.0)
+            self.piano_roll = None
+        else:
+            self.was_piano_roll_open_before_unload = False
+
         self.controller.unload_midi()
         self._reset_parse_progress()
         self.reset_playback_state()
@@ -1847,15 +1856,6 @@ class DpgMidiPlayerApp(
         dpg.configure_item("seek_slider", enabled=False, max_value=100.0)
         dpg.configure_item("play_button", label="Play")
         self._refresh_transport_button_state()
-
-        if self.piano_roll and self.piano_roll.app_running.is_set():
-            self.was_piano_roll_open_before_unload = True
-            self.piano_roll.app_running.clear()
-            if self.piano_roll_thread and self.piano_roll_thread.is_alive():
-                self.piano_roll_thread.join(0.2)
-            self.piano_roll = None
-        else:
-            self.was_piano_roll_open_before_unload = False
 
         dpg.configure_item("load_button", label="Load MIDI", enabled=True)
         dpg.configure_item("voices_slider", enabled=True)

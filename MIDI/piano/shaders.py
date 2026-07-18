@@ -168,7 +168,7 @@ float hash21(vec2 p) {
 
 void main() {
     vec2 fw = fwidth(v_pos);
-    float texture_border_y = 1.5 * fw.y;
+    float texture_border_y = 1.0 * fw.y;
     vec4 texture_color;
     bool is_edge = false;
     if (v_note_h < 4.0) {
@@ -185,8 +185,8 @@ void main() {
 
     vec4 final_color;
     if (is_edge) {
-        float edge_bright = max(texture_color.r, max(texture_color.g, texture_color.b));
-        final_color = vec4(v_fragColor * max(edge_bright, 0.20), texture_color.a);
+        vec4 edge_color = texture_color * vec4(v_fragColor, 1.0);
+        final_color = vec4(mix(v_fragColor * 0.35, edge_color.rgb, edge_color.a), 1.0);
     } else {
         final_color = texture_color * vec4(v_fragColor, 1.0);
     }
@@ -220,7 +220,7 @@ void main() {
     float outline_px_uv = 1.0 / max(v_note_w, 1.0);
     float left_edge = step(v_pos.x, outline_px_uv);
     float right_edge = step(1.0 - outline_px_uv, v_pos.x);
-    if (left_edge + right_edge > 0.0) {
+    if (!is_edge && (left_edge + right_edge > 0.0)) {
         vec3 outline_color = v_fragColor * 0.35;
         final_color.rgb = outline_color;
     }

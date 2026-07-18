@@ -70,6 +70,12 @@ class PlayerController:
         if self.parsed_midi is not None:
             for attr in ('note_data_for_gpu', 'note_events_for_playback', 'sorted_off_times', 'tempo_times', 'tempo_bpms'):
                 try:
+                    arr = getattr(self.parsed_midi, attr, None)
+                    if arr is not None:
+                        try:
+                            arr._mmap.close()
+                        except Exception:
+                            pass
                     setattr(self.parsed_midi, attr, None)
                 except Exception:
                     pass

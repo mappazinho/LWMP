@@ -3,14 +3,15 @@ import numpy as np
 import ctypes
 from OpenGL.GL import *
 
-from piano.skin_utils import _SKIN_DIR
+
 
 
 class KeyboardMixin:
     """Keyboard layout, asset loading, and rendering methods for PianoRoll."""
 
     def _load_keyboard_assets(self):
-        skin_dir = _SKIN_DIR
+        import piano.skin_utils as _su
+        skin_dir = _su._SKIN_DIR
         try:
             key_type_to_filename = {
                 'white_key': 'keyWhite.png',

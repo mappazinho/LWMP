@@ -1008,7 +1008,11 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                 self.notes_to_draw = len(combined)
             if self.notes_to_draw > 0:
                 glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                glBufferSubData(GL_ARRAY_BUFFER, 0, self.last_visible_notes.nbytes, self.last_visible_notes)
+                data_size = self.last_visible_notes.nbytes
+                if data_size > self.vbo_stream_capacity_bytes:
+                    self.vbo_stream_capacity_bytes = data_size
+                glBufferData(GL_ARRAY_BUFFER, self.vbo_stream_capacity_bytes, None, GL_DYNAMIC_DRAW)
+                glBufferSubData(GL_ARRAY_BUFFER, 0, data_size, self.last_visible_notes)
         else:
             try:
                 queue_data = self.data_queue.get_nowait()
@@ -1018,7 +1022,11 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                     if self.notes_to_draw > 0:
                         self.last_visible_notes = combined
                         glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                        glBufferSubData(GL_ARRAY_BUFFER, 0, combined.nbytes, combined)
+                        data_size = combined.nbytes
+                        if data_size > self.vbo_stream_capacity_bytes:
+                            self.vbo_stream_capacity_bytes = data_size
+                        glBufferData(GL_ARRAY_BUFFER, self.vbo_stream_capacity_bytes, None, GL_DYNAMIC_DRAW)
+                        glBufferSubData(GL_ARRAY_BUFFER, 0, data_size, combined)
                     else:
                         self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
                 else:
@@ -1027,9 +1035,11 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                     if count > 0:
                         self.last_visible_notes = self.render_notes_array[start_idx:start_idx + count]
                         glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                        glBufferSubData(GL_ARRAY_BUFFER, 0, self.last_visible_notes.nbytes, self.last_visible_notes)
-                    else:
-                        self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
+                        data_size = self.last_visible_notes.nbytes
+                        if data_size > self.vbo_stream_capacity_bytes:
+                            self.vbo_stream_capacity_bytes = data_size
+                        glBufferData(GL_ARRAY_BUFFER, self.vbo_stream_capacity_bytes, None, GL_DYNAMIC_DRAW)
+                        glBufferSubData(GL_ARRAY_BUFFER, 0, data_size, self.last_visible_notes)
             except queue.Empty:
                 pass
 
@@ -1212,7 +1222,11 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
 
                 if active_count > 0:
                     glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                    glBufferSubData(GL_ARRAY_BUFFER, 0, active_notes.nbytes, active_notes)
+                    data_size = active_notes.nbytes
+                    if data_size > self.vbo_stream_capacity_bytes:
+                        self.vbo_stream_capacity_bytes = data_size
+                    glBufferData(GL_ARRAY_BUFFER, self.vbo_stream_capacity_bytes, None, GL_DYNAMIC_DRAW)
+                    glBufferSubData(GL_ARRAY_BUFFER, 0, data_size, active_notes)
                     glBindVertexArray(self.vao)
                     glDrawArraysInstanced(GL_TRIANGLES, 0, 6, active_count)
                     glBindVertexArray(0)
