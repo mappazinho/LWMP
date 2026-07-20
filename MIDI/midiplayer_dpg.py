@@ -412,19 +412,6 @@ class DpgMidiPlayerApp(
             labels["local"] = self.all_backend_labels["local"]
         return labels
 
-
-
-
-
-
-
-
-
-
-
-
-
-
     def _open_directory_dialog(self, callback):
         self.pending_directory_callback = callback
         dpg.show_item("library_directory_dialog")
@@ -446,21 +433,6 @@ class DpgMidiPlayerApp(
 
     def _on_directory_dialog_cancel(self):
         self.pending_directory_callback = None
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     def _get_combo_label_for_mode(self, mode):
         return self.backend_labels.get(mode, self.backend_labels["path"])
@@ -502,12 +474,6 @@ class DpgMidiPlayerApp(
         self.recommended_note_limit = self._detect_recommended_note_limit()
         if dpg.does_item_exist("status_info_text"):
             dpg.set_value("status_info_text", self._build_status_recommendation_text())
-
-
-
-
-
-
 
     def _build_audio_hint_text(self):
         lines = []
@@ -1519,12 +1485,6 @@ class DpgMidiPlayerApp(
             dpg.configure_item("midi_file_dialog", show=False)
             self._queue_ui(self._begin_load_file, filepath)
 
-
-
-
-
-
-
     def _center_modal(self, tag, width, height):
         viewport_w = dpg.get_viewport_client_width() or 900
         viewport_h = dpg.get_viewport_client_height() or 700
@@ -1535,7 +1495,6 @@ class DpgMidiPlayerApp(
                 max(20, int((viewport_h - height) * 0.5)),
             ],
         )
-
 
     def _wait_for_audio_sweep(self, timeout=2.0):
         if self.audio_sweep_thread and self.audio_sweep_thread.is_alive():
@@ -1592,14 +1551,6 @@ class DpgMidiPlayerApp(
     def set_status(self, text):
         dpg.set_value("status_text", text)
         dpg.set_value("backend_hint_text", self._build_audio_hint_text())
-
-
-
-
-
-
-
-
 
     def on_load_unload(self):
         if self.controller.parsed_midi is None:
@@ -1900,22 +1851,6 @@ class DpgMidiPlayerApp(
     def set_pitch_bend_range(self, semitones=12):
         self.controller.set_pitch_bend_range(semitones=semitones)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     def _preferred_drawtext_font(self):
         font_candidates = [
             r"C:\Windows\Fonts\segoeui.ttf",
@@ -1934,17 +1869,6 @@ class DpgMidiPlayerApp(
         escaped = escaped.replace("'", r"\'")
         escaped = escaped.replace(",", r"\,")
         return escaped
-
-
-
-
-
-
-
-
-
-
-
 
     def _update_plot_series(self):
         x_values = list(range(100))
