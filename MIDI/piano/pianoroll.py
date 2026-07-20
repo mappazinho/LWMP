@@ -1426,13 +1426,14 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                 glBindTexture(GL_TEXTURE_2D, self.note_edge_texture)
 
         glDisable(GL_DEPTH_TEST)
-        glBindVertexArray(self.vao)
-        glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-        glDrawArraysInstanced(GL_TRIANGLES, 0, 6, self.notes_to_draw)
-        if self.notes_to_draw > 500000 or self.vbo_debug:
-            err = glGetError()
-            if err:
-                print(f"[VBO_DEBUG] GL error at draw call (n={self.notes_to_draw}): {err}")
+        if not is_channel_split:
+            glBindVertexArray(self.vao)
+            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
+            glDrawArraysInstanced(GL_TRIANGLES, 0, 6, self.notes_to_draw)
+            if self.notes_to_draw > 500000 or self.vbo_debug:
+                err = glGetError()
+                if err:
+                    print(f"[VBO_DEBUG] GL error at draw call (n={self.notes_to_draw}): {err}")
 
         glBindVertexArray(0)
         glUseProgram(0)

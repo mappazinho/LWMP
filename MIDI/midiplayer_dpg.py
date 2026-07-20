@@ -45,7 +45,7 @@ except ImportError:
         return None
 
 DEBUG = False
-AUDIO_MIN_NOTE_VELOCITY = 10
+AUDIO_MIN_NOTE_VELOCITY = 1
 
 OmniMidiEngine = None
 
@@ -562,13 +562,6 @@ class DpgMidiPlayerApp(
                         width=118,
                         height=30,
                     )
-                    dpg.add_button(
-                        tag="skin_button",
-                        label="Skins",
-                        callback=self.show_skin_window,
-                        width=80,
-                        height=30,
-                    )
 
                 dpg.add_separator()
 
@@ -584,21 +577,20 @@ class DpgMidiPlayerApp(
                                 with dpg.table_row():
                                     with dpg.table_cell():
                                         dpg.add_text("Now Playing", tag="now_playing_text", color=(223, 177, 103), wrap=470)
-                                    with dpg.table_cell():
-                                        dpg.add_button(
-                                            tag="nps_spikes_button",
-                                            label="NPS Spikes",
-                                            callback=self.show_nps_spikes_window,
-                                            width=100,
-                                            height=28,
-                                            show=False,
-                                        )
                             with dpg.group(tag="status_line_group"):
                                 dpg.add_text(
                                     "Choose a startup mode to initialize audio.",
                                     tag="status_text",
                                     wrap=470,
                                     color=(196, 198, 204),
+                                )
+                                dpg.add_button(
+                                    tag="nps_spikes_button",
+                                    label="NPS Spikes",
+                                    callback=self.show_nps_spikes_window,
+                                    width=-1,
+                                    height=28,
+                                    show=False,
                                 )
                                 with dpg.group(tag="parse_progress_group", show=False):
                                     dpg.add_text("Parsing progress", tag="parse_progress_title", color=(160, 166, 178))
@@ -685,7 +677,6 @@ class DpgMidiPlayerApp(
                                 format="Speed: %.2fx",
                                 callback=self.on_speed_change,
                             )
-
                 dpg.add_separator()
                 with dpg.group(tag="performance_section"):
                     dpg.add_text("Performance", color=(223, 177, 103))
@@ -825,6 +816,13 @@ class DpgMidiPlayerApp(
                                             dpg.add_line_series(plot_x, list(self.cpu_history), tag="cpu_series")
 
                 with dpg.group(horizontal=True):
+                    dpg.add_button(
+                        tag="skin_button",
+                        label="Skins",
+                        callback=self.show_skin_window,
+                        width=80,
+                        height=30,
+                    )
                     dpg.add_button(
                         tag="customize_button",
                         label="Customize",
