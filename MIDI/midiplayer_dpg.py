@@ -166,7 +166,7 @@ def run_parser_process(filepath, result_queue, fallback_event_threshold=0, disk_
 from gui import (
     RenderMixin, PlaybackMixin, SoundfontMixin, LibraryMixin,
     SkinMixin, StartupMixin, GuiConfigMixin, TransportMixin,
-    PianoRollMixin, NpsSpikesMixin,
+    PianoRollMixin,
 )
 
 
@@ -180,7 +180,6 @@ class DpgMidiPlayerApp(
     GuiConfigMixin,
     TransportMixin,
     PianoRollMixin,
-    NpsSpikesMixin,
 ):
     # Module-level references for mixin access
     _save_config = staticmethod(save_config)
@@ -588,14 +587,6 @@ class DpgMidiPlayerApp(
                                     tag="status_text",
                                     wrap=470,
                                     color=(196, 198, 204),
-                                )
-                                dpg.add_button(
-                                    tag="nps_spikes_button",
-                                    label="NPS Spikes",
-                                    callback=self.show_nps_spikes_window,
-                                    width=-1,
-                                    height=28,
-                                    show=False,
                                 )
                                 with dpg.group(tag="parse_progress_group", show=False):
                                     dpg.add_text("Parsing progress", tag="parse_progress_title", color=(160, 166, 178))
@@ -1031,21 +1022,6 @@ class DpgMidiPlayerApp(
             )
             with dpg.group(horizontal=True):
                 dpg.add_button(label="Load Selected", width=140, height=30, callback=self.load_selected_soundfont_file)
-
-        with dpg.window(
-            tag="nps_spikes_window",
-            label="NPS Spikes",
-            modal=False,
-            show=False,
-            no_collapse=True,
-            width=460,
-            height=320,
-        ):
-            dpg.add_text("Top Parsed NPS Spikes", color=(223, 177, 103))
-            dpg.add_spacer(height=6)
-            dpg.add_text("", tag="nps_spikes_summary", color=(196, 198, 204), wrap=420)
-            dpg.add_spacer(height=8)
-            dpg.add_text("", tag="nps_spikes_text", color=(160, 166, 178), wrap=420)
 
         with dpg.window(
             tag="piano_roll_window",
@@ -1825,7 +1801,6 @@ class DpgMidiPlayerApp(
             self._build_midi_info_text(),
             title="MIDI Info",
         )
-        self._refresh_nps_spikes_window()
         dpg.set_value("seek_slider", 0.0)
         dpg.configure_item("seek_slider", enabled=True, max_value=float(self.controller.total_song_duration))
         dpg.configure_item("play_button", label="Play")
@@ -1879,9 +1854,6 @@ class DpgMidiPlayerApp(
         dpg.set_value("note_count_value", "0 / 0")
         dpg.set_value("bpm_value", "0")
         dpg.set_value("polyphony_value", "0")
-        self._refresh_nps_spikes_window()
-        if dpg.does_item_exist("nps_spikes_window"):
-            dpg.configure_item("nps_spikes_window", show=False)
         dpg.set_value("seek_slider", 0.0)
         dpg.configure_item("seek_slider", enabled=False, max_value=100.0)
         dpg.configure_item("play_button", label="Play")

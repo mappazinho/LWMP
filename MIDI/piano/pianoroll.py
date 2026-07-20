@@ -1075,7 +1075,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
 
         rm_labels = {"default": "Default", "channel_split": "Channel Split", "horizontal": "Horizontal View"}
         rm_label = rm_labels.get(self.renderer_mode, "Default")
-        rm_w = max(100, len(rm_label) * 8 + 20)
+        rm_w = max(100, self.overlay_font.size(rm_label)[0] + 24)
         self.renderer_mode_button_rect = pygame.Rect(self.width // 2 - rm_w // 2, 6, rm_w, 22)
 
     def draw(self, current_time, present=True):
@@ -1153,7 +1153,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         is_channel_split = self.renderer_mode == 'channel_split' and len(self.active_channels) > 0
         is_horizontal = self.renderer_mode == 'horizontal'
 
-        if self.show_bloom and self.screen_bloom_shader and self.scene_fbo and not is_horizontal:
+        if self.show_bloom and self.screen_bloom_shader and self.scene_fbo:
             glBindFramebuffer(GL_FRAMEBUFFER, self.scene_fbo)
             glViewport(0, 0, self.width, self.height)
             self._render_scene_content(current_time)

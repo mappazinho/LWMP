@@ -336,7 +336,7 @@ class PlayerController:
         self.max_nps, self.max_nps_spikes = self._compute_nps_stats(self.parsed_midi.note_events_for_playback)
         return self.parsed_midi
 
-    def _compute_nps_stats(self, note_events, top_k=5, min_separation=0.75):
+    def _compute_nps_stats(self, note_events):
         if note_events is None or len(note_events) == 0:
             return 0, []
 
@@ -347,33 +347,7 @@ class PlayerController:
         counts = np.arange(n, dtype=np.int64) - left_indices + 1
         max_count = int(counts.max())
 
-        diff_left = np.empty(n, dtype=counts.dtype)
-        diff_left[0] = -1
-        diff_left[1:] = counts[:-1]
-        diff_right = np.empty(n, dtype=counts.dtype)
-        diff_right[:-1] = counts[1:]
-        diff_right[-1] = -1
-
-        is_peak = ((counts > diff_left) & (counts >= diff_right)) | (
-            (counts >= diff_left) & (counts > diff_right)
-        )
-        peak_indices = np.where(is_peak & (counts > 0))[0]
-
-        if len(peak_indices) == 0:
-            best_idx = int(counts.argmax())
-            candidates = [(float(on_times[best_idx]), int(counts[best_idx]))]
-        else:
-            candidates = [(float(on_times[i]), int(counts[i])) for i in peak_indices]
-
-        selected = []
-        for spike_time, spike_value in sorted(candidates, key=lambda item: (-item[1], item[0])):
-            if all(abs(spike_time - existing_time) >= min_separation for existing_time, _ in selected):
-                selected.append((spike_time, spike_value))
-                if len(selected) >= top_k:
-                    break
-
-        selected.sort(key=lambda item: item[0])
-        return max_count, selected
+        return max_count, []
 
     def handle_parser_message(self, status, payload, start_padding=3.0, end_padding=3.0):
         if status == "total_events":

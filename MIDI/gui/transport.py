@@ -18,12 +18,10 @@ class TransportMixin:
     def _refresh_transport_button_state(self):
         has_midi = self.controller.parsed_midi is not None
         if has_midi:
-            dpg.show_item("nps_spikes_button")
             dpg.show_item("play_button")
             dpg.show_item("stop_button")
             dpg.show_item("piano_roll_button")
             dpg.show_item("render_button")
-            dpg.enable_item("nps_spikes_button")
             dpg.enable_item("play_button")
             dpg.enable_item("stop_button")
             if self._PianoRoll is not None:
@@ -35,12 +33,10 @@ class TransportMixin:
             else:
                 dpg.disable_item("render_button")
         else:
-            dpg.hide_item("nps_spikes_button")
             dpg.hide_item("play_button")
             dpg.hide_item("stop_button")
             dpg.hide_item("piano_roll_button")
             dpg.hide_item("render_button")
-            dpg.disable_item("nps_spikes_button")
             dpg.disable_item("play_button")
             dpg.disable_item("stop_button")
             dpg.disable_item("piano_roll_button")
