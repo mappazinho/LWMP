@@ -225,6 +225,7 @@ class DpgMidiPlayerApp(
         self.cpu_history = deque([0.0] * 100, maxlen=100)
         self.nps_history = deque([0] * 100, maxlen=100)
         self.ui_actions = queue.Queue()
+        self._init_pending = False
         self.loading_visible = False
         self.was_piano_roll_open_before_unload = False
         self.last_piano_roll_res = None
@@ -277,10 +278,14 @@ class DpgMidiPlayerApp(
         self._prepare_recommendation_info()
         if CONFIG["gui"].get("startup_completed", False):
             self.startup_ready = True
-            self.initialize_audio_backend()
+            self._queue_ui(self._init_backend_with_loading)
         else:
             self._prepare_startup_screen()
         atexit.register(self.cleanup)
+
+    def _init_backend_with_loading(self):
+        dpg.set_value("loading_status", "Initializing audio backend...")
+        self._init_pending = True
 
     def _gui_cfg(self):
         return CONFIG["gui"]
@@ -1362,6 +1367,20 @@ class DpgMidiPlayerApp(
         dpg.set_axis_limits("cpu_y_axis", 0, 100)
         self._apply_gui_customization()
 
+        with dpg.window(tag="splash_window", width=1040, height=820, pos=(0,0), no_title_bar=True, no_move=True, no_resize=True, no_close=True, show=False):
+            dpg.add_spacer(height=380)
+            with dpg.group(horizontal=True):
+                dpg.add_spacer(width=400)
+                dpg.add_text("L . W . M . P", color=(223, 177, 103))
+            dpg.add_spacer(height=8)
+            with dpg.group(horizontal=True):
+                dpg.add_spacer(width=420)
+                dpg.add_text("", tag="loading_status", color=(160, 166, 178))
+        with dpg.theme(tag="splash_theme"):
+            with dpg.theme_component():
+                dpg.add_theme_color(dpg.mvThemeCol_WindowBg, (24, 26, 32))
+        dpg.bind_item_theme("splash_window", "splash_theme")
+
 
     def _initialize_process_monitoring(self):
         try:
@@ -2217,6 +2236,13 @@ class DpgMidiPlayerApp(
 
     def run(self):
         try:
+            self._process_ui_queue()
+            if self._init_pending:
+                dpg.configure_item("splash_window", show=True)
+                dpg.render_dearpygui_frame()
+                self._init_pending = False
+                self.initialize_audio_backend()
+                dpg.configure_item("splash_window", show=False)
             while dpg.is_dearpygui_running():
                 self._process_ui_queue()
                 self._poll_parser()
