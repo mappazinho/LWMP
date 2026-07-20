@@ -85,40 +85,40 @@ def _build_parser_result_payload(parser, result_queue=None):
     }
     disk_gpu = getattr(parser, "_disk_gpu_path", None)
     disk_playback = getattr(parser, "_disk_playback_path", None)
-    disk_temp = getattr(parser, "_disk_temp_dir", None)
-    if (disk_gpu and disk_playback and os.path.exists(disk_gpu) and os.path.exists(disk_playback)):
+    temp_dir = tempfile.mkdtemp(prefix="lwmp_parse_")
+    gpu_path = os.path.join(temp_dir, "note_data_for_gpu.npy")
+    playback_path = os.path.join(temp_dir, "note_events_for_playback.npy")
+    if result_queue is not None:
+        result_queue.put((
+            "progress",
+            {
+                "fraction": 0.995,
+                "overlay": "99.5%",
+                "detail": "Preparing result transfer...",
+            },
+        ))
+    if disk_gpu and disk_playback and os.path.exists(disk_gpu) and os.path.exists(disk_playback):
         try:
-            _test = np.load(disk_gpu, mmap_mode=None, allow_pickle=True)
+            _test = np.load(disk_gpu, mmap_mode=None)
+            _test.dtype
             del _test
-            _test = np.load(disk_playback, mmap_mode=None, allow_pickle=True)
-            del _test
-            result_data["disk_backed_arrays"] = {
-                "note_data_for_gpu": disk_gpu,
-                "note_events_for_playback": disk_playback,
-            }
-            result_data["backing_temp_dir"] = disk_temp
+            shutil.copy2(disk_gpu, gpu_path)
+            shutil.copy2(disk_playback, playback_path)
         except Exception:
-            disk_gpu = None
-    if not result_data.get("disk_backed_arrays"):
-        temp_dir = tempfile.mkdtemp(prefix="lwmp_parse_")
-        gpu_path = os.path.join(temp_dir, "note_data_for_gpu.npy")
-        playback_path = os.path.join(temp_dir, "note_events_for_playback.npy")
-        if result_queue is not None:
-            result_queue.put((
-                "progress",
-                {
-                    "fraction": 0.995,
-                    "overlay": "99.5%",
-                    "detail": "Preparing result transfer...",
-                },
-            ))
+            try:
+                np.save(gpu_path, np.fromfile(disk_gpu, dtype=GPU_NOTE_DTYPE), allow_pickle=False)
+                np.save(playback_path, np.fromfile(disk_playback, dtype=PLAYBACK_EVENT_DTYPE), allow_pickle=False)
+            except Exception:
+                np.save(gpu_path, parser.note_data_for_gpu, allow_pickle=False)
+                np.save(playback_path, parser.note_events_for_playback, allow_pickle=False)
+    else:
         np.save(gpu_path, parser.note_data_for_gpu, allow_pickle=False)
         np.save(playback_path, parser.note_events_for_playback, allow_pickle=False)
-        result_data["disk_backed_arrays"] = {
-            "note_data_for_gpu": gpu_path,
-            "note_events_for_playback": playback_path,
-        }
-        result_data["backing_temp_dir"] = temp_dir
+    result_data["disk_backed_arrays"] = {
+        "note_data_for_gpu": gpu_path,
+        "note_events_for_playback": playback_path,
+    }
+    result_data["backing_temp_dir"] = temp_dir
     return result_data
 
 
@@ -1628,9 +1628,20 @@ class DpgMidiPlayerApp(
     def _prepare_for_new_midi_load(self):
         if self.piano_roll and self.piano_roll.app_running.is_set():
             self.was_piano_roll_open_before_unload = True
+
+            timer = getattr(self, '_load_midi_timer', None)
+            if timer is not None:
+                timer.cancel()
+                self._load_midi_timer = None
+
             self.piano_roll.app_running.clear()
+            try:
+                self._pygame.event.post(self._pygame.event.Event(self._pygame.QUIT))
+            except Exception:
+                pass
+
             if self.piano_roll_thread and self.piano_roll_thread.is_alive():
-                self.piano_roll_thread.join(2.0)
+                self.piano_roll_thread.join(5.0)
             self.piano_roll = None
             self.piano_roll_thread = None
 

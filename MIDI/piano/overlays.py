@@ -139,8 +139,11 @@ class OverlayMixin:
         if self.overlay_font is None:
             return None
         key = (text, color)
-        if key in self._text_texture_cache:
-            return self._text_texture_cache[key]
+        cached = self._text_texture_cache.get(key)
+        if cached is not None:
+            return cached
+        if len(self._text_texture_cache) > 200:
+            self._text_texture_cache.clear()
         surface = self.overlay_font.render(text, True, color)
         width, height = surface.get_size()
         image_data = pygame.image.tostring(surface, "RGBA", True)
@@ -272,6 +275,7 @@ class OverlayMixin:
                 if self.renderer_mode_button_rect and self.renderer_mode_button_rect.collidepoint(event.pos):
                     idx = self.renderer_modes.index(self.renderer_mode) if self.renderer_mode in self.renderer_modes else 0
                     self.renderer_mode = self.renderer_modes[(idx + 1) % len(self.renderer_modes)]
+                    self._vis_force_reset = True
                     self._save_visualizer_config()
                     return
             if self.controls_panel_expanded and self.scroll_slider_rect and self.scroll_slider_rect.collidepoint(event.pos):
@@ -326,6 +330,7 @@ class OverlayMixin:
         t = max(0.0, min(1.0, t))
         new_val = self.scroll_slider_min + t * (self.scroll_slider_max - self.scroll_slider_min)
         self.scroll_speed = new_val
+        self._vis_force_reset = True
         self._recalc_scroll_slider_handle()
         self._save_visualizer_config()
 
@@ -566,8 +571,9 @@ class OverlayMixin:
             glVertex2f(bx, by); glVertex2f(bx + bw, by)
             glVertex2f(bx + bw, by + bh); glVertex2f(bx, by + bh)
             glEnd()
-            rm_label = "Channel Split" if self.renderer_mode == 'channel_split' else "Default"
-            rm_tc = (110, 210, 255) if self.renderer_mode == 'channel_split' else (160, 170, 190)
+            rm_labels = {"default": "Default", "channel_split": "Channel Split", "horizontal": "Horizontal View"}
+            rm_label = rm_labels.get(self.renderer_mode, "Default")
+            rm_tc = {"default": (160, 170, 190), "channel_split": (110, 210, 255), "horizontal": (110, 255, 180)}.get(self.renderer_mode, (160, 170, 190))
             self._draw_text_overlay(rm_label, bx + 10, by + 4, color=rm_tc, alpha=0.95)
             glColor4f(0.35, 0.42, 0.58, 0.55)
             glLineWidth(1.0)

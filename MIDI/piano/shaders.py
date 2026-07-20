@@ -40,8 +40,9 @@ void main() {
     int track = int(note_info.z + 0.5);
     int channel = int(note_info.w + 0.5);
     int pitch_mod = int(mod(note_info.x, 12.0));
-    float note_depth = (pitch_mod == 1 || pitch_mod == 3 || pitch_mod == 6 || pitch_mod == 8 || pitch_mod == 10) ? 0.75 : 0.25;
-    note_depth += min(float(gl_InstanceID) * (1.0 / 1000000.0), 0.24);
+    bool is_sharp = (pitch_mod == 1 || pitch_mod == 3 || pitch_mod == 6 || pitch_mod == 8 || pitch_mod == 10);
+    float note_depth = (is_sharp ? 0.5 : 0.0);
+    float note_duration = max(off_time - on_time, 0.0001);
 
     if (u_renderer_mode == 1) {
         int lane_idx = u_channel_to_lane[channel];
@@ -52,7 +53,6 @@ void main() {
         float lane_top = float(lane_idx) * u_lane_height;
         float lane_guide_y = lane_top + u_lane_height * u_lane_guide_ratio;
         float note_area_h = lane_guide_y - lane_top;
-        float note_duration = max(off_time - on_time, 0.0001);
         float note_h = max(1.0, note_area_h * note_duration / u_timespan);
         float note_y = lane_top + note_area_h * (1.0 + (u_time - on_time) / u_timespan);
         if (note_y < lane_top || note_y - note_h > u_height) {
@@ -97,8 +97,31 @@ void main() {
         return;
     }
 
+    if (u_renderer_mode == 3) {
+        float key_h = u_height / 128.0;
+        float note_w = max(2.0, u_width * note_duration / u_timespan);
+        float note_x = u_width * (u_time - on_time) / u_timespan;
+        float note_y = float(pitch) * key_h;
 
-    float note_duration = max(off_time - on_time, 0.0001);
+        if (note_x < 0.0 || note_x - note_w > u_width) {
+            gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+            return;
+        }
+
+        vec2 instance_scale = vec2(note_w, key_h);
+        vec2 instance_offset = vec2(note_x - note_w, note_y);
+        vec2 final_pos = pos * instance_scale + instance_offset;
+        gl_Position = u_projection * vec4(final_pos, note_depth, 1.0);
+        v_pos = pos;
+        v_note_h = key_h;
+        v_note_w = note_w;
+        v_overclock_corrupt = 0.0;
+        int color_idx = int(mod(float(track), 128.0));
+        v_fragColor = u_colors[color_idx] * 1.2;
+        return;
+    }
+
+
     float note_h = max(2.0, u_guide_line_y * note_duration / u_timespan);
     float note_y = u_guide_line_y * (1.0 + (u_time - on_time) / u_timespan);
     if (note_y < 0.0 || note_y - note_h > u_height) {

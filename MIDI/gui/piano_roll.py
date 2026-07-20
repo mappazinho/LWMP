@@ -71,10 +71,15 @@ class PianoRollMixin:
 
         if self.controller.parsed_midi:
             notes_for_gpu = self.controller.parsed_midi.note_data_for_gpu.copy()
-            threading.Timer(
+            t = threading.Timer(
                 0.5,
-                lambda: self.piano_roll.load_midi(notes_for_gpu, self.get_current_playback_time_thread_safe),
-            ).start()
+                lambda pr=self.piano_roll, f=self.get_current_playback_time_thread_safe: (
+                    pr.load_midi(notes_for_gpu, f) if pr is not None else None
+                ),
+            )
+            t.daemon = True
+            t.start()
+            self._load_midi_timer = t
 
 
     def run_piano_roll(self):

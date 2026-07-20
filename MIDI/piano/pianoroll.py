@@ -5,11 +5,11 @@ from OpenGL.GL import *
 from OpenGL.GL.shaders import compileProgram, compileShader
 import time
 import threading
-import queue
 import numpy as np
 import ctypes
 import os
 import sys
+import bisect
 
 from config import save_config
 from piano.shaders import (
@@ -95,24 +95,22 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.u_bloom_blur_direction_loc = -1
         
         self.all_notes_gpu = None
-        self.data_queue = queue.Queue(maxsize=1)
         self.app_running = threading.Event()
         self.app_running.set()
-        self.force_data_update = threading.Event()
-        self.data_thread = None
-        self.last_stream_signature = None
         self.notes_to_draw = 0
         self.current_note_data = None
         self.get_current_time = None
         self.last_frame_time = 0.0
         self.export_total_duration = 0.0
+        self._time_index = None
         self.capacity_warning_active = False
         self.capacity_warning_visible_count = 0
+        self.vbo_debug = False
         
         vis_cfg = self.config.get('visualizer', {})
         gui_cfg = self.config.get('gui', {})
         self.scroll_speed = float(vis_cfg.get('scroll_speed', 2500.0))
-        self.scroll_slider_min = 200.0
+        self.scroll_slider_min = 400.0
         self.scroll_slider_max = 5000.0
         self.scroll_slider_dragging = False
         self.scroll_slider_rect = None
@@ -147,7 +145,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.overclock_mode = bool(vis_cfg.get('overclock_mode', False))
         self.hide_buttons = bool(vis_cfg.get('hide_buttons', False))
         self.renderer_mode = str(vis_cfg.get('renderer_mode', 'default'))
-        self.renderer_modes = ['default', 'channel_split']
+        self.renderer_modes = ['default', 'channel_split', 'horizontal']
         self.active_channels = []
         self.num_active_lanes = 0
         self.glow_cull_threshold = int(vis_cfg.get('glow_cull_threshold', 128))
@@ -162,10 +160,10 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         
         self.slider_area_height = 30
         
-        self.streaming_vbo_capacity = int(vis_cfg.get('streaming_vbo_capacity', 2000000))
+        self.streaming_vbo_capacity = int(vis_cfg.get('streaming_vbo_capacity', 5000000))
         self.guide_line_y_ratio = float(vis_cfg.get('guide_line_y_ratio', 0.8))
         self.use_gpu_cull = True
-        self.data_update_interval = float(vis_cfg.get('data_update_interval', 0.01))
+
 
         self.show_keyboard = bool(vis_cfg.get('show_keyboard', True))
         self.preferred_color_mode = "track"
@@ -209,6 +207,17 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.render_notes_by_mode = {}
         self.render_on_times_by_mode = {}
         self.max_note_duration = 10.0
+
+        self._vis_active_pos = None
+        self._vis_active_indices = None
+        self._vis_active_count = 0
+        self._vis_spawn_idx = 0
+        self._vis_expire_ptr = 0
+        self._vis_expire_order = None
+        self._vis_expire_times = None
+        self._vis_last_spawn_limit = None
+        self._vis_last_renderer_mode = None
+        self._vis_force_reset = True
         self.overlap_cull_duration_similarity = 0.82
         self.overlap_cull_coverage_threshold = 0.88
         self.overlap_cull_recent_candidates = 4
@@ -338,6 +347,8 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         if self.export_mode:
             self.render_notes_array = render_notes_array
             self.render_on_times = render_on_times
+            self._build_time_index()
+            self._rebuild_visible_acceleration()
             self.notes_to_draw = 0
             self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
         else:
@@ -351,8 +362,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                     'render_notes_array': render_notes_array,
                     'render_on_times': render_on_times
                 }
-            self.force_data_update.set()
-
     def set_preferred_color_mode(self, mode):
         mode = "channel" if mode == "channel" else "track"
         self.preferred_color_mode = mode
@@ -411,6 +420,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             self.all_notes_gpu = all_notes_gpu
             self.render_notes_array = render_notes_array
             self.render_on_times = render_on_times
+            self._rebuild_visible_acceleration()
             self.notes_to_draw = 0
             self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
         else:
@@ -440,84 +450,50 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.render_on_times_by_mode = data.get('render_on_times_by_mode', {})
         self.render_notes_array = data['render_notes_array']
         self.render_on_times = data['render_on_times']
-        self.last_stream_signature = None
+        self._build_time_index()
+        self._rebuild_visible_acceleration()
         self.notes_to_draw = 0
         self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
-        self.force_data_update.set()
         print("MIDI data active on GPU thread.")
 
-    def _data_streamer_thread(self):
-        """Background thread for computing the visible note index range."""
-        last_update_time = -1.0
-        while self.app_running.is_set():
-            if self.get_current_time is None or self.render_notes_array is None:
-                time.sleep(0.1)
-                continue
-            try:
-                now = self.get_current_time()
-            except:
-                time.sleep(0.1)
-                continue
+    def _build_time_index(self):
+        if self.render_on_times is None or len(self.render_on_times) < 2:
+            self._time_index = None
+            return
+        tmin = float(self.render_on_times[0])
+        tmax = float(self.render_on_times[-1])
+        step = 0.5
+        buckets = np.arange(tmin, tmax + step, step, dtype=np.float64)
+        indices = np.searchsorted(self.render_on_times, buckets, side='left')
+        self._time_index = (indices, tmin, step)
 
-            if abs(now - last_update_time) > self.data_update_interval or self.force_data_update.is_set():
-                self.force_data_update.clear()
-                last_update_time = now
-                self.capacity_warning_active = False
-                self.capacity_warning_visible_count = 0
+    def _search_by_on_time(self, view_start, view_end):
+        if self.render_notes_array is None or self.render_on_times is None:
+            return 0, 0
+        if view_end <= view_start:
+            return 0, 0
+        ti = self._time_index
+        if ti is not None and len(self.render_on_times) > 100000:
+            indices, tmin, step = ti
+            n = len(indices)
+            b_start = int((view_start - tmin) / step)
+            b_start = max(0, min(b_start, n - 2))
+            approx_start = int(indices[b_start])
+            b_end = int((view_end - tmin) / step) + 1
+            b_end = max(0, min(b_end, n - 1))
+            approx_end = int(indices[b_end])
+            if approx_end - approx_start <= 0:
+                approx_end = min(approx_start + 2000, len(self.render_on_times))
+            if approx_end - approx_start > 0:
+                sub = self.render_on_times[approx_start:approx_end]
+                start_idx = approx_start + int(np.searchsorted(sub, view_start, side='left'))
+                end_idx = approx_start + int(np.searchsorted(sub, view_end, side='right'))
+                return start_idx, end_idx - start_idx
+        start_idx = np.searchsorted(self.render_on_times, view_start, side='left')
+        end_idx = np.searchsorted(self.render_on_times, view_end, side='right')
+        return start_idx, end_idx - start_idx
 
-                guide_y = self._get_guide_line_y()
-                past_visible = max(0.1, guide_y / max(1.0, self.scroll_speed))
-                future_visible = max(0.1, (self.height - guide_y) / max(1.0, self.scroll_speed))
-                view_start = now - past_visible
-                view_end = now + future_visible + 2.0
-
-                on_start = np.searchsorted(self.render_on_times, view_start, side='left')
-                on_end = np.searchsorted(self.render_on_times, view_end, side='right')
-
-                sustained_extra = None
-                if on_start > 0:
-                    lookback_start = max(0, np.searchsorted(self.render_on_times, view_start - 60.0, side='left'))
-                    if lookback_start < on_start:
-                        candidate_view = self.render_notes_array[lookback_start:on_start]
-                        sustained_mask = candidate_view['off_time'] > now
-                        if np.any(sustained_mask):
-                            sustained_extra = candidate_view[sustained_mask]
-
-                if sustained_extra is not None:
-                    combined = np.ascontiguousarray(
-                        np.concatenate([sustained_extra, self.render_notes_array[on_start:on_end]])
-                    )
-                    self.last_stream_signature = None
-                    try:
-                        self.data_queue.put((combined,), block=True, timeout=0.1)
-                    except queue.Full:
-                        print("Piano roll queue is full, frame skipped.")
-                else:
-                    visible_count = on_end - on_start
-                    if self.last_stream_signature is not None and self.last_stream_signature == (on_start, on_end):
-                        time.sleep(0.005)
-                        continue
-                    self.last_stream_signature = (on_start, on_end)
-                    try:
-                        self.data_queue.put((on_start, visible_count), block=True, timeout=0.1)
-                    except queue.Full:
-                        print("Piano roll queue is full, frame skipped.")
-
-            time.sleep(0.005)
-
-    def _find_sustained_notes(self, on_start, current_time, view_start, lookback=60.0):
-        if self.render_notes_array is None or on_start <= 0:
-            return None
-        lookback_start = max(0, np.searchsorted(self.render_on_times, view_start - lookback, side='left'))
-        if lookback_start >= on_start:
-            return None
-        candidate_view = self.render_notes_array[lookback_start:on_start]
-        sustained_mask = candidate_view['off_time'] > current_time
-        if not np.any(sustained_mask):
-            return None
-        return candidate_view[sustained_mask]
-
-    def _slice_visible_notes_for_time(self, current_time):
+    def _slice_visible_notes_for_time(self, current_time, sustained_lookback=None):
         if self.render_notes_array is None or self.render_on_times is None:
             return 0, 0
 
@@ -526,13 +502,162 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         timespan = self._get_timespan()
         guide_y = self._get_guide_line_y()
         future_visible = max(0.1, (self.height - guide_y) * timespan / max(1.0, guide_y))
-        view_start = current_time - timespan
-        view_end = current_time + future_visible
+        if sustained_lookback is None:
+            max_dur = getattr(self, 'max_note_duration', 10.0)
+            sustained_lookback = min(max_dur, 15.0, timespan)
+        view_start = current_time - timespan - sustained_lookback
+        view_end = current_time + future_visible + 2.0
+        return self._search_by_on_time(view_start, view_end)
 
-        search_start = view_start
-        start_idx = np.searchsorted(self.render_on_times, search_start, side='left')
-        end_idx = np.searchsorted(self.render_on_times, view_end, side='right')
-        return start_idx, end_idx - start_idx
+    def _rebuild_visible_acceleration(self):
+        n = 0 if self.render_notes_array is None else len(self.render_notes_array)
+        if n == 0:
+            self._vis_active_pos = np.empty(0, dtype=np.int32)
+            self._vis_active_indices = np.empty(0, dtype=np.int32)
+            self._vis_active_count = 0
+            self._vis_spawn_idx = 0
+            self._vis_expire_ptr = 0
+            self._vis_expire_order = np.empty(0, dtype=np.int32)
+            self._vis_expire_times = np.empty(0, dtype=np.float32)
+            self._vis_last_spawn_limit = None
+            self._vis_last_renderer_mode = self.renderer_mode
+            self._vis_force_reset = True
+            return
+
+        idx_dtype = np.int32 if n <= np.iinfo(np.int32).max else np.int64
+        off = self.render_notes_array['off_time']
+        self._vis_expire_order = np.argsort(off, kind='stable').astype(idx_dtype, copy=False)
+        self._vis_expire_times = off[self._vis_expire_order].copy()
+        self._vis_active_pos = np.full(n, -1, dtype=idx_dtype)
+        self._vis_active_indices = np.empty(n, dtype=idx_dtype)
+        self._vis_active_count = 0
+        self._vis_spawn_idx = 0
+        self._vis_expire_ptr = 0
+        self._vis_last_spawn_limit = None
+        self._vis_last_renderer_mode = self.renderer_mode
+        self._vis_force_reset = True
+
+    def _reset_visible_active_at(self, spawn_limit, expire_before):
+        if self._vis_active_pos is None or len(self._vis_active_pos) == 0:
+            self._vis_active_count = 0
+            self._vis_spawn_idx = 0
+            self._vis_expire_ptr = 0
+            self._vis_last_spawn_limit = spawn_limit
+            return
+
+        prev_count = int(self._vis_active_count)
+        active_pos = self._vis_active_pos
+        active_indices = self._vis_active_indices
+        for i in range(prev_count):
+            idx = int(active_indices[i])
+            active_pos[idx] = -1
+
+        active_count = 0
+        self._vis_expire_ptr = int(bisect.bisect_left(self._vis_expire_times, expire_before))
+        self._vis_spawn_idx = int(bisect.bisect_right(self.render_on_times, spawn_limit))
+
+        max_dur = float(getattr(self, 'max_note_duration', 0.0))
+        cand_start = float(expire_before) - max_dur - 0.25
+        sidx, cnt = self._search_by_on_time(cand_start, spawn_limit)
+        if cnt > 0:
+            off = self.render_notes_array['off_time'][sidx:sidx + cnt]
+            mask = off >= expire_before
+            local = np.flatnonzero(mask)
+            if local.size:
+                active_idx = (local + sidx).astype(active_indices.dtype, copy=False)
+                active_count = int(active_idx.size)
+                active_indices[:active_count] = active_idx
+                active_pos[active_idx] = np.arange(active_count, dtype=active_pos.dtype)
+
+        self._vis_active_count = active_count
+        self._vis_last_spawn_limit = spawn_limit
+
+    def _update_visible_notes(self, current_time):
+        self.capacity_warning_active = False
+        self.capacity_warning_visible_count = 0
+
+        if self._vis_active_pos is None:
+            self._rebuild_visible_acceleration()
+
+        if (self.render_notes_array is None or len(self.render_notes_array) == 0 or self._vis_active_pos is None):
+            self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
+            self.notes_to_draw = 0
+            return
+
+        timespan = self._get_timespan()
+        guide_y = max(1.0, self._get_guide_line_y())
+
+        if self.renderer_mode == 'horizontal':
+            future_visible = timespan
+            spawn_ahead = 0.1
+        elif self.renderer_mode == 'channel_split':
+            future_visible = 0.0
+            spawn_ahead = 0.1
+        else:
+            future_visible = max(0.0, (self.height - guide_y) * timespan / guide_y)
+            spawn_ahead = timespan + 0.1
+
+        expire_before = float(current_time) - float(future_visible) - 0.05
+        spawn_limit = float(current_time) + float(spawn_ahead)
+
+        need_reset = (self._vis_force_reset or self._vis_last_spawn_limit is None or self.renderer_mode != self._vis_last_renderer_mode or spawn_limit < float(self._vis_last_spawn_limit) - 1e-6)
+
+        if need_reset:
+            self._reset_visible_active_at(spawn_limit, expire_before)
+            self._vis_force_reset = False
+            self._vis_last_renderer_mode = self.renderer_mode
+
+        active_pos = self._vis_active_pos
+        active_indices = self._vis_active_indices
+        active_count = int(self._vis_active_count)
+        expire_ptr = int(self._vis_expire_ptr)
+        spawn_idx = int(self._vis_spawn_idx)
+        expire_order = self._vis_expire_order
+        expire_times = self._vis_expire_times
+        on_times = self.render_on_times
+        off_times = self.render_notes_array['off_time']
+        n = len(on_times)
+
+        new_expire_ptr = int(bisect.bisect_left(expire_times, expire_before))
+        if new_expire_ptr > expire_ptr:
+            expired = expire_order[expire_ptr:new_expire_ptr]
+            for idx in expired:
+                p = int(active_pos[idx])
+                if p != -1:
+                    active_count -= 1
+                    last = int(active_indices[active_count])
+                    active_indices[p] = last
+                    active_pos[last] = p
+                    active_pos[idx] = -1
+            expire_ptr = new_expire_ptr
+
+        new_spawn_idx = int(bisect.bisect_right(on_times, spawn_limit))
+        if new_spawn_idx > spawn_idx:
+            spawn_off = off_times[spawn_idx:new_spawn_idx]
+            keep = np.flatnonzero(spawn_off >= expire_before)
+            if keep.size > 0:
+                new_indices = keep.astype(active_indices.dtype, copy=False)
+                new_indices += spawn_idx
+                n_new = len(new_indices)
+                active_indices[active_count:active_count + n_new] = new_indices
+                active_pos[new_indices] = np.arange(active_count, active_count + n_new, dtype=active_pos.dtype)
+                active_count += n_new
+            spawn_idx = new_spawn_idx
+
+        self._vis_active_count = active_count
+        self._vis_expire_ptr = expire_ptr
+        self._vis_spawn_idx = spawn_idx
+        self._vis_last_spawn_limit = spawn_limit
+
+        if active_count <= 0:
+            self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
+            self.notes_to_draw = 0
+            return
+
+        idx = active_indices[:active_count].copy()
+        idx.sort(kind='stable')
+        self.last_visible_notes = self.render_notes_array[idx]
+        self.notes_to_draw = active_count
 
     def init_pygame_and_gl(self, hidden=False, disable_vsync=False):
         import piano.skin_utils as _su
@@ -654,7 +779,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
         self.note_size_bytes = RENDER_NOTE_DTYPE.itemsize
         self.vbo_stream_capacity_bytes = self.streaming_vbo_capacity * self.note_size_bytes
-        glBufferData(GL_ARRAY_BUFFER, self.vbo_stream_capacity_bytes, None, GL_DYNAMIC_DRAW)
+        glBufferData(GL_ARRAY_BUFFER, self.vbo_stream_capacity_bytes, None, GL_STREAM_DRAW)
         
         glEnableVertexAttribArray(note_times_loc); glVertexAttribPointer(note_times_loc, 2, GL_FLOAT, GL_FALSE, self.note_size_bytes, ctypes.c_void_p(0)); glVertexAttribDivisor(note_times_loc, 1)
         glEnableVertexAttribArray(note_info_loc)
@@ -920,9 +1045,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
 
         glUseProgram(0)
         
-        if not self.export_mode:
-            self.data_thread = threading.Thread(target=self._data_streamer_thread, daemon=True)
-            self.data_thread.start()
         
         margin = 10
         self.color_button_rect = pygame.Rect(self.width - self.color_button_size - margin, margin, self.color_button_size, self.color_button_size)
@@ -951,14 +1073,16 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         )
         self.overclock_checkbox_rect = pygame.Rect(self.fun_options_panel_rect.x + 10, self.fun_options_panel_rect.y + 28, 16, 16)
 
-        rm_label = "Channel Split" if self.renderer_mode == 'channel_split' else "Default"
+        rm_labels = {"default": "Default", "channel_split": "Channel Split", "horizontal": "Horizontal View"}
+        rm_label = rm_labels.get(self.renderer_mode, "Default")
         rm_w = max(100, len(rm_label) * 8 + 20)
         self.renderer_mode_button_rect = pygame.Rect(self.width // 2 - rm_w // 2, 6, rm_w, 22)
 
     def draw(self, current_time, present=True):
         """Draw the latest buffer provided by the data thread."""
         self.last_frame_time = current_time
-        now = time.perf_counter()
+        t0 = time.perf_counter()
+        now = t0
         dt = now - self._last_fps_time
         self._last_fps_time = now
         if dt > 0:
@@ -992,60 +1116,44 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         else:
             self.glow_trails.clear()
             self._split_fade_trails.clear()
-
-        if self.export_mode:
-            start_idx, count = self._slice_visible_notes_for_time(current_time)
-            self.notes_to_draw = count
-            if count > 0:
-                self.last_visible_notes = self.render_notes_array[start_idx:start_idx + count]
-            else:
-                self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
-            view_start = self._get_quantized_time(current_time) - self._get_timespan()
-            sustained_extra = self._find_sustained_notes(start_idx, current_time, view_start)
-            if sustained_extra is not None:
-                combined = np.ascontiguousarray(np.concatenate([sustained_extra, self.last_visible_notes]))
-                self.last_visible_notes = combined
-                self.notes_to_draw = len(combined)
-            if self.notes_to_draw > 0:
-                glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                data_size = self.last_visible_notes.nbytes
-                if data_size > self.vbo_stream_capacity_bytes:
-                    self.vbo_stream_capacity_bytes = data_size
-                glBufferData(GL_ARRAY_BUFFER, self.vbo_stream_capacity_bytes, None, GL_DYNAMIC_DRAW)
-                glBufferSubData(GL_ARRAY_BUFFER, 0, data_size, self.last_visible_notes)
-        else:
-            try:
-                queue_data = self.data_queue.get_nowait()
-                if isinstance(queue_data[0], np.ndarray):
-                    combined = queue_data[0]
-                    self.notes_to_draw = len(combined)
-                    if self.notes_to_draw > 0:
-                        self.last_visible_notes = combined
-                        glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                        data_size = combined.nbytes
-                        if data_size > self.vbo_stream_capacity_bytes:
-                            self.vbo_stream_capacity_bytes = data_size
-                        glBufferData(GL_ARRAY_BUFFER, self.vbo_stream_capacity_bytes, None, GL_DYNAMIC_DRAW)
-                        glBufferSubData(GL_ARRAY_BUFFER, 0, data_size, combined)
-                    else:
-                        self.last_visible_notes = np.empty(0, dtype=RENDER_NOTE_DTYPE)
-                else:
-                    start_idx, count = queue_data
-                    self.notes_to_draw = count
-                    if count > 0:
-                        self.last_visible_notes = self.render_notes_array[start_idx:start_idx + count]
-                        glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                        data_size = self.last_visible_notes.nbytes
-                        if data_size > self.vbo_stream_capacity_bytes:
-                            self.vbo_stream_capacity_bytes = data_size
-                        glBufferData(GL_ARRAY_BUFFER, self.vbo_stream_capacity_bytes, None, GL_DYNAMIC_DRAW)
-                        glBufferSubData(GL_ARRAY_BUFFER, 0, data_size, self.last_visible_notes)
-            except queue.Empty:
-                pass
+        t1 = time.perf_counter()
+        self._update_visible_notes(current_time)
+        if self.notes_to_draw > 0:
+            pitch_mod = self.last_visible_notes['pitch'].astype(np.int32) % 12
+            is_sharp = np.isin(pitch_mod, [1, 3, 6, 8, 10])
+            n_sharp = np.count_nonzero(is_sharp)
+            if 0 < n_sharp < self.notes_to_draw:
+                order = np.concatenate([np.flatnonzero(~is_sharp), np.flatnonzero(is_sharp)])
+                self.last_visible_notes = self.last_visible_notes[order]
+        t_vbo = time.perf_counter()
+        if self.notes_to_draw > 0:
+            glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
+            data_size = self.last_visible_notes.nbytes
+            actual_len = len(self.last_visible_notes)
+            if actual_len != self.notes_to_draw:
+                print(f"[VBO_DEBUG] MISMATCH: notes_to_draw={self.notes_to_draw} != len(notes)={actual_len}, clamping!")
+                self.notes_to_draw = min(self.notes_to_draw, actual_len)
+                data_size = self.notes_to_draw * self.note_size_bytes
+            do_log = (data_size > self.vbo_stream_capacity_bytes) or (self.notes_to_draw > 500000) or self.vbo_debug
+            if do_log:
+                err = glGetError()
+                print(f"[VBO_DEBUG] upload: n={self.notes_to_draw}  size={data_size}  cap={self.vbo_stream_capacity_bytes}  resize={data_size > self.vbo_stream_capacity_bytes}  glerr={err}")
+            if data_size > self.vbo_stream_capacity_bytes:
+                self.vbo_stream_capacity_bytes = data_size + 4096
+                glBufferData(GL_ARRAY_BUFFER, self.vbo_stream_capacity_bytes, None, GL_STREAM_DRAW)
+                err = glGetError()
+                if err or do_log:
+                    print(f"[VBO_DEBUG] resize: new_cap={self.vbo_stream_capacity_bytes}  glerr={err}")
+            glBufferSubData(GL_ARRAY_BUFFER, 0, data_size, self.last_visible_notes[:self.notes_to_draw])
+            err = glGetError()
+            if err:
+                print(f"[VBO_DEBUG] GL error after glBufferSubData: {err}")
+        t2 = time.perf_counter()
 
         is_channel_split = self.renderer_mode == 'channel_split' and len(self.active_channels) > 0
+        is_horizontal = self.renderer_mode == 'horizontal'
 
-        if self.show_bloom and self.screen_bloom_shader and self.scene_fbo:
+        if self.show_bloom and self.screen_bloom_shader and self.scene_fbo and not is_horizontal:
             glBindFramebuffer(GL_FRAMEBUFFER, self.scene_fbo)
             glViewport(0, 0, self.width, self.height)
             self._render_scene_content(current_time)
@@ -1056,6 +1164,16 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             self._draw_scene_bloom_composite()
         else:
             self._render_scene_content(current_time)
+        t3 = time.perf_counter()
+        _vbo_debug_suffix = ""
+        if (self.notes_to_draw > 500000 or self.vbo_debug) and self.notes_to_draw > 0:
+            err = glGetError()
+            if err:
+                print(f"[VBO_DEBUG] GL error after draw: {err}")
+            first_on = self.last_visible_notes[0]['on_time'] if len(self.last_visible_notes) else -1
+            last_on = self.last_visible_notes[min(self.notes_to_draw - 1, len(self.last_visible_notes) - 1)]['on_time'] if self.notes_to_draw > 0 else -1
+            arr_len = len(self.last_visible_notes)
+            _vbo_debug_suffix = f"  vbo_draw={self.notes_to_draw}  vbo_arr={arr_len}  on_rng=[{first_on:.2f},{last_on:.2f}]"
 
         if not self.export_mode:
             self._draw_slider_overlay()
@@ -1064,6 +1182,20 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                 self._draw_stats_overlay(current_time)
         else:
             self._draw_stats_overlay(current_time)
+        t4 = time.perf_counter()
+
+        if hasattr(self, '_profile_count'):
+            self._profile_count += 1
+        else:
+            self._profile_count = 0
+        if self._profile_count % 60 == 0:
+            t_prep = (t1 - t0) * 1000
+            t_notes = (t_vbo - t1) * 1000
+            t_vbo_ms = (t2 - t_vbo) * 1000
+            t_render = (t3 - t2) * 1000
+            t_overlay = (t4 - t3) * 1000
+            t_total = (t4 - t0) * 1000
+            print(f"[PROFILE] prep={t_prep:.1f}ms  notes={t_notes:.1f}ms  vbo={t_vbo_ms:.1f}ms  render={t_render:.1f}ms  overlay={t_overlay:.1f}ms  total={t_total:.1f}ms  visible_notes={self.notes_to_draw}{_vbo_debug_suffix}")
 
         if present:
             pygame.display.flip()
@@ -1133,18 +1265,18 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
 
         is_channel_split = self.renderer_mode == 'channel_split' and len(self.active_channels) > 0
+        is_horizontal = self.renderer_mode == 'horizontal'
 
         if self.notes_to_draw > 0 and self.render_notes_array is not None:
 
-            glEnable(GL_DEPTH_TEST)
-            glDepthMask(GL_TRUE)
+            glDisable(GL_DEPTH_TEST)
             glUseProgram(self.shader)
 
             rnd_time = self._get_quantized_time(current_time)
             glUniform1f(self.u_time_loc, rnd_time)
             glUniform1f(self.u_timespan_loc, self._get_timespan())
             if self.u_overclock_loc != -1:
-                glUniform1f(self.u_overclock_loc, self.overclock_intensity if not is_channel_split else 0.0)
+                glUniform1f(self.u_overclock_loc, self.overclock_intensity if not is_channel_split and not is_horizontal else 0.0)
 
             active_ch = np.zeros(16, dtype=np.int32)
             for ch in self.active_channels:
@@ -1280,8 +1412,11 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                     self._draw_text_overlay(f"CH {ch}", 6, y + 3, color=(160, 170, 190), alpha=0.6)
 
             else:
-                glUniform1i(self.u_renderer_mode_loc, 0)
-                glUniform1f(glGetUniformLocation(self.shader, "u_guide_line_y"), self._get_guide_line_y())
+                if is_horizontal:
+                    glUniform1i(self.u_renderer_mode_loc, 3)
+                else:
+                    glUniform1i(self.u_renderer_mode_loc, 0)
+                    glUniform1f(glGetUniformLocation(self.shader, "u_guide_line_y"), self._get_guide_line_y())
                 if self.u_channel_to_lane_loc != -1:
                     glUniform1iv(self.u_channel_to_lane_loc, 16, channel_to_lane)
 
@@ -1290,16 +1425,20 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
                 glActiveTexture(GL_TEXTURE1)
                 glBindTexture(GL_TEXTURE_2D, self.note_edge_texture)
 
-                glBindVertexArray(self.vao)
-                glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
-                glDrawArraysInstanced(GL_TRIANGLES, 0, 6, self.notes_to_draw)
+        glDisable(GL_DEPTH_TEST)
+        glBindVertexArray(self.vao)
+        glBindBuffer(GL_ARRAY_BUFFER, self.vbo_stream_data)
+        glDrawArraysInstanced(GL_TRIANGLES, 0, 6, self.notes_to_draw)
+        if self.notes_to_draw > 500000 or self.vbo_debug:
+            err = glGetError()
+            if err:
+                print(f"[VBO_DEBUG] GL error at draw call (n={self.notes_to_draw}): {err}")
 
-                glBindVertexArray(0)
-                glUseProgram(0)
-                glBindBuffer(GL_ARRAY_BUFFER, 0)
-                glDisable(GL_DEPTH_TEST)
+        glBindVertexArray(0)
+        glUseProgram(0)
+        glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-        if is_channel_split:
+        if is_channel_split or is_horizontal:
             pass
         else:
             if self.show_glow and self.show_key_press_glow:
@@ -1307,7 +1446,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
             if self.show_keyboard and self.keyboard_layout:
                 self._draw_keyboard_opengl(current_time)
 
-        if not is_channel_split and self.show_guide_line:
+        if not is_channel_split and not is_horizontal and self.show_guide_line:
             glDisable(GL_DEPTH_TEST)
             glUseProgram(0)
             glMatrixMode(GL_PROJECTION);glPushMatrix();glLoadIdentity();glOrtho(0,self.width,self.height,0,-1,1)
@@ -1416,9 +1555,6 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
 
     def cleanup(self):
         self.app_running.clear()
-        if self.data_thread:
-            self.data_thread.join(timeout=0.5)
-
         self._text_texture_cache.clear()
 
         glDeleteProgram(self.shader)
