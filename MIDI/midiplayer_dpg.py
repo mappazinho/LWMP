@@ -1639,6 +1639,14 @@ class DpgMidiPlayerApp(
             self._message_warning("Startup Required", "Choose a startup audio mode before loading a MIDI.")
             return
 
+        if self.controller.parser_process and self.controller.parser_process.is_alive():
+            self._message_warning("Busy", "Already parsing a file. Please wait.")
+            return
+
+        if self._parse_normalize_thread and self._parse_normalize_thread.is_alive():
+            self._message_warning("Busy", "Still normalizing previous parse. Please wait.")
+            return
+
         if self.controller.playing:
             self.controller.playing = False
             self.controller.paused = False
@@ -1654,14 +1662,6 @@ class DpgMidiPlayerApp(
         dpg.set_value("seek_slider", 0.0)
         dpg.configure_item("seek_slider", enabled=False, max_value=100.0)
         self._refresh_transport_button_state()
-
-        if self.controller.parser_process and self.controller.parser_process.is_alive():
-            self._message_warning("Busy", "Already parsing a file. Please wait.")
-            return
-
-        if self._parse_normalize_thread and self._parse_normalize_thread.is_alive():
-            self._message_warning("Busy", "Still normalizing previous parse. Please wait.")
-            return
 
         if filepath:
             self._begin_load_file(filepath)
