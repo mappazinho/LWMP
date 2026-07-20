@@ -489,7 +489,7 @@ class DpgMidiPlayerApp(
         cpu_threads = os.cpu_count() or 0
         return (
             f"Recommended Backend: {recommended_mode_label}\n"
-            f"Recommended Note Capacity: {note_limit:.1f} Million notes (based on free RAM)\n"
+            f"Max Note Capacity: {note_limit:.1f} Million notes (based on free RAM)\n"
             f"Recommended Piano Roll Resolution: {res_w} x {res_h}\n"
             f"System CPU Threads: {cpu_threads} | Free RAM: {free_ram_gb:.1f} GB"
         )
@@ -520,20 +520,9 @@ class DpgMidiPlayerApp(
             lines.append("Choose a startup mode to initialize audio.")
         return "\n".join(lines)
 
-
-
-
-
-
-
-
-
-
-
-
     def _build_ui(self):
         dpg.create_context()
-        dpg.create_viewport(title="LWMP - v1.4.0", width=1040, height=820)
+        dpg.create_viewport(title="LWMP - v1.5.0", width=1040, height=820)
 
         default_mode = self._normalize_backend_mode(CONFIG["audio"].get("omnimidi_load_preference", "path"))
         default_combo_label = self._get_combo_label_for_mode(default_mode)
