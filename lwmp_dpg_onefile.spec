@@ -84,4 +84,5 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,
     disable_windowed_traceback=False,
+    icon=os.path.join(PROJECT_ROOT, "icon", "logo.ico"),
 )
