@@ -1584,10 +1584,18 @@ class DpgMidiPlayerApp(
             return
 
         if self.controller.parser_process and self.controller.parser_process.is_alive():
+            if self.controller.parsed_midi is not None:
+                if filepath:
+                    self._queue_ui(self._begin_load_file, filepath)
+                    return
             self._message_warning("Busy", "Already parsing a file. Please wait.")
             return
 
         if self._parse_normalize_thread and self._parse_normalize_thread.is_alive():
+            if self.controller.parsed_midi is not None:
+                if filepath:
+                    self._queue_ui(self._begin_load_file, filepath)
+                    return
             self._message_warning("Busy", "Still normalizing previous parse. Please wait.")
             return
 
@@ -1596,16 +1604,18 @@ class DpgMidiPlayerApp(
             self.controller.paused = False
             dpg.configure_item("play_button", label="Play")
 
-        self._prepare_for_new_midi_load()
-        self.reset_playback_state()
-        self.controller.unload_midi()
-        self.pending_midi_name = None
-        self._update_now_playing_header()
-        dpg.set_value("time_text", "00:00 / 00:00")
-        dpg.set_value("note_count_value", "0 / 0")
-        dpg.set_value("seek_slider", 0.0)
-        dpg.configure_item("seek_slider", enabled=False, max_value=100.0)
-        self._refresh_transport_button_state()
+        has_midi = self.controller.parsed_midi is not None
+        if not has_midi:
+            self._prepare_for_new_midi_load()
+            self.reset_playback_state()
+            self.controller.unload_midi()
+            self.pending_midi_name = None
+            self._update_now_playing_header()
+            dpg.set_value("time_text", "00:00 / 00:00")
+            dpg.set_value("note_count_value", "0 / 0")
+            dpg.set_value("seek_slider", 0.0)
+            dpg.configure_item("seek_slider", enabled=False, max_value=100.0)
+            self._refresh_transport_button_state()
 
         if filepath:
             self._begin_load_file(filepath)
@@ -1685,6 +1695,24 @@ class DpgMidiPlayerApp(
                             self._update_parse_progress(0.0, "Working...", str(progress_payload))
                 elif status == "success":
                     self._update_parse_progress(0.95, "Normalizing...", "Normalizing parsed data...")
+                    if self.controller.parsed_midi is not None:
+                        if self.controller.playing:
+                            self.controller.playing = False
+                            self.controller.paused = False
+                            dpg.configure_item("play_button", label="Play")
+                        self.reset_playback_state()
+                        self.controller.unload_midi()
+                        if self.piano_roll and self.piano_roll.app_running.is_set():
+                            self.was_piano_roll_open_before_unload = True
+                            timer = getattr(self, '_load_midi_timer', None)
+                            if timer is not None:
+                                timer.cancel()
+                                self._load_midi_timer = None
+                            self.piano_roll.app_running.clear()
+                            if self.piano_roll_thread and self.piano_roll_thread.is_alive():
+                                self.piano_roll_thread.join(1.0)
+                            self.piano_roll = None
+                            self.piano_roll_thread = None
                     self._parse_normalize_thread = threading.Thread(
                         target=self._normalize_parse_in_thread,
                         args=(payload,),
@@ -1735,6 +1763,12 @@ class DpgMidiPlayerApp(
     def _on_parse_normalized(self):
         if self.controller.parsed_midi is None:
             return
+
+        if self.controller.playing:
+            self.controller.playing = False
+            self.controller.paused = False
+            dpg.configure_item("play_button", label="Play")
+
         self._reset_parse_progress()
         self._update_now_playing_header()
         dpg.set_value("status_text", "Ready to play.")
@@ -1780,6 +1814,11 @@ class DpgMidiPlayerApp(
             self.controller.playing = False
             if self.playback_thread and self.playback_thread.is_alive():
                 self.playback_thread.join(0.1)
+
+        timer = getattr(self, '_load_midi_timer', None)
+        if timer is not None:
+            timer.cancel()
+            self._load_midi_timer = None
 
         self.loading_visible = False
         self._parse_normalize_thread = None

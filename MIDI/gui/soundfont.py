@@ -185,15 +185,21 @@ class SoundfontMixin:
 
         current_mode = self._normalize_backend_mode(self._CONFIG["audio"].get("omnimidi_load_preference", "path"))
         if current_mode == "bassmidi":
-            self._stop_playback_for_backend_reinit()
-            if self.controller.active_midi_backend:
-                try:
-                    self.controller.shutdown()
-                except Exception as e:
-                    print(f"Failed to shutdown current backend before soundfont change: {e}")
-            self.controller.active_midi_backend = None
-            self.set_status("Reinitializing BASSMIDI with new SoundFont...")
-            self.initialize_audio_backend()
+            if self.controller.parsed_midi is not None:
+                if self.controller.reload_soundfont(sf_path):
+                    self.set_status(f"SoundFont changed to {os.path.basename(sf_path)}.")
+                else:
+                    self.set_status(f"SoundFont will change on next MIDI load.")
+            else:
+                self._stop_playback_for_backend_reinit()
+                if self.controller.active_midi_backend:
+                    try:
+                        self.controller.shutdown()
+                    except Exception as e:
+                        print(f"Failed to shutdown current backend before soundfont change: {e}")
+                self.controller.active_midi_backend = None
+                self.set_status("Reinitializing BASSMIDI with new SoundFont...")
+                self.initialize_audio_backend()
         else:
             self.set_status(f"SoundFont set to {os.path.basename(sf_path)}. It will be used when BASSMIDI is selected.")
 

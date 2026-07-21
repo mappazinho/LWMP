@@ -251,6 +251,7 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
         self.controls_panel_size = (300, 184)
         self.overlay_font = None
         self._text_texture_cache = {}
+        self._text_cache_order = set()
         self.hover_fade_states = {}
         self.hover_tooltip_text = None
         self.hover_mouse_pos = (0, 0)
@@ -1556,7 +1557,11 @@ class PianoRoll(BloomMixin, GlowMixin, KeyboardMixin, OverlayMixin):
 
     def cleanup(self):
         self.app_running.clear()
+        for tex_id, _, _ in self._text_texture_cache.values():
+            if tex_id:
+                glDeleteTextures([tex_id])
         self._text_texture_cache.clear()
+        self._text_cache_order.clear()
 
         glDeleteProgram(self.shader)
         if self.bloom_shader:

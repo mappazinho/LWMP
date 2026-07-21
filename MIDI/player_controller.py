@@ -69,29 +69,21 @@ class PlayerController:
         temp_dir = getattr(self.parsed_midi, "_backing_temp_dir", None) if self.parsed_midi is not None else None
         if self.parsed_midi is not None:
             for attr in ('note_data_for_gpu', 'note_events_for_playback', 'sorted_off_times', 'tempo_times', 'tempo_bpms'):
-                try:
-                    arr = getattr(self.parsed_midi, attr, None)
-                    if arr is not None:
-                        try:
-                            arr._mmap.close()
-                        except Exception:
-                            pass
-                    setattr(self.parsed_midi, attr, None)
-                except Exception:
-                    pass
+                arr = getattr(self.parsed_midi, attr, None)
+                if arr is not None and hasattr(arr, '_mmap') and arr._mmap is not None:
+                    try:
+                        arr._mmap.close()
+                    except Exception as e:
+                        print(f"[cleanup] Failed to close mmap for {attr}: {e}")
+                setattr(self.parsed_midi, attr, None)
         self.parsed_midi = None
         gc.collect()
         gc.collect()
         if temp_dir and os.path.isdir(temp_dir):
-            for f in os.listdir(temp_dir):
-                fp = os.path.join(temp_dir, f)
-                try:
-                    os.remove(fp)
-                except Exception:
-                    pass
             try:
-                os.rmdir(temp_dir)
-            except Exception:
+                shutil.rmtree(temp_dir, ignore_errors=False)
+            except Exception as e:
+                print(f"[cleanup] Failed to remove temp dir {temp_dir}: {e}")
                 try:
                     shutil.rmtree(temp_dir, ignore_errors=True)
                 except Exception:
@@ -522,6 +514,26 @@ class PlayerController:
             if self.paused:
                 self.paused_at_time = now
         return current_time
+
+    def reload_soundfont(self, path):
+        if not path or not self.active_midi_backend:
+            return False
+        if not hasattr(self.active_midi_backend, 'load_soundfont'):
+            return False
+        try:
+            self.panic_all_notes_off()
+            stream = (self.active_midi_backend.decode_stream
+                      if getattr(self.active_midi_backend, 'buffering_enabled', False)
+                      else self.active_midi_backend.midi_stream)
+            if not stream:
+                return False
+            self.active_midi_backend.load_soundfont(stream, path)
+            self.config["audio"]["soundfont_path"] = path
+            self.save_config(self.config)
+            return True
+        except Exception as e:
+            print(f"Failed to reload soundfont: {e}")
+            return False
 
     def shutdown(self):
         self.playing = False

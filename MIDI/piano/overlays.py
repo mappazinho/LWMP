@@ -141,27 +141,50 @@ class OverlayMixin:
         key = (text, color)
         cached = self._text_texture_cache.get(key)
         if cached is not None:
+            self._text_cache_order.discard(key)
+            self._text_cache_order.add(key)
             return cached
-        if len(self._text_texture_cache) > 200:
-            self._text_texture_cache.clear()
+        if len(self._text_texture_cache) >= 500:
+            oldest = next(iter(self._text_cache_order))
+            old_tex_id = self._text_texture_cache.pop(oldest, (0,))[0]
+            if old_tex_id:
+                glDeleteTextures([old_tex_id])
+            self._text_cache_order.discard(oldest)
         surface = self.overlay_font.render(text, True, color)
         width, height = surface.get_size()
         image_data = pygame.image.tostring(surface, "RGBA", True)
-        self._text_texture_cache[key] = (image_data, width, height)
+        tex_id = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, tex_id)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, image_data)
+        glBindTexture(GL_TEXTURE_2D, 0)
+        self._text_texture_cache[key] = (tex_id, width, height)
+        self._text_cache_order.add(key)
         return self._text_texture_cache[key]
 
     def _draw_text_overlay(self, text, x, y, color=(225, 228, 235), alpha=1.0):
         tex_info = self._get_text_texture(text, color)
         if tex_info is None:
             return
-        pixel_data, width, height = tex_info
+        tex_id, width, height = tex_info
         glPushAttrib(GL_ENABLE_BIT)
         glEnable(GL_BLEND)
         glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-        glDisable(GL_TEXTURE_2D)
+        glActiveTexture(GL_TEXTURE0)
+        glEnable(GL_TEXTURE_2D)
+        glBindTexture(GL_TEXTURE_2D, tex_id)
         glColor4f(1.0, 1.0, 1.0, max(0.0, min(1.0, float(alpha))))
-        glWindowPos2i(int(x), int(self.height - y - height))
-        glDrawPixels(width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixel_data)
+        glBegin(GL_QUADS)
+        glTexCoord2f(0, 1); glVertex2f(x, y)
+        glTexCoord2f(1, 1); glVertex2f(x + width, y)
+        glTexCoord2f(1, 0); glVertex2f(x + width, y + height)
+        glTexCoord2f(0, 0); glVertex2f(x, y + height)
+        glEnd()
+        glDisable(GL_TEXTURE_2D)
+        glBindTexture(GL_TEXTURE_2D, 0)
         glPopAttrib()
 
     def _format_time_overlay(self, seconds):
