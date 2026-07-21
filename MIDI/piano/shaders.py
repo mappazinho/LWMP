@@ -232,10 +232,9 @@ void main() {
     }
 
     float grid_boost = 1.0 + v_is_grid * 1.5;
-    float body_gradient = mix(0.92 - v_is_grid * 0.08, 1.08 + v_is_grid * 0.12, pow(clamp(1.0 - v_pos.y, 0.0, 1.0), 1.3));
+
     float center_soft = 1.0 - abs(v_pos.x - 0.5) * 1.2;
     float center_gloss = clamp(center_soft, 0.0, 1.0) * 0.06 * grid_boost;
-    final_color.rgb *= body_gradient;
     final_color.rgb += v_fragColor * center_gloss;
 
 
